@@ -1,6 +1,4 @@
-//! Import the rest outline and sampled line topology from observed CLO PAC files.
-//! The archive reader never extracts entries. It does not load materials,
-//! avatars, sewing, simulation or other workbench state.
+//! Read the verified panel, sewing, materials, and stored mesh fields from CLO archives.
 
 use crate::compat_scene::patterns::Point;
 use serde_json::{json, Value};
@@ -9,8 +7,8 @@ use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use zip::ZipArchive;
 
-const ZPRJ: &[u8] = b" ZPRJ       CLO ";
-const ZPAC: &[u8; 16] = b" ZPAC       CLO ";
+pub(super) const ZPRJ: &[u8] = b" ZPRJ       CLO ";
+pub(super) const ZPAC: &[u8; 16] = b" ZPAC       CLO ";
 const NAME: &[u8] = b"qsNameUTF8";
 const CATEGORY: &[u8] = b"qsCategoryForDXFUTF8";
 const DYNAMICS: &[u8] = b"mapPatternDynamics";
@@ -21,7 +19,7 @@ const REST: &[u8] = b"baRest";
 const TRIANGLES: &[u8] = b"baTri";
 const BOUNDARY: &[u8] = b"listMeshPointList";
 const POINT_INDEX: &[u8] = b"uiMeshPointIndex";
-const ARCHIVE_LIMIT: u64 = 512 * 1024 * 1024;
+pub(super) const ARCHIVE_LIMIT: u64 = 512 * 1024 * 1024;
 const PAYLOAD_LIMIT: u64 = 256 * 1024 * 1024;
 const MAX_MEMBERS: usize = 4096;
 const MAX_PANELS: usize = 4096;
@@ -58,7 +56,7 @@ pub(super) fn consume(data: &[u8], cursor: &mut usize, marker: &[u8]) -> Result<
     }
 }
 
-fn open_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Result<ZipArchive<R>, String> {
+pub(super) fn open_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Result<ZipArchive<R>, String> {
     let mut prefix = [0u8; 16];
     reader
         .read_exact(&mut prefix)
@@ -125,7 +123,7 @@ fn optional_member<R: Read + Seek>(
     Ok(Some((name, bytes)))
 }
 
-fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Result<Vec<u8>, String> {
+pub(super) fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Result<Vec<u8>, String> {
     optional_member(archive, extension)?
         .map(|(_, bytes)| bytes)
         .ok_or_else(|| format!("missing .{extension} payload in native CLO archive"))

@@ -3,6 +3,7 @@ mod dxf;
 mod mesh;
 mod native_materials;
 mod native_pose;
+pub(super) mod native_save;
 mod native_seams;
 
 pub(super) use dxf::{read_dxf, write_dxf};

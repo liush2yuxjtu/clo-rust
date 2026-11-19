@@ -3,7 +3,7 @@
 use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
 use serde_json::{json, Value};
 
-const MAP_TYPE: u8 = 22;
+pub(super) const MAP_TYPE: u8 = 22;
 pub(super) const LIST_TYPE: u8 = 20;
 pub(super) const BYTE_TYPE: u8 = 15;
 const UINT_TYPE: u8 = 5;
@@ -15,7 +15,7 @@ struct Field<'a> {
     value: &'a [u8],
 }
 
-pub(super) struct Fields<'a>(Vec<Field<'a>>);
+pub(super) struct Fields<'a>(Vec<Field<'a>>, &'a [u8]);
 
 impl<'a> Fields<'a> {
     pub(super) fn read(data: &'a [u8]) -> Result<Self, String> {
@@ -33,7 +33,7 @@ impl<'a> Fields<'a> {
         if cursor != data.len() {
             return Err("unexpected bytes after native PAC map".into());
         }
-        Ok(Self(fields))
+        Ok(Self(fields, data))
     }
 
     pub(super) fn get(&self, name: &[u8], kind: u8) -> Result<&'a [u8], String> {
@@ -47,6 +47,36 @@ impl<'a> Fields<'a> {
                     String::from_utf8_lossy(name)
                 )
             })
+    }
+
+    pub(super) fn encoded(&self) -> &'a [u8] {
+        self.1
+    }
+
+    pub(super) fn replace(&self, name: &[u8], kind: u8, value: &[u8]) -> Result<Vec<u8>, String> {
+        self.get(name, kind)?;
+        let mut output = vec![self.0.len() as u8];
+        output.extend(self.0.iter().map(|field| field.name.len() as u8));
+        output.extend(self.0.iter().map(|field| field.kind));
+        let values = self.0.iter().map(|field| {
+            if field.name == name && field.kind == kind {
+                value
+            } else {
+                field.value
+            }
+        });
+        for bytes in values.clone() {
+            output.extend(
+                u32::try_from(bytes.len())
+                    .map_err(|_| "PAC map field exceeds the size limit")?
+                    .to_le_bytes(),
+            );
+        }
+        for (field, bytes) in self.0.iter().zip(values) {
+            output.extend(field.name);
+            output.extend(bytes);
+        }
+        Ok(output)
     }
 
     pub(super) fn map(&self, name: &[u8]) -> Result<Self, String> {

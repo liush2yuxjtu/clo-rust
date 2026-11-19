@@ -388,13 +388,7 @@ fn png(file: &mut fs::File, canvas: &Canvas) -> std::io::Result<()> {
     write_chunk(file, *b"IEND", &[])
 }
 
-fn make_image(
-    drawings: &[Drawing],
-    root: &PathBuf,
-    label: &str,
-    view: &str,
-    flat: bool,
-) -> Result<PathBuf, String> {
+fn render_canvas(drawings: &[Drawing], view: &str, flat: bool) -> Result<Canvas, String> {
     let camera = camera(view)?;
     let mut low = [f64::INFINITY; 2];
     let mut high = [f64::NEG_INFINITY; 2];
@@ -415,6 +409,17 @@ fn make_image(
             canvas.drawing(drawing, &camera, center, scale, flat)?;
         }
     }
+    Ok(canvas)
+}
+
+fn make_image(
+    drawings: &[Drawing],
+    root: &PathBuf,
+    label: &str,
+    view: &str,
+    flat: bool,
+) -> Result<PathBuf, String> {
+    let canvas = render_canvas(drawings, view, flat)?;
     let shape = if flat { "2d" } else { view };
     let label: String = label
         .chars()
@@ -445,6 +450,72 @@ fn make_image(
     Ok(path)
 }
 
+fn scene_drawings(
+    state: &Value,
+    flat: bool,
+    textures: &mut TextureCache,
+) -> Result<Vec<Drawing>, String> {
+    let mut drawings = Vec::new();
+    if !flat {
+        for avatar in std::iter::once(&state["avatar"]).chain(array(&state["additional_avatars"])) {
+            drawings.extend(
+                solver::avatar_geometry(avatar)
+                    .into_iter()
+                    .map(|(points, faces)| Drawing {
+                        points,
+                        faces,
+                        color: [190, 183, 177],
+                        texcoords: Vec::new(),
+                        texture: None,
+                    }),
+            );
+        }
+    }
+    drawings.extend(pieces(state, flat, textures)?);
+    if !flat {
+        for (index, mesh) in array(&state["imported_meshes"]).iter().enumerate() {
+            let mut drawing = Drawing::from_mesh(mesh)?;
+            textures.apply(state, &mesh["fabric_index"], index, &mut drawing);
+            drawings.push(drawing);
+        }
+    }
+    Ok(drawings)
+}
+
+pub(crate) fn native_previews(state: &Value) -> Result<Vec<u8>, String> {
+    const SIDE: usize = 500;
+    let [width, height] = SIZE;
+    let scale = (width.max(height) as f64) / SIDE as f64;
+    let margin_x = (SIDE as f64 - width as f64 / scale) / 2.0;
+    let margin_y = (SIDE as f64 - height as f64 / scale) / 2.0;
+    let drawings = scene_drawings(state, false, &mut TextureCache::default())?;
+    let mut output = Vec::new();
+    for view in ["right", "back", "left"] {
+        let canvas = render_canvas(&drawings, view, false)?;
+        let mut pixels = Vec::with_capacity(SIDE * SIDE * 3);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let cx = ((x as f64 - margin_x) * scale).floor() as isize;
+                let cy = ((y as f64 - margin_y) * scale).floor() as isize;
+                if (0..width as isize).contains(&cx) && (0..height as isize).contains(&cy) {
+                    let begin = (cy as usize * width + cx as usize) * 3;
+                    pixels.extend_from_slice(&canvas.pixels[begin..begin + 3]);
+                } else {
+                    pixels.extend_from_slice(&canvas.pixels[..3]);
+                }
+            }
+        }
+        let mut encoder = png::Encoder::new(&mut output, SIDE as u32, SIDE as u32);
+        encoder.set_color(png::ColorType::Rgb);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(&pixels)
+            .map_err(|error| error.to_string())?;
+        writer.finish().map_err(|error| error.to_string())?;
+    }
+    Ok(output)
+}
+
 pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String> {
     let defaults = if flat {
         vec!["2d"]
@@ -468,31 +539,8 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
         .join("snapshots");
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let mut drawings = Vec::new();
-    if !flat {
-        for avatar in std::iter::once(&state["avatar"]).chain(array(&state["additional_avatars"])) {
-            drawings.extend(
-                solver::avatar_geometry(avatar)
-                    .into_iter()
-                    .map(|(points, faces)| Drawing {
-                        points,
-                        faces,
-                        color: [190, 183, 177],
-                        texcoords: Vec::new(),
-                        texture: None,
-                    }),
-            );
-        }
-    }
     let mut textures = TextureCache::default();
-    drawings.extend(pieces(state, flat, &mut textures)?);
-    if !flat {
-        for (index, mesh) in array(&state["imported_meshes"]).iter().enumerate() {
-            let mut drawing = Drawing::from_mesh(mesh)?;
-            textures.apply(state, &mesh["fabric_index"], index, &mut drawing);
-            drawings.push(drawing);
-        }
-    }
+    let drawings = scene_drawings(state, flat, &mut textures)?;
     let mut images = Vec::new();
     for view in &views {
         match make_image(&drawings, &root, string(args, "label", "snap"), view, flat) {

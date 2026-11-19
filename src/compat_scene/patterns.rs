@@ -701,8 +701,20 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
         }
         _ => return Err(format!("unknown op {op:?}")),
     }
+    if op == "rename" {
+        if let Some(meshes) = state
+            .get_mut("simulation")
+            .and_then(|simulation| simulation.get_mut("meshes"))
+            .and_then(Value::as_array_mut)
+        {
+            for mesh in meshes.iter_mut().filter(|mesh| mesh["id"] == pattern["id"]) {
+                mesh["name"] = pattern["name"].clone();
+            }
+        }
+    } else {
+        invalidate_geometry(state);
+    }
     state["patterns"][i] = pattern;
-    invalidate_geometry(state);
     Ok(result)
 }
 

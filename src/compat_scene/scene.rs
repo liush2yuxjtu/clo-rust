@@ -55,6 +55,7 @@ fn clear_garment(state: &mut Value) {
         state[field] = json!([]);
     }
     state["garment_spec"] = Value::Null;
+    state.as_object_mut().expect("scene object").remove(formats::native_save::SOURCE);
     invalidate_geometry(state);
 }
 
@@ -94,6 +95,7 @@ fn recognized_state(content: Value) -> Result<Value, String> {
     let mut scene = state.clone();
     if let Some(object) = scene.as_object_mut() {
         object.remove("runtime");
+        object.remove(formats::native_save::SOURCE);
     }
     Ok(scene)
 }
@@ -300,7 +302,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             merge(state, &loaded, append)?;
             if append {
                 vec_mut(state, "fabrics").extend(fabrics);
-            } else if !fabrics.is_empty() {
+            } else {
                 state["fabrics"] = json!(fabrics);
             }
             let mut avatar_error = None;
@@ -318,9 +320,6 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                         Value::Null
                     }
                 };
-                if array(&loaded, "fabrics").is_empty() {
-                    state["fabrics"] = json!([]);
-                }
                 state["colorways"] = json!(["Colorway 1"]);
                 state["current_colorway"] = json!(0);
                 set_project(state, path);
@@ -328,6 +327,9 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             let pose = array(&loaded, "saved_pose");
             if !append && !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
+            }
+            if !append {
+                formats::native_save::remember(state, path, is_project);
             }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
@@ -383,6 +385,7 @@ fn saved(path: &Path, state: &Value) -> Result<(), String> {
     let mut project = state.clone();
     if let Some(object) = project.as_object_mut() {
         object.remove("runtime");
+        object.remove(formats::native_save::SOURCE);
     }
     formats::write_json(path, &json!({"format": SCENE_FORMAT, "scene": project}))
 }
@@ -391,7 +394,12 @@ pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     match extension(path).as_str() {
         "json" | "clorust" => saved(path, state)?,
-        "zprj" | "zpac" => return Err("native CLO project writing is unavailable in the Rust backend; use .clorust to save the Rust scene".into()),
+        ext @ ("zprj" | "zpac") => {
+            formats::native_save::save(path, state, ext == "zprj", flag(args, "thumbnail", true))?;
+            if ext == "zpac" {
+                return Ok(json!({"path": path}));
+            }
+        }
         ext => return Err(format!("unsupported project extension {ext:?}")),
     }
     set_project(state, path);
@@ -402,12 +410,14 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     let ext = extension(path);
     if flag(args, "colorways", false)
+        && !matches!(ext.as_str(), "zprj" | "zpac")
         && (!matches!(ext.as_str(), "obj" | "fbx" | "glb" | "gltf") || array(state, "colorways").len() > 1)
     {
         return Err("exporting colorways is supported for a single OBJ, FBX, GLB or glTF colorway".into());
     }
     match ext.as_str() {
-        "clorust" | "zprj" | "zpac" => return save(args, state),
+        "clorust" => return save(args, state),
+        "zprj" | "zpac" => return save(&json!({"path": path, "thumbnail": false}), state),
         "json" => {
             let (patterns, seams) = validate_garment(state)?;
             formats::write_json(
