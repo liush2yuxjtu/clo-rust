@@ -72,6 +72,39 @@ async def smoke_rust():
             path = str(Path(tmp) / "smoke.obj")
             await successful(session, "scene_export", {"path": path})
             assert Path(path).stat().st_size > 0
+            # Use named, independent triangle meshes with a nonzero height.
+            for index, name in enumerate(("first-avatar", "second-avatar")):
+                avatar = Path(tmp) / f"{name}.obj"
+                avatar.write_text("v 0 0 0\nv 10 0 0\nv 0 20 0\nf 1 2 3\n")
+                await successful(session, "avatar_load", {
+                    "name_or_path": str(avatar), "replace": index == 0,
+                })
+            for include_avatar, expected in (
+                (False, ["smoke-front"]),
+                (True, ["smoke-front", "first-avatar", "second-avatar"]),
+            ):
+                obj = Path(tmp) / f"avatars-{include_avatar}.obj"
+                await successful(session, "scene_export", {
+                    "path": str(obj), "include_avatar": include_avatar,
+                })
+                lines = obj.read_text().splitlines()
+                assert [line[2:] for line in lines if line.startswith("o ")] == expected
+                assert sum(line.startswith("f ") for line in lines) == len(expected)
+            with_mia = Path(tmp) / "with-mia.obj"
+            await successful(session, "avatar_load", {"name_or_path": "mia", "replace": False})
+            await successful(session, "scene_export", {
+                "path": str(with_mia), "include_avatar": True,
+            })
+            lines = with_mia.read_text().splitlines()
+            assert sum(line.startswith("o ") for line in lines) == 4
+            assert sum(line.startswith("f ") for line in lines) > 3
+
+            bad_path = Path(tmp) / "directory.obj"
+            bad_path.mkdir()
+            failed = await session.call_tool("scene_export", {
+                "path": str(bad_path), "include_avatar": True,
+            })
+            assert failed.isError and bad_path.is_dir()
         diagnostics = await json_result(
             session, "verify_seam", {"project_json": str(Path("samples/Carlton外层.pattern.json").resolve())}
         )

@@ -6,6 +6,7 @@ mod solver;
 mod texture;
 
 pub(crate) use assets::project_avatar;
+pub(crate) use solver::avatar_geometry;
 
 use serde_json::{json, Value};
 

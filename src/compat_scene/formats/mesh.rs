@@ -463,6 +463,26 @@ fn glb_encode(root: &Value, bin: Vec<u8>) -> Result<Vec<u8>, String> {
     Ok(file)
 }
 
+fn procedural_avatar_mesh(avatar: &Value) -> Result<Mesh, String> {
+    let mut mesh = Mesh {
+        id: avatar["id"].clone(),
+        name: avatar["name"].as_str().unwrap_or("Avatar").to_owned(),
+        positions: Vec::new(),
+        triangles: Vec::new(),
+    };
+    for (positions, triangles) in crate::compat_fit::avatar_geometry(avatar) {
+        let offset = mesh.positions.len();
+        for [a, b, c] in triangles {
+            let index = |i| {
+                u32::try_from(offset + i).map_err(|_| "avatar mesh index exceeds u32".to_owned())
+            };
+            mesh.triangles.push([index(a)?, index(b)?, index(c)?]);
+        }
+        mesh.positions.extend(positions);
+    }
+    Ok(mesh)
+}
+
 pub(in crate::compat_scene) fn write_mesh(
     path: &Path,
     format: &str,
@@ -497,22 +517,30 @@ pub(in crate::compat_scene) fn write_mesh(
                 .map_err(|error| format!("invalid imported mesh: {error}"))?,
         );
     }
-    if include_avatar && !state["avatar"].is_null() {
-        let avatar = &state["avatar"];
-        if let Some(mesh) = avatar.get("mesh") {
-            meshes.push(
-                serde_json::from_value(mesh.clone())
-                    .map_err(|error| format!("invalid avatar mesh: {error}"))?,
-            );
-        } else if let Some(avatar_path) = avatar["path"].as_str() {
-            for mesh in read_mesh(Path::new(avatar_path))? {
-                meshes.push(
-                    serde_json::from_value(mesh)
-                        .map_err(|error| format!("invalid avatar mesh: {error}"))?,
-                );
+    if include_avatar {
+        for avatar in std::iter::once(&state["avatar"])
+            .chain(array(state, "additional_avatars"))
+            .filter(|avatar| !avatar.is_null())
+        {
+            if let Some(mesh) = avatar.get("mesh") {
+                let mut mesh: Mesh = serde_json::from_value(mesh.clone())
+                    .map_err(|error| format!("invalid avatar mesh: {error}"))?;
+                if mesh.name.is_empty() {
+                    mesh.name = avatar["name"].as_str().unwrap_or("Avatar").to_owned();
+                }
+                meshes.push(mesh);
+            } else if let Some(avatar_path) = avatar["path"].as_str() {
+                for mesh in read_mesh(Path::new(avatar_path))? {
+                    meshes.push(
+                        serde_json::from_value(mesh)
+                            .map_err(|error| format!("invalid avatar mesh: {error}"))?,
+                    );
+                }
+            } else if avatar["source"] == "rust_procedural_proxy" {
+                meshes.push(procedural_avatar_mesh(avatar)?);
+            } else {
+                return Err("the loaded avatar has no exportable triangle mesh".into());
             }
-        } else {
-            return Err("the loaded avatar has no exportable triangle mesh".into());
         }
     }
     if meshes.is_empty() {
