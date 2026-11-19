@@ -10,7 +10,7 @@ use std::path::Path;
 use zip::ZipArchive;
 
 const ZPRJ: &[u8] = b" ZPRJ       CLO ";
-const ZPAC: &[u8] = b" ZPAC       CLO ";
+const ZPAC: &[u8; 16] = b" ZPAC       CLO ";
 const NAME: &[u8] = b"qsNameUTF8";
 const CATEGORY: &[u8] = b"qsCategoryForDXFUTF8";
 const DYNAMICS: &[u8] = b"mapPatternDynamics";
@@ -28,22 +28,26 @@ const MAX_PANELS: usize = 4096;
 const MAX_COORDS: usize = 2_000_000;
 const MAX_OUTLINE_POINTS: usize = 1_000_000;
 
-fn find(data: &[u8], marker: &[u8]) -> Option<usize> {
+pub(super) fn find(data: &[u8], marker: &[u8]) -> Option<usize> {
     data.windows(marker.len()).position(|part| part == marker)
 }
 
-fn take<'a>(data: &'a [u8], cursor: &mut usize, size: usize) -> Result<&'a [u8], String> {
+pub(super) fn take<'a>(
+    data: &'a [u8],
+    cursor: &mut usize,
+    size: usize,
+) -> Result<&'a [u8], String> {
     let end = cursor.checked_add(size).ok_or("PAC offset overflow")?;
     let selected = data.get(*cursor..end).ok_or("truncated PAC field")?;
     *cursor = end;
     Ok(selected)
 }
 
-fn uint(data: &[u8], cursor: &mut usize) -> Result<usize, String> {
+pub(super) fn uint(data: &[u8], cursor: &mut usize) -> Result<usize, String> {
     Ok(u32::from_le_bytes(take(data, cursor, 4)?.try_into().unwrap_or_default()) as usize)
 }
 
-fn consume(data: &[u8], cursor: &mut usize, marker: &[u8]) -> Result<(), String> {
+pub(super) fn consume(data: &[u8], cursor: &mut usize, marker: &[u8]) -> Result<(), String> {
     if take(data, cursor, marker.len())? == marker {
         Ok(())
     } else {
@@ -114,22 +118,31 @@ fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Resul
     Ok(bytes)
 }
 
-fn package(path: &Path, project: bool) -> Result<Vec<u8>, String> {
+fn bounded_file(path: &Path) -> Result<std::io::BufReader<File>, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     if size > ARCHIVE_LIMIT {
         return Err("native CLO file exceeds 512 MiB".into());
     }
-    let reader = std::io::BufReader::new(file);
-    if project {
-        let mut outer = open_archive(reader, ZPRJ)?;
-        let garment = member(&mut outer, "zpac")?;
-        let mut inner = open_archive(Cursor::new(garment), ZPAC)?;
-        member(&mut inner, "pac")
-    } else {
-        let mut outer = open_archive(reader, ZPAC)?;
-        member(&mut outer, "pac")
+    Ok(std::io::BufReader::new(file))
+}
+
+pub(in crate::compat_scene) fn read_member(
+    path: &Path,
+    header: &[u8; 16],
+    extension: &str,
+) -> Result<Vec<u8>, String> {
+    member(&mut open_archive(bounded_file(path)?, header)?, extension)
+}
+
+fn package(path: &Path, project: bool) -> Result<Vec<u8>, String> {
+    if !project {
+        return crate::compat_scene::read_native_archive_member(path, ZPAC, "pac");
     }
+    let mut outer = open_archive(bounded_file(path)?, ZPRJ)?;
+    let garment = member(&mut outer, "zpac")?;
+    let mut inner = open_archive(Cursor::new(garment), ZPAC)?;
+    member(&mut inner, "pac")
 }
 
 struct NamedPanel<'a> {
@@ -138,7 +151,11 @@ struct NamedPanel<'a> {
     name: &'a str,
 }
 
-fn token<'a>(data: &'a [u8], marker: &[u8], max_length: usize) -> Option<(&'a str, usize)> {
+pub(super) fn token<'a>(
+    data: &'a [u8],
+    marker: &[u8],
+    max_length: usize,
+) -> Option<(&'a str, usize)> {
     let end = find(&data[..data.len().min(max_length + marker.len())], marker)?;
     let text = std::str::from_utf8(&data[..end]).ok()?;
     if text.chars().any(char::is_control) {
@@ -175,7 +192,7 @@ fn panel_tags(data: &[u8]) -> Result<Vec<NamedPanel<'_>>, String> {
     Ok(result)
 }
 
-fn sized_list<'a>(
+pub(super) fn sized_list<'a>(
     data: &'a [u8],
     cursor: &mut usize,
     item_code: u8,
@@ -188,7 +205,7 @@ fn sized_list<'a>(
     Ok((take(data, cursor, count * 4)?, count))
 }
 
-fn sizes(table: &[u8]) -> impl Iterator<Item = usize> + '_ {
+pub(super) fn sizes(table: &[u8]) -> impl Iterator<Item = usize> + '_ {
     table
         .chunks_exact(4)
         .map(|entry| u32::from_le_bytes(entry.try_into().unwrap_or_default()) as usize)
@@ -311,6 +328,7 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         return Err("native PAC has no recognized editable panel records".into());
     }
     let mut patterns = Vec::new();
+    let mut edge_counts = Vec::new();
     let (mut rest_vertices, mut triangles) = (0usize, 0usize);
     for (i, panel) in tags.iter().enumerate() {
         let end = tags.get(i + 1).map_or(pac.len(), |r| r.start);
@@ -321,13 +339,21 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         }
         rest_vertices += verts;
         triangles += faces;
+        edge_counts.push(points.iter().filter(|point| point.get(2).is_none()).count());
         patterns.push(json!({
             "id": i + 1, "name": panel.name, "points": points, "sampled_polyline": true, "arrangement": "", "fabric_index": 0
         }));
     }
+    let sewing = super::native_seams::read(pac, &edge_counts)?;
+    let native_import = json!({
+        "rest_vertices_validated": rest_vertices, "rest_triangles_validated": triangles,
+        "seam_groups_recovered": sewing.annotations.len(),
+        "full_edge_seams_restored": sewing.constraints.len(),
+        "unreadable_seam_records": sewing.unreadable
+    });
     Ok(json!({
-        "patterns": patterns, "seams": [],
-        "native_import": {"rest_vertices_validated": rest_vertices, "rest_triangles_validated": triangles}
+        "patterns": patterns, "seams": sewing.constraints,
+        "native_seam_groups": sewing.annotations, "native_import": native_import
     }))
 }
 

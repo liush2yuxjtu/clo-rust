@@ -264,13 +264,7 @@ pub(super) fn pattern_index(state: &Value, reference: &Value) -> Result<usize, S
 }
 
 fn group_indices(state: &Value, pattern: &Value) -> Vec<usize> {
-    array(state, "seams")
-        .iter()
-        .enumerate()
-        .filter_map(|(i, seam)| {
-            (seam["pattern_a"] == pattern["id"] || seam["pattern_b"] == pattern["id"]).then_some(i)
-        })
-        .collect()
+    super::annotations::indices(state, &pattern["id"])
 }
 
 fn arrangement<'a>(state: &'a Value, name: &str) -> Result<(usize, &'a Value), String> {
@@ -316,7 +310,7 @@ pub(super) fn list(args: &Value, state: &mut Value) -> Reply {
         results.push(entry);
     }
     Ok(
-        json!({"count": results.len(), "patterns": results, "seam_groups": array(state, "seams").len()}),
+        json!({"count": results.len(), "patterns": results, "seam_groups": super::annotations::count(state)}),
     )
 }
 
@@ -409,6 +403,7 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
         .map(|i| state["patterns"][i]["id"].clone())
         .collect();
     if !removed.is_empty() {
+        super::annotations::remove_metadata_for(state, &removed);
         vec_mut(state, "seams")
             .retain(|s| !removed.contains(&s["pattern_a"]) && !removed.contains(&s["pattern_b"]));
         for i in indices.iter().rev() {
@@ -649,6 +644,9 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                     .filter(|s| s["pattern_a"] == old_id || s["pattern_b"] == old_id)
                     .cloned()
                     .map(|mut seam| {
+                        if let Some(record) = seam.as_object_mut() {
+                            record.remove("native_group");
+                        }
                         for key in ["pattern_a", "pattern_b"] {
                             if seam[key] == old_id {
                                 seam[key] = id.clone();
@@ -672,6 +670,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             let count = corner_offsets(&points(&pattern)?).len();
             expand(&mut pattern, fold, flag(args, "half_symmetry", true))?;
             pattern["line_properties"] = Value::Null;
+            super::annotations::remove_metadata_for(state, &[id.clone()]);
             let first = (fold + 1) % count;
             remap_seams(state, &id, |line| {
                 (line != fold).then(|| (line + count - first) % count)
@@ -694,6 +693,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             let corner = index(args, if op == "delete_line" { "line" } else { "point" })?;
             let count = corner_offsets(&points(&pattern)?).len();
             remove_point(&mut pattern, corner)?;
+            super::annotations::remove_metadata_for(state, &[pattern["id"].clone()]);
             let before = (corner + count - 1) % count;
             remap_seams(state, &pattern["id"], |line| {
                 (line != corner && line != before).then(|| line - usize::from(line > corner))
@@ -711,7 +711,7 @@ pub(super) fn sew(args: &Value, state: &mut Value) -> Reply {
     let ib = pattern_index(state, &args["pattern_b"])?;
     let la = index(args, "line_a")?;
     let lb = index(args, "line_b")?;
-    let count = array(state, "seams").len();
+    let count = super::annotations::count(state);
     if la >= lines(&state["patterns"][ia])?.len()
         || lb >= lines(&state["patterns"][ib])?.len()
         || (ia == ib && la == lb)
@@ -741,19 +741,5 @@ pub(super) fn sew(args: &Value, state: &mut Value) -> Reply {
 }
 
 pub(super) fn seams(_: &Value, state: &mut Value) -> Reply {
-    let groups: Vec<_> = array(state, "seams")
-        .iter()
-        .enumerate()
-        .map(|(i, seam)| {
-            let names: Vec<_> = array(state, "patterns")
-                .iter()
-                .filter(|pattern| {
-                    pattern["id"] == seam["pattern_a"] || pattern["id"] == seam["pattern_b"]
-                })
-                .map(|pattern| &pattern["name"])
-                .collect();
-            json!({"index": i, "name": seam["name"], "patterns": names})
-        })
-        .collect();
-    Ok(json!({"count": groups.len(), "groups": groups}))
+    Ok(super::annotations::list(state))
 }

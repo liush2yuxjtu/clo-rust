@@ -1,8 +1,17 @@
+mod annotations;
 mod formats;
 mod patterns;
 mod scene;
 
 use serde_json::{json, Value};
+
+pub(crate) fn read_native_archive_member(
+    path: &std::path::Path,
+    header: &[u8; 16],
+    extension: &str,
+) -> Result<Vec<u8>, String> {
+    formats::clo_native::read_member(path, header, extension)
+}
 
 type Reply = Result<Value, String>;
 

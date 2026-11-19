@@ -42,9 +42,12 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
   官方后端的返回内容及错误直接透传。
 
 48 项工具的接口已登记，行为兼容性需要逐项核实。Rust 端当前可从已验证的
-`.zprj` 和 `.zpac` 工程中读取纸样轮廓。此类导入会返回 `partial`
-及明确的缺项。使用 `.clorust` 保存 Rust 工程。PNG 基础贴图可用于 2D
-和 3D 快照。完整原生工程写回、求解器一致性和全部底层 CLO API 仍有差异。
+`.zprj` 和 `.zpac` 工程中读取纸样轮廓、缝合组及其区间。能转换的完整裁片边
+会建立 Rust 缝线。此类导入会返回 `partial` 及明确的缺项。
+`avatar_load` 可读取 `.avt` 的静态网格和排布点。可用 `CLO_RUST_AVATAR_DIR`
+指定本地人台库。骨骼动作和原生量体校准尚未包含。
+使用 `.clorust` 保存 Rust 工程。PNG 基础贴图可用于 2D 和 3D 快照。
+完整原生工程写回、求解器一致性和全部底层 CLO API 仍有差异。
 
 如需设置环境变量，在注册命令中加入 `--env NAME=VALUE`，放在 `--` 前。也可以在 MCP 客户端配置中设置同名环境变量。用 `CLO_RUST_OUTPUT_DIR` 指定本机结果目录，服务会为每次执行创建独立子目录。
 

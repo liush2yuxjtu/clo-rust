@@ -1,4 +1,4 @@
-use super::{array, array_mut, boolean, number, pattern_index, string, texture::BaseTexture};
+use super::{array, array_mut, avt, boolean, number, pattern_index, string, texture::BaseTexture};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -149,15 +149,91 @@ fn avatar_library() -> Vec<String> {
         "mia".into(),
         "oliver".into(),
     ];
-    if let Ok(root) = std::env::var("CLO_RUST_AVATAR_DIR") {
-        result.extend(
-            files(&root, &["obj", "glb"])
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned()),
-        );
+    result.extend(
+        configured_avatar_paths()
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned()),
+    );
+    result.sort();
+    result
+}
+
+fn configured_avatar_paths() -> Vec<PathBuf> {
+    const MAX_ASSETS: usize = 2048;
+    fn visit(directory: &Path, depth: usize, remaining: &mut usize, paths: &mut Vec<PathBuf>) {
+        if depth == 0 || *remaining == 0 {
+            return;
+        }
+        for entry in fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+        {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if *remaining == 0 {
+                break;
+            }
+            *remaining -= 1;
+            let path = entry.path();
+            if kind.is_dir() {
+                visit(&path, depth - 1, remaining, paths);
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| {
+                        ["obj", "glb", "avt"]
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(ext))
+                    })
+            {
+                paths.push(path);
+            }
+        }
+    }
+    let mut result = Vec::new();
+    if let Some(dir) = std::env::var_os("CLO_RUST_AVATAR_DIR") {
+        let mut remaining = MAX_ASSETS;
+        visit(Path::new(&dir), 5, &mut remaining, &mut result);
     }
     result.sort();
     result
+}
+
+fn native_alias_stem(alias: &str) -> &str {
+    match alias {
+        "mia" => "FV2.1_Mia",
+        "luka" => "MV2.1_Luka",
+        "female mannequin" => "FV2.1_Mannequin",
+        "male mannequin" => "MV2.1_Mannequin",
+        "melody" => "KV1.1G_Melody_(7-20)",
+        "oliver" => "KV1.1B_Oliver_(7-20)",
+        _ => alias,
+    }
+}
+
+fn avatar_lookup(reference: &str, alias: Option<&str>) -> Option<PathBuf> {
+    let direct = PathBuf::from(reference);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    configured_avatar_paths().into_iter().find(|path| {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case(reference))
+            || path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|stem| {
+                    stem.eq_ignore_ascii_case(reference)
+                        || alias.is_some_and(|alias| {
+                            stem.eq_ignore_ascii_case(alias)
+                                || stem.eq_ignore_ascii_case(native_alias_stem(alias))
+                        })
+                })
+    })
 }
 
 fn files(root: &str, types: &[&str]) -> Vec<PathBuf> {
@@ -189,7 +265,13 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("avatar");
+    let mut rest_details = None;
     let (mut points, faces) = match extension.as_str() {
+        "avt" => {
+            let rest=avt::read(&path)?;
+            rest_details=Some((rest.part_count,rest.arrangements));
+            (rest.points,rest.triangles)
+        }
         "obj" => avatar_obj(&path)?,
         "glb" => {
             let model = gltf::Gltf::open(&path).map_err(|e| format!("invalid avatar GLB: {e}"))?;
@@ -200,7 +282,7 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
             let mesh = crate::avatar::load_selected(path.to_str().ok_or("avatar path is not UTF-8")?, &names, "m")?;
             (mesh.points, mesh.faces)
         }
-        _ => return Err(format!("avatar format .{extension} is unavailable on the Rust backend; use an OBJ in millimetres or named-mesh GLB in metres")),
+        _ => return Err(format!("avatar format .{extension} is unavailable on the Rust backend; use a supported static AVT, an OBJ in millimetres, or a named-mesh GLB in metres")),
     };
     let ymin = points.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
     let ymax = points
@@ -221,10 +303,12 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
     if !(1.0..=5000.0).contains(&height) {
         return Err("avatar height is out of the supported millimetre range".into());
     }
-    for point in &mut points {
-        point[0] -= (xmin + xmax) / 2.0;
-        point[1] -= ymin;
-        point[2] -= (zmin + zmax) / 2.0;
+    if rest_details.is_none() {
+        for point in &mut points {
+            point[0] -= (xmin + xmax) / 2.0;
+            point[1] -= ymin;
+            point[2] -= (zmin + zmax) / 2.0;
+        }
     }
     let mut body = scaled_body(height, height / 1755.0, "rust_mesh_estimate");
     for (measurement, height_key) in [
@@ -234,15 +318,35 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         ("high_hip", "h_high_hip"),
         ("hip", "h_hip"),
     ] {
-        let level = body[height_key].as_f64().unwrap();
+        let floor = if rest_details.is_some() { ymin } else { 0.0 };
+        let level = body[height_key].as_f64().unwrap() + floor;
         if let Some(circumference) = mesh_section(&points, &faces, level) {
             body[measurement] = json!(circumference);
         }
     }
-    Ok(json!({
+    let mut avatar = json!({
         "id":name,"name":name,"path":path,"source":"rust_mesh_estimate","body":body,
         "arrangement_points":POINTS,"mesh":{"positions":points,"triangles":faces}
-    }))
+    });
+    if let Some((parts, names)) = rest_details {
+        avatar["source"] = json!("clo_avt_rest");
+        avatar["measurement_source"] = json!("rust_mesh_estimate");
+        avatar["rest_geometry"] = json!({
+            "parts":parts,"vertices":points.len(),"triangles":faces.len(),
+            "bounds_mm":[[xmin,ymin,zmin],[xmax,ymax,zmax]]
+        });
+        let mut warnings=vec![
+            "Loaded saved AVT rest geometry only. Native skinning, posing, and avatar textures are unavailable.",
+            "Body measurements are estimated. The CPU cloth solver uses an analytic collision proxy.",
+        ];
+        if names.is_empty() {
+            warnings.push("Native arrangement names are unavailable. Using built-in names.");
+        } else {
+            avatar["arrangement_points"] = json!(names);
+        }
+        avatar["warnings"] = json!(warnings);
+    }
+    Ok(avatar)
 }
 
 fn mesh_section(points: &[[f64; 3]], faces: &[[usize; 3]], y: f64) -> Option<f64> {
@@ -355,8 +459,14 @@ pub fn avatar_list(state: &Value) -> Value {
 pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     let reference = string(args, "name_or_path", "mia");
     let alias = reference.trim().to_ascii_lowercase();
-    let avatar = if let Some((_, name)) = AVATARS.iter().find(|(from, _)| *from == alias) {
-        let (height, girth) = match *name {
+    let canonical = AVATARS
+        .iter()
+        .find(|(from, _)| *from == alias)
+        .map(|(_, name)| *name);
+    let avatar = if let Some(path) = avatar_lookup(reference, canonical) {
+        avatar_from_path(&path)?
+    } else if let Some(name) = canonical {
+        let (height, girth) = match name {
             "luka" | "male mannequin" => (1820.0, 1.17),
             "melody" => (1370.0, 0.74),
             "oliver" => (1400.0, 0.77),
@@ -364,25 +474,14 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
         };
         json!({"id":name,"name":name,"source":"rust_procedural_proxy","body":scaled_body(height,girth,"rust_procedural_proxy"),"arrangement_points":POINTS})
     } else {
-        let raw_path = PathBuf::from(reference);
-        let resolved = if raw_path.is_file() {
-            Some(raw_path)
-        } else if let Ok(dir) = std::env::var("CLO_RUST_AVATAR_DIR") {
-            files(&dir, &["obj", "glb"]).into_iter().find(|p| {
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.eq_ignore_ascii_case(reference))
-                    || p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .is_some_and(|s| s.eq_ignore_ascii_case(reference))
-            })
-        } else {
-            None
-        };
-        avatar_from_path(&resolved.ok_or_else(|| format!("no avatar matching {reference:?}"))?)?
+        return Err(format!("no avatar matching {reference:?}"));
     };
-    let result =
+    let mut result =
         json!({"ok":true,"avatar":avatar["name"],"path":avatar["path"],"source":avatar["source"]});
+    if avatar["source"] == "clo_avt_rest" {
+        result["rest_geometry"] = avatar["rest_geometry"].clone();
+        result["warnings"] = avatar["warnings"].clone();
+    }
     if boolean(args, "replace", true) || state["avatar"].is_null() {
         state["avatar"] = avatar;
         state["additional_avatars"] = json!([]);
@@ -391,6 +490,14 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     state["simulation"] = Value::Null;
     Ok(result)
+}
+
+pub(super) fn measurement_source(avatar: &Value) -> &str {
+    string(
+        avatar,
+        "measurement_source",
+        string(avatar, "source", "rust_scene"),
+    )
 }
 
 pub fn avatar_measurements(args: &Value, state: &mut Value) -> Result<Value, String> {
@@ -404,7 +511,7 @@ pub fn avatar_measurements(args: &Value, state: &mut Value) -> Result<Value, Str
     if avatar.is_null() {
         return Err("no avatar in the scene; call avatar_load first".into());
     }
-    Ok(json!({"avatar":avatar["name"],"source":avatar["source"],"body":avatar["body"]}))
+    Ok(json!({"avatar":avatar["name"],"source":measurement_source(avatar),"body":avatar["body"]}))
 }
 
 pub fn arrangement_points(state: &Value) -> Result<Value, String> {

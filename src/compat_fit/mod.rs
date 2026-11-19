@@ -1,4 +1,5 @@
 mod assets;
+mod avt;
 mod draft;
 mod render;
 mod solver;

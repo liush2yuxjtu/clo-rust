@@ -900,7 +900,7 @@ pub fn preview(args: &Value, state: &Value) -> Result<Value, String> {
         }
         (
             &state["avatar"]["body"],
-            string(&state["avatar"], "source", "rust_scene"),
+            assets::measurement_source(&state["avatar"]),
         )
     } else {
         defaults = assets::default_body();
@@ -943,7 +943,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             &mut next,
         )?;
     }
-    let source = string(&next["avatar"], "source", "rust_scene").to_owned();
+    let source = assets::measurement_source(&next["avatar"]).to_owned();
     let draft = plan(&spec, &next["avatar"]["body"], &source)?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {

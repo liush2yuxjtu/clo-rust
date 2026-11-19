@@ -45,14 +45,14 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
         "avatars": avatar_names(state), "fabric_count": fabrics.len(), "fabrics": fabrics,
         "colorways": state.get("colorways").cloned().unwrap_or_else(|| json!(["Colorway 1"])),
         "current_colorway": state["current_colorway"].as_u64().unwrap_or(0),
-        "seam_groups": array(state, "seams").len(),
+        "seam_groups": super::annotations::count(state),
         "temp_folder": env::temp_dir(),
         "asset_folder": env::var_os("CLO_RUST_ASSET_DIR").map(PathBuf::from)
     }))
 }
 
 fn clear_garment(state: &mut Value) {
-    for field in ["patterns", "seams", "imported_meshes"] {
+    for field in ["patterns", "seams", "native_seam_groups", "imported_meshes"] {
         state[field] = json!([]);
     }
     state["garment_spec"] = Value::Null;
@@ -140,6 +140,7 @@ fn validate_garment(content: &Value) -> Result<(&[Value], &[Value]), String> {
             }
         }
     }
+    super::annotations::validate(content, pieces, seams)?;
     Ok((pieces, seams))
 }
 
@@ -149,6 +150,7 @@ fn merge(state: &mut Value, incoming: &Value, append: bool) -> Result<(), String
         clear_garment(state);
         state["patterns"] = Value::Array(pieces.to_vec());
         state["seams"] = Value::Array(seams.to_vec());
+        state["native_seam_groups"] = json!(array(incoming, "native_seam_groups"));
         return Ok(());
     }
     let next = super::next_id(state)?;
@@ -163,14 +165,26 @@ fn merge(state: &mut Value, incoming: &Value, append: bool) -> Result<(), String
         new_pattern["id"] = json!(new_id);
         additions.push(new_pattern);
     }
+    let remap_id = |id: &Value| -> Result<Value, String> {
+        ids.get(&id_key(id)?)
+            .cloned()
+            .ok_or_else(|| "seam refers to an unknown panel".to_string())
+    };
+    let (groups, group_ids) = super::annotations::remap(state, incoming, remap_id)?;
     let mut joins = Vec::with_capacity(seams.len());
     for seam in seams {
         let mut new_seam = seam.clone();
         for key in ["pattern_a", "pattern_b"] {
-            new_seam[key] = ids[&id_key(&seam[key])?].clone();
+            new_seam[key] = remap_id(&seam[key])?;
+        }
+        if let Some(id) = seam["native_group"].as_u64() {
+            new_seam["native_group"] = json!(group_ids
+                .get(&id)
+                .ok_or("missing appended native seam group")?);
         }
         joins.push(new_seam);
     }
+    vec_mut(state, "native_seam_groups").extend(groups);
     vec_mut(state, "patterns").extend(additions);
     vec_mut(state, "seams").extend(joins);
     invalidate_geometry(state);
@@ -239,7 +253,8 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             reply["native_import"] = loaded["native_import"].clone();
             reply["warnings"] = json!([
                 "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.",
-                "Native sewing, fabric assignments, avatars, arrangement and draped simulation were not imported."
+                "Native fabric assignments, avatars, arrangement and draped simulation were not imported.",
+                "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list."
             ]);
             return Ok(reply);
         }
@@ -286,7 +301,7 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
             let (patterns, seams) = validate_garment(state)?;
             formats::write_json(
                 path,
-                &json!({"format": PATTERN_FORMAT, "units": "mm", "patterns": patterns, "seams": seams}),
+                &json!({"format": PATTERN_FORMAT, "units": "mm", "patterns": patterns, "seams": seams, "native_seam_groups": array(state, "native_seam_groups")}),
             )?;
         }
         "dxf" => formats::write_dxf(path, array(state, "patterns"))?,
