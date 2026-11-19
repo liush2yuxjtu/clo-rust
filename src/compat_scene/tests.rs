@@ -152,7 +152,16 @@ fn export_import_formats_use_geometry_and_append_remaps_ids() {
     for ext in ["obj", "glb", "gltf"] {
         let path = root.0.join(format!("piece.{ext}"));
         let exported = tool(&mut state, "scene_export", json!({"path":path}));
-        assert_eq!(exported["result"], json!([path]));
+        assert_eq!(exported["result"][0], json!(path));
+        if ext == "obj" {
+            assert_eq!(exported["result"].as_array().unwrap().len(), 2);
+            let mtl = std::path::Path::new(exported["result"][1].as_str().unwrap());
+            assert_eq!(mtl.parent(), path.parent());
+            assert_eq!(mtl.extension().unwrap(), "mtl");
+            assert!(mtl.is_file());
+        } else {
+            assert_eq!(exported["result"], json!([path]));
+        }
         if ext == "gltf" {
             let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             assert_eq!(data["accessors"][0]["max"], json!([100., 50., 0.]));

@@ -64,7 +64,7 @@ def read_gltf_export(path):
     return model, base64.b64decode(model["buffers"][0]["uri"].split(",", 1)[1])
 
 
-async def check_gltf_material_export(session, directory, png):
+async def check_material_export(session, directory, png):
     output = Path(directory) / "material.glb"
     fabric = await json_result(session, "fabric_apply", {
         "fabric": "cotton", "color": "#336699", "patterns": ["smoke-front"],
@@ -98,9 +98,39 @@ async def check_gltf_material_export(session, directory, png):
         offset = view.get("byteOffset", 0)
         assert data[offset:offset + view["byteLength"]] == png
 
+    obj = Path(directory) / "textured.obj"
+    obj_args = {"path": str(obj), "colorways": True, "include_avatar": True}
+    result = await json_result(session, "scene_export", obj_args)
+    assert result["path"] == result["result"][0] == str(obj)
+    assert len(result["result"]) == 2
+    material_file = Path(result["result"][1])
+    assert material_file.parent == obj.parent and material_file.suffix == ".mtl"
+    object_bytes = obj.read_bytes()
+    lines = object_bytes.decode().splitlines()
+    assert f"mtllib {material_file.name}" in lines
+    assert lines.count("usemtl material_0") == 1
+    assert sum(line.startswith("vt ") for line in lines) == 3
+    face = next(line for line in lines if line.startswith("f "))
+    assert {vertex for vertex in face.split()[1:]} == {"1/1", "2/2", "3/3"}
+    material_bytes = material_file.read_bytes()
+    material_lines = material_bytes.decode().splitlines()
+    assert "newmtl material_0" in material_lines and "Kd 0.2 0.4 0.6" in material_lines
+    image_name = next(line.removeprefix("map_Kd ") for line in material_lines if line.startswith("map_Kd "))
+    assert (material_file.parent / image_name).read_bytes() == png
+
+    forbidden = Path(directory) / "blocked.obj"
+    forbidden.mkdir()
+    files = set(Path(directory).iterdir())
+    rejected = await session.call_tool("scene_export", {"path": str(forbidden)})
+    assert rejected.isError and set(Path(directory).iterdir()) == files
+
     source.unlink()
     failed = await session.call_tool("scene_export", args)
     assert failed.isError and output.read_bytes() == raw
+    files = set(Path(directory).iterdir())
+    failed = await session.call_tool("scene_export", obj_args)
+    assert failed.isError and set(Path(directory).iterdir()) == files
+    assert obj.read_bytes() == object_bytes and material_file.read_bytes() == material_bytes
 
 
 async def smoke_rust():
@@ -158,7 +188,7 @@ async def smoke_rust():
             })
             assert failed.isError and bad_path.is_dir()
             png = base64.b64decode(next(block.data for block in image.content if block.type == "image"))
-            await check_gltf_material_export(session, tmp, png)
+            await check_material_export(session, tmp, png)
         diagnostics = await json_result(
             session, "verify_seam", {"project_json": str(Path("samples/Carlton外层.pattern.json").resolve())}
         )

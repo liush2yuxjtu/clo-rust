@@ -1,3 +1,5 @@
+mod obj_export;
+
 use super::{
     super::{array, flag, patterns},
     write,
@@ -5,9 +7,8 @@ use super::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
 struct Mesh {
@@ -37,6 +38,19 @@ impl Mesh {
         {
             return Err(format!(
                 "mesh {:?} has invalid coordinates or indices",
+                self.name
+            ));
+        }
+        if !self.texcoords.is_empty()
+            && (self.texcoords.len() != self.positions.len()
+                || self
+                    .texcoords
+                    .iter()
+                    .flatten()
+                    .any(|coord| !coord.is_finite()))
+        {
+            return Err(format!(
+                "mesh {:?} has invalid texture coordinates",
                 self.name
             ));
         }
@@ -424,6 +438,16 @@ fn layout_mesh(pattern: &Value) -> Result<Mesh, String> {
     })
 }
 
+fn fabric_base_color(fabric: &Value) -> [f64; 4] {
+    let rgb: [f64; 3] = serde_json::from_value(fabric["color"].clone()).unwrap_or([1.0; 3]);
+    let alpha = fabric["rgba"]
+        .as_array()
+        .and_then(|rgba| rgba.get(3))
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    [rgb[0], rgb[1], rgb[2], alpha].map(|value| value.clamp(0.0, 1.0))
+}
+
 fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), String> {
     let mut bin = Vec::new();
     let mut views = Vec::new();
@@ -465,12 +489,6 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
         views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": bin.len() - start, "target": 34963}));
         let mut attributes = json!({"POSITION": position_accessor});
         if !mesh.texcoords.is_empty() {
-            if mesh.texcoords.len() != mesh.positions.len() {
-                return Err(format!(
-                    "mesh {:?} has mismatched texture coordinates",
-                    mesh.name
-                ));
-            }
             let start = bin.len();
             for coordinate in mesh.texcoords.iter().flatten() {
                 let coord = *coordinate as f32;
@@ -497,17 +515,10 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
             let material_index = if let Some(index) = material_indices.get(&key) {
                 *index
             } else {
-                let rgb: [f64; 3] =
-                    serde_json::from_value(fabric["color"].clone()).unwrap_or([1.0; 3]);
-                let alpha = fabric["rgba"]
-                    .as_array()
-                    .and_then(|rgba| rgba.get(3))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 1.0);
-                let mut pbr = json!({"baseColorFactor": [rgb[0], rgb[1], rgb[2], alpha], "metallicFactor": 0.0});
+                let color = fabric_base_color(fabric);
+                let mut pbr = json!({"baseColorFactor": color, "metallicFactor": 0.0});
                 let mut material = json!({"name": fabric["name"].as_str().unwrap_or("Fabric"), "doubleSided": true});
-                if alpha < 1.0 || texture_path.is_some() {
+                if color[3] < 1.0 || texture_path.is_some() {
                     material["alphaMode"] = json!("BLEND");
                 }
                 if let Some(path) = texture_path {
@@ -590,7 +601,7 @@ pub(in crate::compat_scene) fn write_mesh(
     format: &str,
     state: &Value,
     include_avatar: bool,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let mut meshes = Vec::new();
     let simulated = array(&state["simulation"], "meshes");
     if simulated.is_empty() {
@@ -614,9 +625,8 @@ pub(in crate::compat_scene) fn write_mesh(
                 {
                     export_mesh.fabric_index = pattern["fabric_index"].clone();
                 }
-                if matches!(format, "glb" | "gltf")
-                    && (state["simulation"]["texcoords_units"] == "mm"
-                        || state["simulation"]["source"] == "native_saved_pose")
+                if state["simulation"]["texcoords_units"] == "mm"
+                    || state["simulation"]["source"] == "native_saved_pose"
                 {
                     export_mesh.texcoords =
                         crate::compat_fit::uv_coordinates(&export_mesh.texcoords);
@@ -664,37 +674,18 @@ pub(in crate::compat_scene) fn write_mesh(
         mesh.validate()?;
     }
     if format == "obj" {
-        let mut obj = String::from("# CLO Rust, millimetres, Y up\n");
-        let mut offset = 1u64;
-        for mesh in &meshes {
-            let name = mesh.name.replace(['\n', '\r'], " ");
-            let _ = writeln!(obj, "o {name}");
-            for [x, y, z] in &mesh.positions {
-                let _ = writeln!(obj, "v {x:.9} {y:.9} {z:.9}");
-            }
-            for [a, b, c] in &mesh.triangles {
-                let _ = writeln!(
-                    obj,
-                    "f {} {} {}",
-                    offset + u64::from(*a),
-                    offset + u64::from(*b),
-                    offset + u64::from(*c)
-                );
-            }
-            offset = offset
-                .checked_add(mesh.positions.len() as u64)
-                .ok_or("OBJ vertex count overflow")?;
-        }
-        return write(path, obj.as_bytes());
+        let mtl = obj_export::export(path, &meshes, array(state, "fabrics"))?;
+        return Ok(vec![path.to_owned(), mtl]);
     }
     let (mut root, bin) = gltf_export(&meshes, array(state, "fabrics"))?;
     if format == "glb" {
-        write(path, &glb_encode(&root, bin)?)
+        write(path, &glb_encode(&root, bin)?)?;
     } else {
         root["buffers"][0]["uri"] = json!(format!(
             "data:application/octet-stream;base64,{}",
             to_base64(&bin)
         ));
-        super::write_json(path, &root)
+        super::write_json(path, &root)?;
     }
+    Ok(vec![path.to_owned()])
 }
