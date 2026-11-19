@@ -194,6 +194,12 @@ pub(super) fn read(path: &Path) -> Result<RestMesh, String> {
     decode(&dan)
 }
 
+pub(super) fn read_project(path: &Path) -> Result<Option<(String, RestMesh)>, String> {
+    crate::compat_scene::read_project_avatar_dan(path)?
+        .map(|(name, dan)| decode(&dan).map(|mesh| (name, mesh)))
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

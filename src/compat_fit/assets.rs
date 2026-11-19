@@ -266,7 +266,7 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("avatar");
     let mut rest_details = None;
-    let (mut points, faces) = match extension.as_str() {
+    let (points, faces) = match extension.as_str() {
         "avt" => {
             let rest=avt::read(&path)?;
             rest_details=Some((rest.part_count,rest.arrangements));
@@ -284,6 +284,31 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         }
         _ => return Err(format!("avatar format .{extension} is unavailable on the Rust backend; use a supported static AVT, an OBJ in millimetres, or a named-mesh GLB in metres")),
     };
+    avatar_from_mesh(name, Some(&path), points, faces, rest_details)
+}
+
+pub(crate) fn project_avatar(path: &Path) -> Result<Option<Value>, String> {
+    let Some((name, rest)) = avt::read_project(path)? else {
+        return Ok(None);
+    };
+    let mut avatar = avatar_from_mesh(
+        &name,
+        None,
+        rest.points,
+        rest.triangles,
+        Some((rest.part_count, rest.arrangements)),
+    )?;
+    avatar["source_project"] = json!(path);
+    Ok(Some(avatar))
+}
+
+fn avatar_from_mesh(
+    name: &str,
+    path: Option<&Path>,
+    mut points: Vec<[f64; 3]>,
+    faces: Vec<[usize; 3]>,
+    rest_details: Option<(usize, Vec<String>)>,
+) -> Result<Value, String> {
     let ymin = points.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
     let ymax = points
         .iter()

@@ -5,6 +5,8 @@ mod render;
 mod solver;
 mod texture;
 
+pub(crate) use assets::project_avatar;
+
 use serde_json::{json, Value};
 
 pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Result<Value, String>> {

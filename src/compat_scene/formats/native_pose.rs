@@ -4,8 +4,8 @@ use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
 use serde_json::{json, Value};
 
 const MAP_TYPE: u8 = 22;
-const LIST_TYPE: u8 = 20;
-const BYTE_TYPE: u8 = 15;
+pub(super) const LIST_TYPE: u8 = 20;
+pub(super) const BYTE_TYPE: u8 = 15;
 const UINT_TYPE: u8 = 5;
 const LIMIT: usize = 4096;
 
@@ -15,10 +15,10 @@ struct Field<'a> {
     value: &'a [u8],
 }
 
-struct Fields<'a>(Vec<Field<'a>>);
+pub(super) struct Fields<'a>(Vec<Field<'a>>);
 
 impl<'a> Fields<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, String> {
+    pub(super) fn read(data: &'a [u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let count = take(data, &mut cursor, 1)?[0] as usize;
         let keys = take(data, &mut cursor, count)?;
@@ -36,7 +36,7 @@ impl<'a> Fields<'a> {
         Ok(Self(fields))
     }
 
-    fn get(&self, name: &[u8], kind: u8) -> Result<&'a [u8], String> {
+    pub(super) fn get(&self, name: &[u8], kind: u8) -> Result<&'a [u8], String> {
         self.0
             .iter()
             .find(|field| field.name == name && field.kind == kind)
@@ -49,7 +49,7 @@ impl<'a> Fields<'a> {
             })
     }
 
-    fn map(&self, name: &[u8]) -> Result<Self, String> {
+    pub(super) fn map(&self, name: &[u8]) -> Result<Self, String> {
         Self::read(self.get(name, MAP_TYPE)?)
     }
 }
@@ -107,16 +107,31 @@ fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String
     )
 }
 
-pub(super) fn read(pac: &[u8], panels: &[Value]) -> Result<Vec<Value>, String> {
-    let root = Fields::read(pac)?;
+pub(super) fn map_list(data: &[u8], limit: usize) -> Result<Vec<Fields<'_>>, String> {
+    if data == 0u32.to_le_bytes() {
+        return Ok(Vec::new());
+    }
+    let mut cursor = 0;
+    let (lengths, count) = sized_list(data, &mut cursor, MAP_TYPE, limit)?;
+    let mut maps = Vec::with_capacity(count);
+    for length in sizes(lengths) {
+        maps.push(Fields::read(take(data, &mut cursor, length)?)?);
+    }
+    if cursor != data.len() {
+        return Err("unexpected bytes after native PAC map list".into());
+    }
+    Ok(maps)
+}
+
+pub(super) fn panel_records<'a>(
+    root: &Fields<'a>,
+    panels: &[Value],
+) -> Result<Vec<Fields<'a>>, String> {
     let editor = root.map(b"mapPatternEditor")?;
     let patterns = editor.map(b"mapPatternList")?;
-    let records = patterns.get(b"listPattern", LIST_TYPE)?;
-    let mut cursor = 0;
-    let (lengths, _) = sized_list(records, &mut cursor, MAP_TYPE, LIMIT)?;
+    let records = map_list(patterns.get(b"listPattern", LIST_TYPE)?, LIMIT)?;
     let mut result = Vec::new();
-    for length in sizes(lengths) {
-        let record = Fields::read(take(records, &mut cursor, length)?)?;
+    for record in records {
         let mut offset = 0;
         if uint(record.get(b"uiPatternType", UINT_TYPE)?, &mut offset)? != 0 {
             continue;
@@ -124,16 +139,34 @@ pub(super) fn read(pac: &[u8], panels: &[Value]) -> Result<Vec<Value>, String> {
         let element = record.map(b"mapElement")?;
         let name = std::str::from_utf8(element.get(b"qsNameUTF8", BYTE_TYPE)?)
             .map_err(|e| e.to_string())?;
-        let panel = panels
+        if panels
             .get(result.len())
-            .filter(|panel| panel["name"] == name)
-            .ok_or("stored native pose does not match the imported panel order")?;
-        result.push(pattern_pose(&record, &panel["id"], name)?);
+            .is_none_or(|panel| panel["name"] != name)
+        {
+            return Err("native editable records do not match the imported panel order".into());
+        }
+        result.push(record);
     }
-    if cursor != records.len() || result.len() != panels.len() {
-        return Err("stored native pose does not match the imported panel count".into());
+    if result.len() != panels.len() {
+        return Err("native editable records do not match the imported panel count".into());
     }
     Ok(result)
+}
+
+pub(super) fn read(pac: &[u8], panels: &[Value]) -> Result<Vec<Value>, String> {
+    panel_records(&Fields::read(pac)?, panels)?
+        .iter()
+        .zip(panels)
+        .map(|(record, panel)| {
+            pattern_pose(
+                record,
+                &panel["id"],
+                panel["name"]
+                    .as_str()
+                    .ok_or("missing imported pattern name")?,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -13,6 +13,12 @@ pub(crate) fn read_native_archive_member(
     formats::clo_native::read_member(path, header, extension)
 }
 
+pub(crate) fn read_project_avatar_dan(
+    path: &std::path::Path,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    formats::clo_native::read_project_avatar_dan(path)
+}
+
 type Reply = Result<Value, String>;
 
 pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Reply> {

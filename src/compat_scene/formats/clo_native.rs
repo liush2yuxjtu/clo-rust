@@ -76,7 +76,10 @@ fn open_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Result<ZipArchi
     Ok(archive)
 }
 
-fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Result<Vec<u8>, String> {
+fn optional_member<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    extension: &str,
+) -> Result<Option<(String, Vec<u8>)>, String> {
     let suffix = format!(".{extension}");
     let index = {
         let mut matching = archive
@@ -88,9 +91,9 @@ fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Resul
                     .eq_ignore_ascii_case(suffix.as_bytes())
                     .then_some(i)
             });
-        let i = matching
-            .next()
-            .ok_or_else(|| format!("missing {suffix} payload in native CLO archive"))?;
+        let Some(i) = matching.next() else {
+            return Ok(None);
+        };
         if matching.next().is_some() {
             return Err(format!(
                 "expected exactly one {suffix} payload in native CLO archive"
@@ -107,6 +110,10 @@ fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Resul
         ));
     }
     let expected = entry.size() as usize;
+    let name = entry
+        .name()
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| String::from_utf8_lossy(entry.name_raw()).into_owned());
     let mut bytes = Vec::new();
     entry
         .take(PAYLOAD_LIMIT + 1)
@@ -115,7 +122,30 @@ fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Resul
     if bytes.len() != expected {
         return Err(format!("unexpected native {suffix} payload length"));
     }
-    Ok(bytes)
+    Ok(Some((name, bytes)))
+}
+
+fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Result<Vec<u8>, String> {
+    optional_member(archive, extension)?
+        .map(|(_, bytes)| bytes)
+        .ok_or_else(|| format!("missing .{extension} payload in native CLO archive"))
+}
+
+pub(in crate::compat_scene) fn read_project_avatar_dan(
+    path: &Path,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let mut project = open_archive(bounded_file(path)?, ZPRJ)?;
+    let Some((member_name, avatar)) = optional_member(&mut project, "avt")? else {
+        return Ok(None);
+    };
+    let base_name = member_name.rsplit(['/', '\\']).next().unwrap_or("avatar");
+    let name = Path::new(base_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("avatar")
+        .to_owned();
+    let mut archive = open_archive(Cursor::new(avatar), b" AVT        CLO ")?;
+    Ok(Some((name, member(&mut archive, "dan")?)))
 }
 
 fn bounded_file(path: &Path) -> Result<std::io::BufReader<File>, String> {
@@ -351,6 +381,15 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         }));
     }
     let sewing = super::native_seams::read(pac, &edge_counts)?;
+    let (fabrics, fabric_error) = match super::native_materials::read(pac, &patterns) {
+        Ok(materials) => {
+            for (pattern, index) in patterns.iter_mut().zip(materials.assignments) {
+                pattern["fabric_index"] = json!(index);
+            }
+            (materials.entries, None)
+        }
+        Err(error) => (Vec::new(), Some(error)),
+    };
     let (pose, pose_error) = match super::native_pose::read(pac, &patterns) {
         Ok(meshes) => (meshes, None),
         Err(error) => (Vec::new(), Some(error)),
@@ -360,12 +399,13 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         "seam_groups_recovered": sewing.annotations.len(),
         "full_edge_seams_restored": sewing.constraints.len(),
         "unreadable_seam_records": sewing.unreadable,
-        "saved_pose_meshes": pose.len(), "saved_pose_unavailable": pose_error
+        "saved_pose_meshes": pose.len(), "saved_pose_unavailable": pose_error,
+        "fabric_records": fabrics.len(), "fabric_records_unavailable": fabric_error
     });
     Ok(json!({
         "patterns": patterns, "seams": sewing.constraints,
         "native_seam_groups": sewing.annotations, "native_import": native_import,
-        "saved_pose": pose
+        "saved_pose": pose, "fabrics": fabrics
     }))
 }
 

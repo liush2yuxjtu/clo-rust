@@ -11,15 +11,14 @@ const PATTERN_FORMAT: &str = "clo-rust.pattern.v1";
 
 fn avatar_names(state: &Value) -> Vec<&str> {
     let avatar = &state["avatar"];
-    if avatar.is_array() {
-        return avatar
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a["name"].as_str())
-            .collect();
-    }
-    avatar["name"].as_str().into_iter().collect()
+    avatar
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(avatar))
+        .iter()
+        .chain(array(state, "additional_avatars"))
+        .filter_map(|a| a["name"].as_str())
+        .collect()
 }
 
 fn open_reply(state: &Value, path: &Path) -> Value {
@@ -35,7 +34,7 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
     let fabrics: Vec<_> = array(state, "fabrics")
         .iter()
         .enumerate()
-        .map(|(i, f)| json!({"index": i, "name": f["name"]}))
+        .map(|(i, f)| json!({"index": f["index"].as_u64().unwrap_or(i as u64), "name": f["name"]}))
         .collect();
     Ok(json!({
         "project": state["project"].as_str().unwrap_or("Untitled"),
@@ -66,6 +65,7 @@ pub(super) fn clear(args: &Value, state: &mut Value) -> Reply {
         return Ok(json!({"deleted": count, "pattern_count": 0}));
     }
     state["avatar"] = Value::Null;
+    state["additional_avatars"] = json!([]);
     state["fabrics"] = json!([]);
     state["colorways"] = json!(["Colorway 1"]);
     state["current_colorway"] = json!(0);
@@ -198,6 +198,43 @@ fn extension(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+fn prepare_archived_fabrics(
+    state: &Value,
+    loaded: &mut Value,
+    append: bool,
+) -> Result<Vec<Value>, String> {
+    let mut fabrics = array(loaded, "fabrics").to_vec();
+    if fabrics.is_empty() {
+        return Ok(fabrics);
+    }
+    if append {
+        let offset = array(state, "fabrics")
+            .iter()
+            .enumerate()
+            .map(|(at, fabric)| fabric["index"].as_u64().unwrap_or(at as u64))
+            .max()
+            .map(|id| {
+                id.checked_add(1)
+                    .ok_or("native material-index limit exceeded")
+            })
+            .transpose()?
+            .unwrap_or(0);
+        for (index, fabric) in fabrics.iter_mut().enumerate() {
+            fabric["index"] = json!(offset
+                .checked_add(index as u64)
+                .ok_or("native material-index limit exceeded")?);
+        }
+        for panel in vec_mut(loaded, "patterns") {
+            let index = super::index(panel, "fabric_index")?;
+            let index = offset
+                .checked_add(index as u64)
+                .ok_or("native material-index limit exceeded")?;
+            panel["fabric_index"] = json!(index);
+        }
+    }
+    Ok(fabrics)
+}
+
 pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     if !path.is_file() {
@@ -239,11 +276,32 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
         }
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
-            let loaded = formats::clo_native::read(path, is_project)?;
+            let mut loaded = formats::clo_native::read(path, is_project)?;
+            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             merge(state, &loaded, append)?;
+            if append {
+                vec_mut(state, "fabrics").extend(fabrics);
+            } else if !fabrics.is_empty() {
+                state["fabrics"] = json!(fabrics);
+            }
+            let mut avatar_error = None;
+            let mut embedded_avatar = false;
             if is_project && !append {
-                state["avatar"] = Value::Null;
-                state["fabrics"] = json!([]);
+                state["additional_avatars"] = json!([]);
+                state["avatar"] = match crate::compat_fit::project_avatar(path) {
+                    Ok(Some(avatar)) => {
+                        embedded_avatar = true;
+                        avatar
+                    }
+                    Ok(None) => Value::Null,
+                    Err(error) => {
+                        avatar_error = Some(error);
+                        Value::Null
+                    }
+                };
+                if array(&loaded, "fabrics").is_empty() {
+                    state["fabrics"] = json!([]);
+                }
                 state["colorways"] = json!(["Colorway 1"]);
                 state["current_colorway"] = json!(0);
                 set_project(state, path);
@@ -255,15 +313,25 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
             reply["native_import"] = loaded["native_import"].clone();
+            reply["native_import"]["embedded_avatar_loaded"] = json!(embedded_avatar);
             let mut warnings = vec![
-                "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.",
-                "Native fabric assignments, avatars, arrangement and solver continuation state were not imported.",
-                "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list."
+                "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.".to_owned(),
+                "Native textures, cloth calibration, panel arrangement and official solver continuation state were not imported.".to_owned(),
+                "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list.".to_owned(),
             ];
+            if embedded_avatar {
+                warnings.push("The embedded avatar was loaded as static rest geometry. Native skinning, pose and textures were not recovered.".into());
+            }
+            if let Some(error) = avatar_error {
+                warnings.push(format!("The embedded avatar could not be imported: {error}"));
+            }
+            if array(&loaded, "fabrics").is_empty() {
+                warnings.push("Archived fabric assignments and front colors could not be validated for this file.".into());
+            }
             if append && !pose.is_empty() {
-                warnings.push("The saved 3D pose is loaded in replace mode only.");
+                warnings.push("The saved 3D pose is loaded in replace mode only.".into());
             } else if pose.is_empty() {
-                warnings.push("The saved 3D pose could not be validated for this file.");
+                warnings.push("The saved 3D pose could not be validated for this file.".into());
             }
             reply["warnings"] = json!(warnings);
             return Ok(reply);

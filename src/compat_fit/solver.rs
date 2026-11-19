@@ -1,5 +1,5 @@
 use super::{array, assets, boolean, number, string};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,11 +88,6 @@ fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
     }
     if vertices.len() < 3 || corners.len() < 3 {
         return Err("pattern requires at least three distinct corners".into());
-    }
-    if vertices.len() > 512 {
-        return Err(
-            "mesh triangulation currently supports at most 512 perimeter points per pattern".into(),
-        );
     }
     Ok((vertices, corners))
 }
@@ -269,19 +264,37 @@ fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
         .collect()
 }
 
-fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
-    let (mut points, corners) = perimeter(pattern)?;
-    let count = points.len();
-    let mut sides: Vec<Vec<usize>> = corners
+fn sampled_sides(indices: &[usize], corners: &[usize]) -> Vec<Vec<usize>> {
+    let count = indices.len();
+    corners
         .iter()
         .enumerate()
         .map(|(i, &first)| {
             let last = corners[(i + 1) % corners.len()];
             (first..=if last > first { last } else { count + last })
-                .map(|i| i % count)
+                .map(|i| indices[i % count])
                 .collect()
         })
-        .collect();
+        .collect()
+}
+
+fn panel_stiffness(pattern: &Value, state: &Value) -> f64 {
+    if boolean(pattern, "strengthen", false) {
+        0.995
+    } else {
+        assets::material_stiffness(state, &pattern["fabric_index"])
+    }
+}
+
+fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
+    let (mut points, corners) = perimeter(pattern)?;
+    if points.len() > 512 {
+        return Err(
+            "mesh triangulation currently supports at most 512 perimeter points per pattern".into(),
+        );
+    }
+    let indices: Vec<_> = (0..points.len()).collect();
+    let mut sides = sampled_sides(&indices, &corners);
     let mut triangles = triangulate(&points)?;
     if distance.is_finite() {
         refine(&mut points, &mut triangles, &mut sides, distance);
@@ -298,13 +311,223 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         texcoords: uv_coordinates(&points),
         points,
         sides,
-        stiffness: if boolean(pattern, "strengthen", false) {
-            0.995
-        } else {
-            assets::material_stiffness(state, &pattern["fabric_index"])
-        },
+        stiffness: panel_stiffness(pattern, state),
         frozen: boolean(pattern, "freeze", false),
     })
+}
+
+const MAX_SIMULATION_VERTICES: usize = 130_000;
+const NATIVE_SAVED_POSE: &str = "native_saved_pose";
+const RUST_NATIVE_REST: &str = "rust_cpu_from_native_saved_pose";
+
+fn coordinate_key(point: Point2) -> [u64; 2] {
+    point.map(|v| if v == 0.0 { 0 } else { v.to_bits() })
+}
+
+fn mesh_boundary(vertices: usize, triangles: &[[usize; 3]]) -> Result<Vec<Vec<usize>>, String> {
+    let mut incidence = BTreeMap::new();
+    for &[a, b, c] in triangles {
+        if a >= vertices || b >= vertices || c >= vertices || a == b || b == c || c == a {
+            return Err("saved native pose triangle has invalid vertex indices".into());
+        }
+        for boundary_edge in [edge(a, b), edge(b, c), edge(c, a)] {
+            let count = incidence.entry(boundary_edge).or_insert(0u8);
+            *count += 1;
+            if *count > 2 {
+                return Err("saved native pose has a non-manifold triangle edge".into());
+            }
+        }
+    }
+    let mut neighbors = vec![Vec::new(); vertices];
+    for ((a, b), count) in incidence {
+        if count == 1 {
+            neighbors[a].push(b);
+            neighbors[b].push(a);
+        }
+    }
+    Ok(neighbors)
+}
+
+fn map_boundary_cycle(
+    outline: &[[u64; 2]],
+    rest: &[[u64; 2]],
+    neighbors: &[Vec<usize>],
+) -> Option<Vec<usize>> {
+    // A rest coordinate may be shared by multiple vertex indices. Walk actual
+    // boundary connectivity, then backtrack once a path closes.
+    for start in (0..rest.len()).filter(|&i| rest[i] == outline[0] && !neighbors[i].is_empty()) {
+        let mut history = vec![BTreeMap::from([(start, start)])];
+        for &expected in &outline[1..] {
+            let mut layer = BTreeMap::new();
+            for &vertex in history.last().expect("initial boundary layer").keys() {
+                for &next in &neighbors[vertex] {
+                    if rest[next] == expected {
+                        layer.entry(next).or_insert(vertex);
+                    }
+                }
+            }
+            if layer.is_empty() {
+                break;
+            }
+            history.push(layer);
+        }
+        if history.len() == outline.len() {
+            if let Some(&last) = history
+                .last()
+                .expect("last boundary layer")
+                .keys()
+                .find(|&&i| neighbors[i].contains(&start))
+            {
+                let mut vertex = last;
+                let mut path = vec![start; outline.len()];
+                for (i, layer) in history.iter().enumerate().skip(1).rev() {
+                    path[i] = vertex;
+                    vertex = layer[&vertex];
+                }
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn native_sides(
+    pattern: &Value,
+    rest: &[Point2],
+    triangles: &[[usize; 3]],
+) -> Result<Vec<Vec<usize>>, String> {
+    let (outline, corners) = perimeter(pattern)?;
+    let mut distinct = Vec::new();
+    let mut vertex_slots = Vec::with_capacity(outline.len());
+    for p in outline {
+        let key = coordinate_key(p);
+        if distinct.last() != Some(&key) {
+            distinct.push(key);
+        }
+        vertex_slots.push(distinct.len() - 1);
+    }
+    if distinct.len() > 1 && distinct.first() == distinct.last() {
+        let end = distinct.len() - 1;
+        distinct.pop();
+        for slot in vertex_slots
+            .iter_mut()
+            .rev()
+            .take_while(|slot| **slot == end)
+        {
+            *slot = 0;
+        }
+    }
+    if distinct.len() < 3 {
+        return Err("saved native pose outline has fewer than three physical samples".into());
+    }
+    let neighbors = mesh_boundary(rest.len(), triangles)?;
+    let rest_keys: Vec<_> = rest.iter().copied().map(coordinate_key).collect();
+    let selected = map_boundary_cycle(&distinct, &rest_keys, &neighbors)
+        .ok_or("saved native rest mesh boundary does not match the panel outline samples")?;
+    let vertex_indices: Vec<_> = vertex_slots
+        .into_iter()
+        .map(|slot| selected[slot])
+        .collect();
+    let mut sides = sampled_sides(&vertex_indices, &corners);
+    for side in &mut sides {
+        side.dedup();
+        if side.len() < 2 {
+            return Err("saved native pose outline edge has zero physical length".into());
+        }
+    }
+    Ok(sides)
+}
+
+#[derive(Deserialize)]
+struct SavedPoseMesh {
+    positions: Vec<Point>,
+    triangles: Vec<[usize; 3]>,
+    texcoords: Vec<Point2>,
+}
+
+fn native_mesh(
+    pattern: &Value,
+    prior: &Value,
+    state: &Value,
+    saved_pose: bool,
+) -> Result<Mesh, String> {
+    let saved = SavedPoseMesh::deserialize(prior)
+        .map_err(|error| format!("invalid saved native pose mesh: {error}"))?;
+    let vertex_count = saved.positions.len();
+    if vertex_count < 3 || saved.texcoords.len() != vertex_count {
+        return Err("saved native positions and rest coordinate counts do not match".into());
+    }
+    if saved.triangles.is_empty() || saved.triangles.len() > vertex_count * 4 {
+        return Err("saved native pose has an invalid triangle count".into());
+    }
+    if saved
+        .positions
+        .iter()
+        .flatten()
+        .chain(saved.texcoords.iter().flatten())
+        .any(|v| !v.is_finite() || v.abs() >= 1e7)
+    {
+        return Err("saved native position or rest coordinate is invalid".into());
+    }
+    let sides = native_sides(pattern, &saved.texcoords, &saved.triangles)?;
+    let velocities = if saved_pose {
+        vec![[0.0; 3]; vertex_count]
+    } else {
+        let velocities = Vec::<Point>::deserialize(&prior["velocities"])
+            .map_err(|error| format!("invalid Rust continuation velocities: {error}"))?;
+        if velocities.len() != vertex_count || velocities.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(
+                "Rust continuation velocities do not match the saved native pose mesh".into(),
+            );
+        }
+        velocities
+    };
+    Ok(Mesh {
+        id: pattern["id"].clone(),
+        name: string(pattern, "name", "Pattern").to_owned(),
+        fabric_index: pattern["fabric_index"].clone(),
+        positions: saved.positions,
+        triangles: saved.triangles,
+        velocities,
+        points: saved.texcoords.clone(),
+        texcoords: saved.texcoords,
+        sides,
+        stiffness: panel_stiffness(pattern, state),
+        frozen: boolean(pattern, "freeze", false),
+    })
+}
+
+fn native_meshes(
+    patterns: &[Value],
+    prior_meshes: &[Value],
+    state: &Value,
+    saved_pose: bool,
+) -> Result<Vec<Mesh>, String> {
+    if patterns.len() != prior_meshes.len()
+        || patterns
+            .iter()
+            .zip(prior_meshes)
+            .any(|(panel, mesh)| panel["id"].is_null() || panel["id"] != mesh["id"])
+    {
+        return Err(
+            "saved native meshes do not match the current panel identities and order".into(),
+        );
+    }
+    let count: usize = prior_meshes
+        .iter()
+        .map(|mesh| array(&mesh["positions"]).len())
+        .sum();
+    if count > MAX_SIMULATION_VERTICES {
+        return Err("saved native pose exceeds 130000 vertices; supply a new particle_distance to remesh or split the garment".into());
+    }
+    patterns
+        .iter()
+        .zip(prior_meshes)
+        .map(|(pattern, prior)| {
+            native_mesh(pattern, prior, state, saved_pose)
+                .map_err(|error| format!("native panel {}: {error}", pattern["name"]))
+        })
+        .collect()
 }
 
 pub fn initial_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
@@ -670,37 +893,48 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     if patterns.is_empty() {
         return Err("simulation requires at least one pattern".into());
     }
-    let mut meshes = patterns
-        .iter()
-        .map(|pattern| {
-            let target = if args["particle_distance"].is_number() {
-                distance
-            } else {
-                number(pattern, "particle_distance", distance)
-            };
-            if !(3.0..=500.0).contains(&target) {
-                return Err("individual pattern particle_distance must be 3..500 mm".into());
-            }
-            new_mesh(pattern, target, state)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let explicit_distance = args["particle_distance"].is_number();
+    let saved_pose = existing["source"] == NATIVE_SAVED_POSE;
+    let use_native = !explicit_distance && (saved_pose || existing["source"] == RUST_NATIVE_REST);
     let prior_meshes = array(&existing["meshes"]);
-    let resume = (distance - number(existing, "particle_distance", -1.0)).abs() < 1e-9
-        && meshes.len() == prior_meshes.len()
-        && meshes.iter().zip(prior_meshes).all(|(mesh, prior)| {
-            mesh.id == prior["id"] && mesh.positions.len() == array(&prior["positions"]).len()
-        });
-    if resume {
-        for (mesh, prior) in meshes.iter_mut().zip(prior_meshes) {
-            mesh.positions = serde_json::from_value(prior["positions"].clone())
-                .map_err(|e| format!("invalid saved simulation mesh: {e}"))?;
-            mesh.velocities = serde_json::from_value(prior["velocities"].clone())
-                .map_err(|e| format!("invalid saved simulation velocities: {e}"))?;
-            if mesh.velocities.len() != mesh.positions.len() {
-                return Err("saved simulation velocities are inconsistent".into());
+    let (mut meshes, resume) = if use_native {
+        (
+            native_meshes(patterns, prior_meshes, state, saved_pose)?,
+            !saved_pose,
+        )
+    } else {
+        let mut meshes = patterns
+            .iter()
+            .map(|pattern| {
+                let target = if explicit_distance {
+                    distance
+                } else {
+                    number(pattern, "particle_distance", distance)
+                };
+                if !(3.0..=500.0).contains(&target) {
+                    return Err("individual pattern particle_distance must be 3..500 mm".into());
+                }
+                new_mesh(pattern, target, state)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let resume = (distance - number(existing, "particle_distance", -1.0)).abs() < 1e-9
+            && meshes.len() == prior_meshes.len()
+            && meshes.iter().zip(prior_meshes).all(|(mesh, prior)| {
+                mesh.id == prior["id"] && mesh.positions.len() == array(&prior["positions"]).len()
+            });
+        if resume {
+            for (mesh, prior) in meshes.iter_mut().zip(prior_meshes) {
+                mesh.positions = Vec::<Point>::deserialize(&prior["positions"])
+                    .map_err(|e| format!("invalid saved simulation mesh: {e}"))?;
+                mesh.velocities = Vec::<Point>::deserialize(&prior["velocities"])
+                    .map_err(|e| format!("invalid saved simulation velocities: {e}"))?;
+                if mesh.velocities.len() != mesh.positions.len() {
+                    return Err("saved simulation velocities are inconsistent".into());
+                }
             }
         }
-    }
+        (meshes, resume)
+    };
     let body = &state["avatar"]["body"];
     let proxies = if body.is_null() { vec![] } else { limbs(body) };
     let mut offsets = Vec::new();
@@ -716,7 +950,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         velocities.extend(mesh.velocities.iter().copied());
         weights.resize(positions.len(), if mesh.frozen { 0.0 } else { 1.0 });
     }
-    if positions.len() > 130_000 {
+    if positions.len() > MAX_SIMULATION_VERTICES {
         return Err("simulation scene exceeds 130000 vertices; increase particle_distance or split the garment".into());
     }
     let seam_constraints = stitches(state, &meshes, &offsets)?;
@@ -768,27 +1002,37 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         mesh.positions.copy_from_slice(&positions[offset..end]);
         mesh.velocities.copy_from_slice(&velocities[offset..end]);
     }
+    let previous_steps = if resume {
+        existing["steps"].as_u64().unwrap_or(0)
+    } else {
+        0
+    };
     let total = steps
-        + if resume {
-            existing["steps"].as_u64().unwrap_or(0)
-        } else {
-            0
-        };
-    if args["particle_distance"].is_number() {
+        .checked_add(previous_steps)
+        .ok_or("saved simulation step count overflow")?;
+    if explicit_distance {
         if let Some(patterns) = state["patterns"].as_array_mut() {
             for pattern in patterns {
                 pattern["particle_distance"] = json!(distance);
             }
         }
     }
-    state["simulation"] =
-        json!({"steps":total,"particle_distance":distance,"quality":quality,"meshes":meshes});
+    state["simulation"] = json!({"steps":total,"quality":quality,"meshes":meshes});
+    if use_native {
+        state["simulation"]["source"] = json!(RUST_NATIVE_REST);
+        state["simulation"]["texcoords_units"] = json!("mm");
+    } else {
+        state["simulation"]["particle_distance"] = json!(distance);
+    }
     let mut limitations = vec![
         "self-collision unavailable".to_owned(),
         "avatar collisions use an analytic proxy".to_owned(),
         "fabric and edge properties are partially implemented".to_owned(),
         "no CLO material calibration".to_owned(),
     ];
+    if use_native {
+        limitations.push("Native topology and saved drape initialize the independent CPU solver. Official CLO solver velocities and state are unavailable.".into());
+    }
     let unrestored = array(&state["native_seam_groups"])
         .iter()
         .filter(|group| group["restored"] == false)
@@ -798,11 +1042,17 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             "Unrecovered native seam groups omitted from constraints: {unrestored}"
         ));
     }
-    Ok(
-        json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
+    let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len(),"max_stitch_gap_mm":gap,
-        "max_constraint_length_mm":effective,"limitations":limitations}),
-    )
+        "max_constraint_length_mm":effective,"limitations":limitations});
+    if use_native {
+        result["initialization"] = json!(if saved_pose {
+            "native_saved_pose_zero_velocity"
+        } else {
+            "native_rest_rust_velocities"
+        });
+    }
+    Ok(result)
 }
 
 pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
@@ -819,4 +1069,121 @@ pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
             Ok(mesh)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod native_pose_tests {
+    use super::*;
+
+    fn fixture() -> Value {
+        let outline = json!([
+            [0.0, 0.0],
+            [0.0, -0.0, 2],
+            [50.0, 0.0, 2],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [0.0, 100.0]
+        ]);
+        // Indices 0 and 4 share an XY coordinate. Only 4 belongs to the outline.
+        let rest = [
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [0.0, 100.0],
+            [0.0, -0.0],
+            [-40.0, -40.0],
+            [-40.0, 0.0],
+            [50.0, 0.0],
+        ];
+        let triangles = [[4, 7, 3], [7, 2, 3], [7, 1, 2], [0, 5, 6]];
+        let mesh = |id: usize, z: f64| {
+            json!({
+                "id":id,
+                "positions":rest.iter().map(|[x,y]|[*x,*y+240.0,z]).collect::<Vec<_>>(),
+                "triangles":triangles,"texcoords":rest,
+                // Archived values must never become velocity inputs for the independent solver.
+                "velocities":vec![[11.0,13.0,17.0];8]
+            })
+        };
+        json!({
+            "patterns":[{"id":1,"name":"A","points":outline},{"id":2,"name":"B","points":outline}],
+            "seams":[{"pattern_a":1,"line_a":0,"pattern_b":2,"line_b":0,"dir_a":true,"dir_b":true}],
+            "simulation":{"source":NATIVE_SAVED_POSE,"meshes":[mesh(1,147.0),mesh(2,152.0)],"steps":120},
+            "native_seam_groups":[{"id":31,"restored":false}]
+        })
+    }
+
+    #[test]
+    fn saved_mesh_uses_initial_positions_and_resumes_only_rust_velocities() {
+        let saved = fixture();
+        let mut state = saved.clone();
+        let first = simulate(&json!({"steps":0}), &mut state).unwrap();
+        assert_eq!(first["initialization"], "native_saved_pose_zero_velocity");
+        assert_eq!(first["vertices"], 16);
+        assert_eq!(first["stitch_count"], 3);
+        assert!(array(&first["limitations"]).iter().any(|item| item
+            .as_str()
+            .unwrap()
+            .contains("Unrecovered native seam groups omitted from constraints: 1")));
+        assert_eq!(state["simulation"]["source"], RUST_NATIVE_REST);
+        assert_eq!(state["simulation"]["texcoords_units"], "mm");
+        assert_eq!(state["simulation"]["steps"], 0);
+        assert!(state["simulation"]["particle_distance"].is_null());
+        for i in 0..2 {
+            let restored = &state["simulation"]["meshes"][i];
+            let original = &saved["simulation"]["meshes"][i];
+            for property in ["positions", "texcoords", "triangles"] {
+                assert_eq!(restored[property], original[property]);
+            }
+            assert_eq!(restored["velocities"], json!(vec![[0.0; 3]; 8]));
+        }
+        let a = native_mesh(
+            &state["patterns"][0],
+            &state["simulation"]["meshes"][0],
+            &state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(a.sides[0], [4, 7, 1]);
+        let continued = simulate(&json!({"steps":1}), &mut state).unwrap();
+        assert_eq!(continued["initialization"], "native_rest_rust_velocities");
+        assert_ne!(
+            state["simulation"]["meshes"][0]["positions"],
+            saved["simulation"]["meshes"][0]["positions"]
+        );
+        assert_ne!(
+            state["simulation"]["meshes"][0]["velocities"],
+            json!(vec![[0.0; 3]; 8])
+        );
+        simulate(&json!({"steps":1}), &mut state).unwrap();
+        let mut single_run = saved.clone();
+        simulate(&json!({"steps":2}), &mut single_run).unwrap();
+        assert_eq!(state["simulation"], single_run["simulation"]);
+    }
+
+    #[test]
+    fn rejects_bad_native_topology_and_allows_explicit_remesh() {
+        let mut state = fixture();
+        state["simulation"]["meshes"][0]["triangles"][0][0] = json!(999);
+        let before = state.clone();
+        let error = simulate(&json!({"steps":1}), &mut state).unwrap_err();
+        assert!(error.contains("triangle has invalid vertex indices"));
+        assert_eq!(before, state);
+        let mut state = fixture();
+        state["patterns"][1]["points"][2][0] = json!(53.0);
+        let error = simulate(&json!({"steps":0}), &mut state).unwrap_err();
+        assert!(error.contains("boundary does not match"));
+        let normal_outline = json!([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+        state["patterns"][0]["points"] = normal_outline.clone();
+        state["patterns"][1]["points"] = normal_outline;
+        let outcome = simulate(&json!({"steps":0,"particle_distance":200.0}), &mut state).unwrap();
+        assert!(outcome["initialization"].is_null());
+        assert_eq!(outcome["vertices"], 8);
+        assert_eq!(state["simulation"]["particle_distance"], 200.0);
+        assert!(state["simulation"]["source"].is_null());
+        assert_ne!(
+            state["simulation"]["meshes"][0]["positions"],
+            before["simulation"]["meshes"][0]["positions"]
+        );
+    }
 }
