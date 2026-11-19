@@ -91,7 +91,18 @@ fn recognized_state(content: Value) -> Result<Value, String> {
         .filter(|state| state.is_object())
         .ok_or("expected a scene object")?;
     let _ = validate_garment(state)?;
-    Ok(state.clone())
+    let mut scene = state.clone();
+    if let Some(object) = scene.as_object_mut() {
+        object.remove("runtime");
+    }
+    Ok(scene)
+}
+
+fn replace_scene(state: &mut Value, mut scene: Value) {
+    if let Some(runtime) = state.get("runtime") {
+        scene["runtime"] = runtime.clone();
+    }
+    *state = scene;
 }
 
 fn id_key(id: &Value) -> Result<String, String> {
@@ -192,7 +203,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                     if append {
                         merge(state, &loaded, true)?;
                     } else {
-                        *state = loaded;
+                        replace_scene(state, loaded);
                         set_project(state, path);
                     }
                 }
@@ -212,7 +223,27 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             }
             vec_mut(state, "imported_meshes").extend(meshes);
         }
-        "zprj" | "zpac" | "avt" | "fbx" => {
+        ext @ ("zprj" | "zpac") => {
+            let is_project = ext == "zprj";
+            let loaded = formats::clo_native::read(path, is_project)?;
+            merge(state, &loaded, append)?;
+            if is_project && !append {
+                state["avatar"] = Value::Null;
+                state["fabrics"] = json!([]);
+                state["colorways"] = json!(["Colorway 1"]);
+                state["current_colorway"] = json!(0);
+                set_project(state, path);
+            }
+            let mut reply = open_reply(state, path);
+            reply["partial"] = json!(true);
+            reply["native_import"] = loaded["native_import"].clone();
+            reply["warnings"] = json!([
+                "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.",
+                "Native sewing, fabric assignments, avatars, arrangement and draped simulation were not imported."
+            ]);
+            return Ok(reply);
+        }
+        "avt" | "fbx" => {
             return Err(format!(
                 "native {} input is unavailable in the Rust backend",
                 extension(path)
@@ -225,7 +256,11 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
 
 fn saved(path: &Path, state: &Value) -> Result<(), String> {
     let _ = validate_garment(state)?;
-    formats::write_json(path, &json!({"format": SCENE_FORMAT, "scene": state}))
+    let mut project = state.clone();
+    if let Some(object) = project.as_object_mut() {
+        object.remove("runtime");
+    }
+    formats::write_json(path, &json!({"format": SCENE_FORMAT, "scene": project}))
 }
 
 pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
@@ -332,7 +367,8 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     if !path.is_file() {
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
-    *state = recognized_state(formats::read_json(&path)?)?;
+    let restored = recognized_state(formats::read_json(&path)?)?;
+    replace_scene(state, restored);
     Ok(open_reply(state, &path))
 }
 

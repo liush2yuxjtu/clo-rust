@@ -31,8 +31,13 @@ async def inspect_contract(session):
     actual = {tool.name: tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in result.tools}
     for name, entry in expected.items():
         assert actual[name] == entry, f"Tool contract changed for {name}"
-    assert len(actual) == 59 and len(expected) == 48
-    assert {"verify_seam", "strain", "stress", "fit_pressure"} <= actual.keys()
+    assert len(expected) == 48
+    diagnostics = {
+        "compare_line_art", "export_fit_maps", "fit_pressure", "fold_angles",
+        "physics_debug_view", "physics_replay", "prewarm_runtime", "review_boat_batch",
+        "strain", "stress", "verify_seam",
+    }
+    assert diagnostics <= actual.keys()
 
 
 async def successful(session, name, args=None):
@@ -71,10 +76,17 @@ async def smoke_rust():
             session, "verify_seam", {"project_json": str(Path("samples/Carlton外层.pattern.json").resolve())}
         )
         assert diagnostics
+        partial_script = await session.call_tool("clo_run_python", {"code": (
+            "pattern_api.CreatePatternWithPoints([(0,0),(60,0),(30,50)]); "
+            "raise RuntimeError('smoke failure after creating a piece')"
+        )})
+        assert partial_script.isError
+        expected_count = changed["pattern_count"] + 1
+        assert (await json_result(session, "scene_info"))["pattern_count"] == expected_count
         await successful(session, "clo_stop_bridge")
         assert (await session.call_tool("scene_info", {})).isError
         await successful(session, "clo_launch", {"with_bridge": True})
-        assert (await json_result(session, "scene_info"))["pattern_count"] == changed["pattern_count"]
+        assert (await json_result(session, "scene_info"))["pattern_count"] == expected_count
     print("Rust MCP: 48 contracts and 11 diagnostics listed. Scene mutation, error, image, export and seam check passed")
 
 

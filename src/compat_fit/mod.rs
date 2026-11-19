@@ -2,6 +2,7 @@ mod assets;
 mod draft;
 mod render;
 mod solver;
+mod texture;
 
 use serde_json::{json, Value};
 
@@ -168,5 +169,170 @@ mod tests {
             &mut state,
         );
         assert_eq!(color["result"]["ok"], json!([true, true, true]));
+    }
+}
+
+#[cfg(test)]
+mod texture_tests {
+    use super::*;
+    use std::{
+        fs,
+        io::BufReader,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn call(name: &str, args: Value, state: &mut Value) -> Result<Value, String> {
+        dispatch(name, &args, state).expect("compat tool")
+    }
+
+    struct TempDirectory(PathBuf);
+    impl TempDirectory {
+        fn new() -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir =
+                std::env::temp_dir().join(format!("clo-rust-texture-{}-{now}", std::process::id()));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn rgba_png(path: &Path, pixels: [u8; 8]) {
+        let file = fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, 2, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&pixels).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn capture(state: &mut Value, is_flat: bool) -> ([[u8; 3]; 2], Value) {
+        let label = if is_flat { "snapshot_2d" } else { "snapshot" };
+        let screenshot = call(label, json!({"views":["front"]}), state).unwrap();
+        let path = screenshot["images"][0]["path"].as_str().unwrap();
+        let file = fs::File::open(path).unwrap();
+        let mut reader = png::Decoder::new(BufReader::new(file)).read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!(frame.color_type, png::ColorType::Rgb);
+        let sample = |x, y| {
+            let offset = (y * frame.width as usize + x) * 3;
+            pixels[offset..offset + 3].try_into().unwrap()
+        };
+        fs::remove_file(path).unwrap();
+        ([sample(245, 340), sample(555, 340)], screenshot)
+    }
+
+    #[test]
+    fn applies_distinct_base_texels_to_flat_and_simulated_captures() {
+        let dir = TempDirectory::new();
+        let first = dir.0.join("red-blue.png");
+        let second = dir.0.join("transparent-green.png");
+        let damaged = dir.0.join("damaged.png");
+        let unsupported = dir.0.join("not-png.jpg");
+        rgba_png(&first, [255, 0, 0, 255, 0, 0, 255, 255]);
+        rgba_png(&second, [0, 255, 0, 0, 0, 255, 0, 255]);
+        fs::write(&damaged, b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(&unsupported, [0xff, 0xd8, 0xff, 0x00]).unwrap();
+        let mut state = json!({
+            "patterns":[{"id":0,"name":"Panel","points":[[0,1000],[100,1000],[100,1100],[0,1100]],"arrangement":"Front"}],
+            "native_seam_groups":[{"id":123,"restored":false},{"id":567,"restored":true}]
+        });
+        call(
+            "fabric_apply",
+            json!({"fabric":"cotton","texture_image":first}),
+            &mut state,
+        )
+        .unwrap();
+        let simulation = call(
+            "simulate",
+            json!({"steps":0,"particle_distance":40}),
+            &mut state,
+        )
+        .unwrap();
+        assert!(array(&simulation["limitations"])
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("Unrecovered native seam groups omitted from constraints: 1")));
+        assert!(
+            state["simulation"]["meshes"][0]["texcoords"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 4
+        );
+        for flat in [true, false] {
+            let ([left, right], response) = capture(&mut state, flat);
+            assert!(
+                left[0] > 150 && left[1] == 0 && left[2] == 0,
+                "left: {left:?}"
+            );
+            assert!(
+                right[2] > 150 && right[0] == 0 && right[1] == 0,
+                "right: {right:?}"
+            );
+            assert!(response["render_warnings"].is_null());
+        }
+        for path in [&damaged, &unsupported] {
+            assert!(call(
+                "fabric_set_texture",
+                json!({"fabric_index":0,"image_path":path}),
+                &mut state
+            )
+            .is_err());
+            assert_eq!(
+                state["fabrics"][0]["texture_maps"]["base"],
+                json!(first.canonicalize().unwrap())
+            );
+        }
+        call(
+            "fabric_set_texture",
+            json!({"fabric_index":0,"image_path":second}),
+            &mut state,
+        )
+        .unwrap();
+        for flat in [true, false] {
+            let ([left, right], _) = capture(&mut state, flat);
+            assert!(
+                left[0] > 100 && left[0] == left[1] && left[1] == left[2],
+                "transparent: {left:?}"
+            );
+            assert!(
+                right[1] > 150 && right[0] == 0 && right[2] == 0,
+                "green: {right:?}"
+            );
+        }
+        // Older persisted simulation scenes can predate rest UVs but still render.
+        state["simulation"]["meshes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("texcoords");
+        let ([left, right], old_capture) = capture(&mut state, false);
+        assert_eq!(left, right);
+        assert!(old_capture["render_warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("without rest UVs"));
+        call(
+            "fabric_set_color",
+            json!({"fabric_index":0,"color":"#ee2211"}),
+            &mut state,
+        )
+        .unwrap();
+        assert!(state["fabrics"][0]["texture_maps"]["base"].is_null());
+        let ([left, right], _) = capture(&mut state, true);
+        assert_eq!(left, right);
+        assert!(left[0] > 200 && left[1] < 40 && left[2] < 30);
     }
 }

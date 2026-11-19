@@ -1,5 +1,7 @@
 mod api;
+mod enums;
 mod http;
+mod measurements;
 mod python;
 mod ui;
 

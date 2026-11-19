@@ -40,9 +40,11 @@ fn execute(line: &str, state: &mut Value) -> Result<Value, String> {
                 } else {
                     Err("The CLO Rust bridge is stopped. Call clo_launch(with_bridge=true).".into())
                 }
-            })?;
-    *state = candidate;
-    Ok(result)
+            });
+    if result.is_ok() || matches!(request.name.as_str(), "clo_run_python" | "clo_ui_action") {
+        *state = candidate;
+    }
+    result
 }
 
 pub fn run() -> Result<(), String> {

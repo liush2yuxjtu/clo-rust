@@ -7,3 +7,5 @@ edition = "2021"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names", "KHR_texture_transform"] }
+zip = { version = "9.7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+png = "0.18"

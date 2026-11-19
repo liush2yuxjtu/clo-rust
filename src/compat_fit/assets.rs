@@ -1,4 +1,4 @@
-use super::{array, array_mut, boolean, number, pattern_index, string};
+use super::{array, array_mut, boolean, number, pattern_index, string, texture::BaseTexture};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -603,6 +603,13 @@ fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
     let png = count >= 8 && &header[..8] == b"\x89PNG\r\n\x1a\n";
     let jpeg = count >= 3 && header[..3] == [0xff, 0xd8, 0xff];
     let webp = count >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP";
+    if kind == "base" {
+        if !png {
+            return Err("the native base-color renderer requires a static PNG texture".into());
+        }
+        BaseTexture::load(&path)
+            .map_err(|error| format!("invalid base texture {}: {error}", path.display()))?;
+    }
     if !png && !jpeg && !webp {
         return Err("texture must be PNG, JPEG, or WebP".into());
     }

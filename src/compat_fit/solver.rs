@@ -46,6 +46,7 @@ pub struct Mesh {
     pub fabric_index: Value,
     pub positions: Vec<Point>,
     pub triangles: Vec<[usize; 3]>,
+    pub texcoords: Vec<Point2>,
     pub velocities: Vec<Point>,
     #[serde(skip)]
     points: Vec<Point2>,
@@ -206,6 +207,16 @@ fn bounds(points: &[Point2]) -> (Point2, Point2) {
     (low, high)
 }
 
+fn uv_coordinates(points: &[Point2]) -> Vec<Point2> {
+    let (low, high) = bounds(points);
+    let width = (high[0] - low[0]).max(1e-10);
+    let height = (high[1] - low[1]).max(1e-10);
+    points
+        .iter()
+        .map(|[x, y]| [(x - low[0]) / width, (high[1] - y) / height])
+        .collect()
+}
+
 fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
     let (low, high) = bounds(points);
     let center = std::array::from_fn::<_, 2, _>(|i| (low[i] + high[i]) / 2.0);
@@ -284,6 +295,7 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         positions,
         triangles,
         velocities,
+        texcoords: uv_coordinates(&points),
         points,
         sides,
         stiffness: if boolean(pattern, "strengthen", false) {
@@ -771,10 +783,25 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     state["simulation"] =
         json!({"steps":total,"particle_distance":distance,"quality":quality,"meshes":meshes});
+    let mut limitations = vec![
+        "self-collision unavailable".to_owned(),
+        "avatar collisions use an analytic proxy".to_owned(),
+        "fabric and edge properties are partially implemented".to_owned(),
+        "no CLO material calibration".to_owned(),
+    ];
+    let unrestored = array(&state["native_seam_groups"])
+        .iter()
+        .filter(|group| group["restored"] == false)
+        .count();
+    if unrestored > 0 {
+        limitations.push(format!(
+            "Unrecovered native seam groups omitted from constraints: {unrestored}"
+        ));
+    }
     Ok(
         json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len(),"max_stitch_gap_mm":gap,
-        "max_constraint_length_mm":effective,"limitations":["self-collision unavailable","avatar collisions use an analytic proxy","fabric and edge properties are partially implemented","no CLO material calibration"]}),
+        "max_constraint_length_mm":effective,"limitations":limitations}),
     )
 }
 

@@ -1,4 +1,4 @@
-use super::{api, text, DomainCall, ToolResult};
+use super::{api, enums, text, DomainCall, ToolResult};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -50,8 +50,18 @@ impl Runner {
         let mut entries = catalog["entries"].clone();
         if let Some(entries) = entries.as_array_mut() {
             for entry in entries {
-                if entry["kind"] == "type" {
-                    let name = entry["name"].as_str().unwrap_or_default();
+                let name = entry["name"].as_str().unwrap_or_default();
+                if let Some(family) = enums::family(name) {
+                    let members = family
+                        .members
+                        .iter()
+                        .map(|(name, value, _)| ((*name).to_owned(), json!(value)))
+                        .collect::<serde_json::Map<_, _>>();
+                    entry["enum_members"] = Value::Object(members);
+                } else if let Some((family, member, _)) = enums::member(name) {
+                    entry["enum_type"] = json!(family);
+                    entry["enum_member"] = json!(member);
+                } else if entry["kind"] == "type" {
                     entry["defaults"] = api::defaults(name)?;
                 }
             }
@@ -95,9 +105,19 @@ impl Runner {
             match reply["kind"].as_str() {
                 Some("api") => {
                     let name = text(&reply, "name")?;
-                    let result = api::invoke(name, &reply["args"], &reply["kwargs"], state, domain);
+                    let mut candidate = state.clone();
+                    let result = api::invoke(
+                        name,
+                        &reply["args"],
+                        &reply["kwargs"],
+                        &mut candidate,
+                        domain,
+                    );
                     self.send(&match result {
-                        Ok(value) => json!({"ok":true,"value":value}),
+                        Ok(value) => {
+                            *state = candidate;
+                            json!({"ok":true,"value":value})
+                        }
                         Err(error) => json!({"ok":false,"error":error}),
                     })?;
                 }

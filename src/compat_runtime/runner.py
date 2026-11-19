@@ -1,5 +1,6 @@
 """Persistent Python interpreter for a CLO Rust MCP engine session."""
 import contextlib
+from enum import IntEnum
 import io
 import json
 import math
@@ -72,6 +73,16 @@ def decode(value):
     return value
 
 
+def result_value(value):
+    if isinstance(value, ApiOptions):
+        return result_value(vars(value))
+    if isinstance(value, dict):
+        return {str(key): result_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list, set)):
+        return [result_value(item) for item in value]
+    return encode(value)
+
+
 def method(name, doc):
     def invoke(*args, **kwargs):
         send_message({"kind": "api", "name": name, "args": encode(args), "kwargs": encode(kwargs)})
@@ -80,7 +91,17 @@ def method(name, doc):
             raise EOFError("CLO Rust API connection was closed")
         if not reply["ok"]:
             raise RuntimeError(reply["error"])
-        return decode(reply["value"])
+        value = decode(reply["value"])
+        if name == "utility_api.GetAvatarMeasurements":
+            measurement = sys.modules["ApiTypes"].CloApiAvatarMeasurement
+            rows = []
+            for fields in value:
+                row = measurement()
+                for field, item in fields.items():
+                    setattr(row, field, item)
+                rows.append(row)
+            return rows
+        return value
 
     invoke.__name__ = name.rsplit(".", 1)[-1]
     invoke.__doc__ = doc
@@ -94,10 +115,16 @@ def main():
     setup = read_message()
     if setup is None:
         return
+    constants = []
     for entry in setup["entries"]:
         qualified_name = entry["name"]
         module, name = qualified_name.split(".", 1)
-        if entry["kind"] == "type":
+        if entry["kind"] == "constant":
+            constants.append(entry)
+            continue
+        if "enum_members" in entry:
+            member = IntEnum(name, entry["enum_members"], module=module)
+        elif entry["kind"] == "type":
             member = type(name, (ApiOptions,), {
                 "__module__": module,
                 "_qualified_name": qualified_name,
@@ -106,6 +133,10 @@ def main():
         else:
             member = method(qualified_name, entry["summary"])
         setattr(modules[module], name, member)
+    for entry in constants:
+        module, name = entry["name"].split(".", 1)
+        enum_type = getattr(modules[module], entry["enum_type"])
+        setattr(modules[module], name, enum_type[entry["enum_member"]])
     sys.modules.update(modules)
     namespace = {
         "__name__": "clo_rust_exec", "json": json, "math": math, "os": os,
@@ -124,7 +155,7 @@ def main():
                     value = namespace.get("result")
                 else:
                     value = eval(script, namespace)
-            reply = {"kind": "done", "value": encode(value), "stdout": output.getvalue()}
+            reply = {"kind": "done", "value": result_value(value), "stdout": output.getvalue()}
         except BaseException as error:
             detail = "".join(traceback.format_exception_only(type(error), error)).strip()
             reply = {"kind": "error", "error": detail, "stdout": output.getvalue()}

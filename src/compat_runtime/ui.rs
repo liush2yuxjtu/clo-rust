@@ -57,11 +57,28 @@ fn scene_patterns(state: &Value) -> &[Value] {
     array(&state["patterns"])
 }
 
+fn selection_key(state: &Value, index: usize) -> Value {
+    let pattern = &state["patterns"][index];
+    if pattern["id"].is_null() {
+        json!({"index":index})
+    } else {
+        pattern["id"].clone()
+    }
+}
+
+pub(super) fn selected_indices(state: &Value) -> Vec<usize> {
+    let keys = array(&state["runtime"]["ui"]["selected_keys"]);
+    (0..scene_patterns(state).len())
+        .filter(|index| keys.contains(&selection_key(state, *index)))
+        .collect()
+}
+
 fn selection(state: &Value) -> Option<usize> {
-    let selected = state["runtime"]["ui"]["selected"].as_u64()?;
-    usize::try_from(selected)
-        .ok()
-        .filter(|index| *index < scene_patterns(state).len())
+    let primary = &state["runtime"]["ui"]["primary_key"];
+    if primary.is_null() {
+        return None;
+    }
+    (0..scene_patterns(state).len()).find(|index| &selection_key(state, *index) == primary)
 }
 
 fn current_name(state: &Value) -> &str {
@@ -149,9 +166,7 @@ fn nodes(state: &Value, max_depth: u64) -> Vec<Value> {
         actions: &[],
     }
     .value();
-    name["AXValue"] = json!(state["runtime"]["ui"]["name"]
-        .as_str()
-        .unwrap_or_else(|| current_name(state)));
+    name["AXValue"] = json!(current_name(state));
     nodes.push(name);
     if state["runtime"]["ui"]["menu_x"].is_number() {
         nodes.push(
@@ -168,6 +183,7 @@ fn nodes(state: &Value, max_depth: u64) -> Vec<Value> {
         );
     }
     if max_depth >= 3 {
+        let selected = selected_indices(state);
         for (index, pattern) in scene_patterns(state).iter().enumerate() {
             let name = pattern["name"].as_str().unwrap_or("Unnamed pattern");
             let mut row = Node {
@@ -180,7 +196,7 @@ fn nodes(state: &Value, max_depth: u64) -> Vec<Value> {
                 actions: &["AXPress"],
             }
             .value();
-            row["AXValue"] = json!(selection(state) == Some(index));
+            row["AXValue"] = json!(selected.contains(&index));
             nodes.push(row);
         }
     }
@@ -214,14 +230,42 @@ pub(super) fn state(args: &Value, state: &mut Value) -> ToolResult {
     )
 }
 
-fn select(state: &mut Value, index: Option<usize>) {
-    state["runtime"]["ui"]["selected"] = json!(index);
-    if let Some(name) = index.and_then(|index| state["patterns"][index]["name"].as_str()) {
-        state["runtime"]["ui"]["name"] = json!(name);
-    } else {
-        state["runtime"]["ui"]["name"] = Value::Null;
-    }
+fn set_primary(state: &mut Value, index: Option<usize>) {
+    state["runtime"]["ui"]["primary_key"] = index
+        .map(|index| selection_key(state, index))
+        .unwrap_or(Value::Null);
     state["runtime"]["ui"]["focus"] = Value::Null;
+}
+
+fn select(state: &mut Value, index: Option<usize>) {
+    let keys: Vec<_> = index
+        .map(|index| selection_key(state, index))
+        .into_iter()
+        .collect();
+    state["runtime"]["ui"]["selected_keys"] = json!(keys);
+    set_primary(state, index);
+}
+
+pub(super) fn modify_selection(state: &mut Value, index: usize, on: bool) -> Result<(), String> {
+    if index >= scene_patterns(state).len() {
+        return Err("Invalid pattern index".into());
+    }
+    let key = selection_key(state, index);
+    let mut keys = array(&state["runtime"]["ui"]["selected_keys"]).to_vec();
+    keys.retain(|candidate| candidate != &key);
+    let primary = if on {
+        keys.push(key);
+        Some(index)
+    } else if selection(state) == Some(index) {
+        keys.last().and_then(|previous| {
+            (0..scene_patterns(state).len()).find(|index| &selection_key(state, *index) == previous)
+        })
+    } else {
+        selection(state)
+    };
+    state["runtime"]["ui"]["selected_keys"] = json!(keys);
+    set_primary(state, primary);
+    Ok(())
 }
 
 fn hide_menu(state: &mut Value) {
@@ -229,10 +273,18 @@ fn hide_menu(state: &mut Value) {
     state["runtime"]["ui"]["menu_y"] = Value::Null;
 }
 
+fn mutate(domain: DomainCall, name: &str, args: &Value, state: &mut Value) -> ToolResult {
+    let mut candidate = state.clone();
+    let result = domain(name, args, &mut candidate)?;
+    *state = candidate;
+    Ok(result)
+}
+
 fn new_pattern(state: &mut Value, domain: DomainCall) -> Result<(), String> {
     let index = scene_patterns(state).len();
     let position = index as f64 * 45.0;
-    let result = domain(
+    let result = mutate(
+        domain,
         "pattern_create",
         &json!({"name":format!("Rectangle {}",index+1),
         "points":[[position,0.0],[position+120.0,0.0],[position+120.0,180.0],[position,180.0]]}),
@@ -250,21 +302,28 @@ fn choose_button(id: usize, state: &mut Value, domain: DomainCall) -> Result<(),
     match id {
         2 => new_pattern(state, domain),
         3 | 9 => {
-            let index = selection(state).ok_or("Select a pattern before deleting it")?;
-            domain(
+            let selected: Vec<_> = selected_indices(state)
+                .iter()
+                .map(usize::to_string)
+                .collect();
+            if selected.is_empty() {
+                return Err("Select a pattern before deleting it".into());
+            }
+            mutate(
+                domain,
                 "pattern_delete",
-                &json!({"patterns":[index.to_string()]}),
+                &json!({"patterns":selected}),
                 state,
             )?;
             select(state, None);
             Ok(())
         }
         4 => {
-            domain("simulate", &json!({"steps":100}), state)?;
+            mutate(domain, "simulate", &json!({"steps":100}), state)?;
             Ok(())
         }
         5 => {
-            domain("simulation_reset", &json!({}), state)?;
+            mutate(domain, "simulation_reset", &json!({}), state)?;
             Ok(())
         }
         id if id >= PATTERN_BASE && id - PATTERN_BASE < scene_patterns(state).len() => {
@@ -280,12 +339,12 @@ fn rename(name: &str, state: &mut Value, domain: DomainCall) -> Result<(), Strin
     if name.trim().is_empty() || name.chars().count() > 256 {
         return Err("Pattern name must contain 1..256 characters".into());
     }
-    domain(
+    mutate(
+        domain,
         "pattern_ops",
         &json!({"pattern":index.to_string(),"op":"rename","args":{"name":name}}),
         state,
     )?;
-    state["runtime"]["ui"]["name"] = json!(name);
     Ok(())
 }
 
@@ -438,7 +497,8 @@ pub(super) fn action(args: &Value, state_ref: &mut Value, domain: DomainCall) ->
                     if let Some(index) =
                         hit_pattern(&outlines, transform, x - CANVAS_X, y - CANVAS_Y)
                     {
-                        domain(
+                        mutate(
+                            domain,
                             "pattern_ops",
                             &json!({"pattern":index.to_string(),"op":"move_2d","args":{"dx":(end_x-x)/transform.scale,"dy":(y-end_y)/transform.scale}}),
                             state_ref,
@@ -458,12 +518,7 @@ pub(super) fn action(args: &Value, state_ref: &mut Value, domain: DomainCall) ->
             if state_ref["runtime"]["ui"]["focus"] != json!("name") {
                 return Err("Focus the pattern name field before entering text".into());
             }
-            let next = format!(
-                "{}{value}",
-                state_ref["runtime"]["ui"]["name"]
-                    .as_str()
-                    .unwrap_or_default()
-            );
+            let next = format!("{}{value}", current_name(state_ref));
             rename(&next, state_ref, domain)?;
         }
         "key" => match keycode {
@@ -476,10 +531,7 @@ pub(super) fn action(args: &Value, state_ref: &mut Value, domain: DomainCall) ->
             }
             51 | 117 => {
                 if state_ref["runtime"]["ui"]["focus"] == json!("name") {
-                    let mut next = state_ref["runtime"]["ui"]["name"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned();
+                    let mut next = current_name(state_ref).to_owned();
                     next.pop();
                     if !next.is_empty() {
                         rename(&next, state_ref, domain)?;
@@ -651,9 +703,7 @@ fn html(state: &Value, outlines: &Outlines) -> String {
             "<button style=\"left:{left}px;width:{width}px\"{disabled}>{title}</button>"
         ));
     }
-    let field = state["runtime"]["ui"]["name"]
-        .as_str()
-        .unwrap_or_else(|| current_name(state));
+    let field = current_name(state);
     let mut rows = String::new();
     let mut shapes = String::new();
     let transform = transform(state, outlines);
@@ -667,9 +717,10 @@ fn html(state: &Value, outlines: &Outlines) -> String {
             colors.insert(index, color);
         }
     }
+    let selected_indices = selected_indices(state);
     for (index, pattern) in scene_patterns(state).iter().enumerate() {
         let name = escape(pattern["name"].as_str().unwrap_or("Unnamed pattern"));
-        let selected = if selection(state) == Some(index) {
+        let selected = if selected_indices.contains(&index) {
             " selected"
         } else {
             ""

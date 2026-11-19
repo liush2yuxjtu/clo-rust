@@ -2,12 +2,15 @@ use super::{
     array,
     solver::{self, cross, dot, sub},
     string,
+    texture::BaseTexture,
 };
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -21,66 +24,104 @@ struct Drawing {
     points: Vec<Point>,
     faces: Vec<[usize; 3]>,
     color: Rgb,
+    texcoords: Vec<[f64; 2]>,
+    texture: Option<Rc<BaseTexture>>,
 }
 
-fn cloth_color(state: &Value, id: &Value, fallback: usize) -> Rgb {
-    let fabric = array(&state["fabrics"])
-        .iter()
-        .find(|f| !id.is_null() && f["index"] == *id);
-    fabric
-        .and_then(|f| serde_json::from_value::<[f64; 3]>(f["color"].clone()).ok())
-        .map(|c| c.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8))
-        .unwrap_or(
-            [
-                [95, 151, 193],
-                [138, 122, 177],
-                [151, 172, 116],
-                [197, 135, 114],
-            ][fallback % 4],
-        )
+#[derive(Default)]
+struct TextureCache {
+    by_path: BTreeMap<String, Option<Rc<BaseTexture>>>,
+    warnings: Vec<String>,
 }
 
-fn pieces(state: &Value, flat: bool) -> Result<Vec<Drawing>, String> {
-    if flat {
-        return Ok(solver::layout_meshes(state)?
-            .into_iter()
-            .enumerate()
-            .map(|(i, m)| Drawing {
-                color: cloth_color(state, &m.fabric_index, i),
-                points: m.positions,
-                faces: m.triangles,
+impl TextureCache {
+    fn load(&mut self, path: &str) -> Option<Rc<BaseTexture>> {
+        self.by_path
+            .entry(path.to_owned())
+            .or_insert_with(|| match BaseTexture::load(Path::new(path)) {
+                Ok(texture) => Some(Rc::new(texture)),
+                Err(error) => {
+                    self.warnings
+                        .push(format!("Base texture {path} was skipped: {error}"));
+                    None
+                }
             })
-            .collect());
+            .clone()
     }
+
+    fn apply(&mut self, state: &Value, id: &Value, fallback: usize, drawing: &mut Drawing) {
+        let fabric = array(&state["fabrics"])
+            .iter()
+            .find(|f| !id.is_null() && f["index"] == *id);
+        drawing.color = fabric
+            .and_then(|f| serde_json::from_value::<[f64; 3]>(f["color"].clone()).ok())
+            .map(|c| c.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8))
+            .unwrap_or(
+                [
+                    [95, 151, 193],
+                    [138, 122, 177],
+                    [151, 172, 116],
+                    [197, 135, 114],
+                ][fallback % 4],
+            );
+        if let Some(path) = fabric.and_then(|f| f["texture_maps"]["base"].as_str()) {
+            if drawing.texcoords.len() == drawing.points.len() {
+                drawing.texture = self.load(path);
+            } else {
+                let message="Base texture was skipped for a saved mesh without rest UVs. Simulate again to generate them.";
+                if !self.warnings.iter().any(|warning| warning == message) {
+                    self.warnings.push(message.into());
+                }
+            }
+        }
+    }
+}
+
+fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<Drawing>, String> {
     let cached = array(&state["simulation"]["meshes"]);
-    if cached.is_empty() {
-        return Ok(solver::initial_meshes(state)?
+    if flat || cached.is_empty() {
+        let meshes = if flat {
+            solver::layout_meshes(state)?
+        } else {
+            solver::initial_meshes(state)?
+        };
+        return Ok(meshes
             .into_iter()
             .enumerate()
-            .filter(|(_, m)| !hidden(state, &m.id))
-            .map(|(i, m)| Drawing {
-                color: cloth_color(state, &m.fabric_index, i),
-                points: m.positions,
-                faces: m.triangles,
+            .filter(|(_, mesh)| flat || !hidden(state, &mesh.id))
+            .map(|(index, mesh)| {
+                let mut drawing = Drawing {
+                    points: mesh.positions,
+                    faces: mesh.triangles,
+                    color: [0; 3],
+                    texcoords: mesh.texcoords,
+                    texture: None,
+                };
+                textures.apply(state, &mesh.fabric_index, index, &mut drawing);
+                drawing
             })
             .collect());
     }
     cached
         .iter()
         .enumerate()
-        .filter(|(_, m)| !hidden(state, &m["id"]))
-        .map(|(i, m)| {
+        .filter(|(_, mesh)| !hidden(state, &mesh["id"]))
+        .map(|(index, mesh)| {
             let fabric_id = array(&state["patterns"])
                 .iter()
-                .find(|p| p["id"] == m["id"])
-                .map_or(&m["fabric_index"], |p| &p["fabric_index"]);
-            Ok(Drawing {
-                color: cloth_color(state, fabric_id, i),
-                points: serde_json::from_value(m["positions"].clone())
+                .find(|p| p["id"] == mesh["id"])
+                .map_or(&mesh["fabric_index"], |p| &p["fabric_index"]);
+            let mut drawing = Drawing {
+                color: [0; 3],
+                points: serde_json::from_value(mesh["positions"].clone())
                     .map_err(|e| format!("invalid saved mesh positions: {e}"))?,
-                faces: serde_json::from_value(m["triangles"].clone())
+                faces: serde_json::from_value(mesh["triangles"].clone())
                     .map_err(|e| format!("invalid saved mesh faces: {e}"))?,
-            })
+                texcoords: serde_json::from_value(mesh["texcoords"].clone()).unwrap_or_default(),
+                texture: None,
+            };
+            textures.apply(state, fabric_id, index, &mut drawing);
+            Ok(drawing)
         })
         .collect()
 }
@@ -162,7 +203,13 @@ impl Canvas {
         }
     }
 
-    fn triangle(&mut self, a: Point, b: Point, c: Point, color: Rgb, flat: bool) {
+    fn triangle(
+        &mut self,
+        [a, b, c]: [Point; 3],
+        color: Rgb,
+        texture: Option<(&BaseTexture, [[f64; 2]; 3])>,
+        flat: bool,
+    ) {
         let [w, h] = SIZE;
         let signed = |a: Point, b: Point, x: f64, y: f64| {
             (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
@@ -179,7 +226,8 @@ impl Canvas {
             let light = [-0.43, -0.49, 0.76];
             0.67 + 0.33 * (dot(normal, light) / n).abs()
         };
-        let rgb = color.map(|c| (f64::from(c) * factor).min(255.0) as u8);
+        let shade = |rgb: Rgb| rgb.map(|c| (f64::from(c) * factor).min(255.0) as u8);
+        let flat_rgb = shade(color);
         let x0 = a[0].min(b[0]).min(c[0]).floor().clamp(0.0, (w - 1) as f64) as usize;
         let x1 = a[0].max(b[0]).max(c[0]).ceil().clamp(0.0, (w - 1) as f64) as usize;
         let y0 = a[1].min(b[1]).min(c[1]).floor().clamp(0.0, (h - 1) as f64) as usize;
@@ -198,6 +246,12 @@ impl Canvas {
                 let index = y * w + x;
                 if depth >= self.depth[index] {
                     self.depth[index] = depth;
+                    let rgb = texture.map_or(flat_rgb, |(texture, coordinates)| {
+                        let uv = std::array::from_fn(|i| {
+                            u * coordinates[0][i] + v * coordinates[1][i] + t * coordinates[2][i]
+                        });
+                        shade(texture.sample(uv, color))
+                    });
                     self.pixels[3 * index..3 * index + 3].copy_from_slice(&rgb);
                 }
             }
@@ -244,7 +298,22 @@ impl Canvas {
             if [a, b, c].iter().any(|&i| i >= points.len()) {
                 return Err("snapshot mesh has out-of-range triangle index".into());
             }
-            self.triangle(points[a], points[b], points[c], drawing.color, flat);
+            let texture = drawing.texture.as_deref().map(|texture| {
+                (
+                    texture,
+                    [
+                        drawing.texcoords[a],
+                        drawing.texcoords[b],
+                        drawing.texcoords[c],
+                    ],
+                )
+            });
+            self.triangle(
+                [points[a], points[b], points[c]],
+                drawing.color,
+                texture,
+                flat,
+            );
             if flat {
                 for (start, end) in [(a, b), (b, c), (c, a)] {
                     *edge_incidence
@@ -403,11 +472,14 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
                         points,
                         faces,
                         color: [190, 183, 177],
+                        texcoords: Vec::new(),
+                        texture: None,
                     }),
             );
         }
     }
-    drawings.extend(pieces(state, flat)?);
+    let mut textures = TextureCache::default();
+    drawings.extend(pieces(state, flat, &mut textures)?);
     let mut images = Vec::new();
     for view in &views {
         match make_image(&drawings, &root, string(args, "label", "snap"), view, flat) {
@@ -423,6 +495,9 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
         }
     }
     let mut result = json!({"images":images});
+    if !textures.warnings.is_empty() {
+        result["render_warnings"] = json!(textures.warnings);
+    }
     if flat {
         result["path"] = result["images"][0]["path"].clone();
     }

@@ -121,7 +121,7 @@ fn seams_survive_pattern_index_changes_and_round_trip() {
     let error = dispatch("scene_open", &json!({"path":native}), &mut state)
         .unwrap()
         .unwrap_err();
-    assert!(error.contains("native zprj"));
+    assert!(error.contains("native file header"));
     assert_eq!(state, current);
 }
 
@@ -165,4 +165,22 @@ fn export_import_formats_use_geometry_and_append_remaps_ids() {
                 .any(|p| (p[0].as_f64().unwrap() - 100.).abs() < 1e-4));
         }
     }
+}
+
+#[test]
+fn portable_project_ignores_archived_runtime_state() {
+    let root = Temporary::new();
+    let path = root.0.join("session.clorust");
+    let mut state = scene();
+    piece(&mut state, "Panel");
+    state["runtime"] = json!({"instance": "before", "script_handles": ["one"]});
+    tool(&mut state, "scene_save", json!({"path": path}));
+    let mut archive: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(archive["scene"].get("runtime").is_none());
+    archive["scene"]["runtime"] = json!({"instance": "forged"});
+    fs::write(&path, serde_json::to_vec(&archive).unwrap()).unwrap();
+    let active = json!({"instance": "current", "script_handles": ["two"]});
+    state["runtime"] = active.clone();
+    tool(&mut state, "scene_open", json!({"path": path}));
+    assert_eq!(state["runtime"], active);
 }

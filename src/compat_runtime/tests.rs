@@ -2,6 +2,7 @@ use super::*;
 
 fn domain(name: &str, args: &Value, state: &mut Value) -> ToolResult {
     match name {
+        "avatar_measurements" => Ok(json!({"body":state["avatar"]["body"]})),
         "pattern_create" => {
             let patterns = state["patterns"]
                 .as_array_mut()
@@ -321,4 +322,162 @@ fn rest_get_and_post_headers_and_body() {
     );
     assert_eq!(get["value"], post["value"]);
     worker.join().unwrap();
+}
+
+#[test]
+fn enum_constants_roots_and_typed_values() {
+    let mut scene = json!({"fabrics":[{"color":"#ffffff"}]});
+    let catalog = tool(
+        "clo_api_catalog",
+        json!({"query":"CLOAPI_ANCHOR_RIGHT","limit":10}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(catalog["total"], 3);
+    let constant = tool(
+        "clo_api_call",
+        json!({"name":"ApiTypes.CLOAPI_ANCHOR_RIGHT"}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(
+        constant["value"]["repr"],
+        "<CloApiAnchorPoint.CLOAPI_ANCHOR_RIGHT: 3>"
+    );
+    let through_alias=tool("clo_api_call",json!({"name":"fabric_api.GetFabricPBRMaterialBaseColor","args":[0,{"$enum":"ApiTypes.MaterialTargetComponent.COMPONENT_FRONT"}]}),&mut scene).unwrap();
+    assert_eq!(through_alias["value"], json!([1.0, 1.0, 1.0, 1.0]));
+    let through_constructor = tool(
+        "clo_api_call",
+        json!({"name":"ApiTypes.CloApiAnchorPoint","args":[3]}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(
+        through_constructor["value"]["repr"],
+        constant["value"]["repr"]
+    );
+    let script = tool(
+        "clo_run_python",
+        json!({"code":"[int(ApiTypes.CLOAPI_ANCHOR_RIGHT), ApiTypes.CloApiAnchorPoint(3).name]"}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(script["value"], json!([3, "CLOAPI_ANCHOR_RIGHT"]));
+    tool("clo_stop_bridge", json!({}), &mut scene).unwrap();
+}
+
+#[test]
+fn unicode_name_queries_and_selection_share_workbench_state() {
+    let mut scene = json!({"patterns":[{"id":3,"name":"前片"},{"id":4,"name":"后片"}],"seams":[{"name":"侧缝"}]});
+    let get = |name: String, args: Value, state: &mut Value| {
+        tool(
+            "clo_api_call",
+            json!({"name":format!("pattern_api.{name}"),"args":args}),
+            state,
+        )
+        .unwrap()["value"]
+            .clone()
+    };
+    assert_eq!(
+        get("GetPatternIndexW".into(), json!(["后片"]), &mut scene),
+        1
+    );
+    assert_eq!(
+        get(
+            "GetSeamlinePairGroupIndexFromNameW".into(),
+            json!(["侧缝"]),
+            &mut scene
+        ),
+        0
+    );
+    assert!(get(
+        "SelectPatternViaName".into(),
+        json!(["后片", true]),
+        &mut scene
+    )
+    .is_null());
+    assert!(get("SelectPatternViaIndex".into(), json!([0, true]), &mut scene).is_null());
+    assert_eq!(
+        get("GetSelectedPattern".into(), json!([]), &mut scene),
+        json!(["前片", "后片"])
+    );
+    let state = tool("clo_ui_state", json!({}), &mut scene).unwrap();
+    assert_eq!(
+        state["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["AXRole"] == "AXRow" && node["AXValue"] == true)
+            .count(),
+        2
+    );
+    assert!(get(
+        "SelectPatternViaIndex".into(),
+        json!([0, false]),
+        &mut scene
+    )
+    .is_null());
+    scene["patterns"].as_array_mut().unwrap().remove(0);
+    assert_eq!(
+        get("GetSelectedPatternViaIndex".into(), json!([0]), &mut scene),
+        true
+    );
+    assert_eq!(
+        get("GetSelectedPattern".into(), json!([]), &mut scene),
+        json!(["后片"])
+    );
+}
+
+#[test]
+fn avatar_rows_keep_python_attributes_and_raw_handles() {
+    let mut scene = json!({"avatar":{"name":"Mia","body":{"height":1700.0,"waist":680.0}}});
+    let row = tool("clo_run_python",json!({"code":"[(m.measurementName, m.value, m.unit) for m in utility_api.GetAvatarMeasurements(0)]"}),&mut scene).unwrap();
+    assert_eq!(
+        row["value"],
+        json!([
+            ["HEIGHT_Total", 1700.0, "mm"],
+            ["CIRCUMFERENCE_Waist", 680.0, "mm"]
+        ])
+    );
+    let raw = tool(
+        "clo_api_call",
+        json!({"name":"utility_api.GetAvatarMeasurements","args":[0]}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(raw["value"][0]["type"], "CloApiAvatarMeasurement");
+    let ids = raw["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["$handle"].clone())
+        .collect::<Vec<_>>();
+    let released = tool("clo_api_release", json!({"handles":ids}), &mut scene).unwrap();
+    assert_eq!(released["released"], 2);
+    let defaults = tool(
+        "clo_run_python",
+        json!({"code":"ApiTypes.CloApiAvatarMeasurement()"}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(defaults["value"]["measurementName"], "");
+    assert_eq!(defaults["value"]["value"], 0.0);
+    tool("clo_stop_bridge", json!({}), &mut scene).unwrap();
+}
+
+#[test]
+fn python_retains_completed_calls_before_script_failure() {
+    let mut scene = json!({"patterns":[]});
+    let code="created = pattern_api.CreatePatternWithPoints([(0,0),(40,0),(0,40)]); raise ValueError('expected-explicit-failure')";
+    let error = tool("clo_run_python", json!({"code":code}), &mut scene).unwrap_err();
+    assert!(error.contains("expected-explicit-failure"));
+    assert_eq!(scene["patterns"].as_array().unwrap().len(), 1);
+    let status = tool(
+        "clo_run_python",
+        json!({"code":"(created, pattern_api.GetPatternCount())"}),
+        &mut scene,
+    )
+    .unwrap();
+    assert_eq!(status["value"], json!([0, 1]));
+    tool("clo_stop_bridge", json!({}), &mut scene).unwrap();
 }

@@ -98,8 +98,8 @@ fn bezier(points: &[Point], t: f64) -> Point {
     work[0]
 }
 
-fn curve(edge: &[Point]) -> Vec<Point> {
-    if edge.len() < 3 {
+fn curve(edge: &[Point], sampled: bool) -> Vec<Point> {
+    if sampled || edge.len() < 3 {
         return edge.to_vec();
     }
     if edge[1..edge.len() - 1].iter().all(|p| p.kind == 3) {
@@ -135,7 +135,7 @@ fn curve(edge: &[Point]) -> Vec<Point> {
 pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
     let mut result = Vec::new();
     for edge in split_edges(&points(pattern)?) {
-        let sampled = curve(&edge);
+        let sampled = curve(&edge, flag(pattern, "sampled_polyline", false));
         result.extend_from_slice(&sampled[..sampled.len() - 1]);
     }
     Ok(result)
@@ -181,7 +181,7 @@ fn lines(pattern: &Value) -> Result<Vec<Value>, String> {
     let [dx, dy] = offset(pattern);
     let [left, bottom, right, top] = bounds(pattern)?;
     for (line, edge) in split_edges(&points(pattern)?).iter().enumerate() {
-        let sampled = curve(edge);
+        let sampled = curve(edge, flag(pattern, "sampled_polyline", false));
         let length: f64 = sampled.windows(2).map(|p| p[0].distance(p[1])).sum();
         let mut walked = 0.;
         let mut mid = sampled[0];

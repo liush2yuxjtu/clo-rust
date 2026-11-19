@@ -1,4 +1,4 @@
-use super::{array, text, DomainCall, ToolResult};
+use super::{array, enums, text, DomainCall, ToolResult};
 use serde_json::{json, Map, Value};
 
 const MODULES: [&str; 7] = [
@@ -256,7 +256,7 @@ const FUNCTIONS: &[Entry] = functions![
     ),
     (
         "pattern_api.GetPatternInputInformation",
-        "(index)",
+        "(index=None)",
         "Get the source points and segments as JSON text."
     ),
     (
@@ -390,6 +390,76 @@ const FUNCTIONS: &[Entry] = functions![
         "Unfold a pattern around the selected edge."
     ),
     (
+        "pattern_api.GetArrangementOfPatternW",
+        "(name)",
+        "Get the arrangement assigned to the named pattern."
+    ),
+    (
+        "pattern_api.GetBoundingBoxOfPatternW",
+        "(name)",
+        "Get the bounding box of the named pattern."
+    ),
+    (
+        "pattern_api.GetParticleDistanceOfPatternW",
+        "(name)",
+        "Get the particle distance of the named pattern."
+    ),
+    (
+        "pattern_api.GetPatternIndex",
+        "(name)",
+        "Find the scene index of the named pattern."
+    ),
+    (
+        "pattern_api.GetPatternIndexW",
+        "(name)",
+        "Find the scene index of the named pattern."
+    ),
+    (
+        "pattern_api.GetPatternInputInformationW",
+        "(index=None)",
+        "Get one or all pattern inputs as JSON text."
+    ),
+    (
+        "pattern_api.GetSeamlinePairGroupIndexFromName",
+        "(name)",
+        "Find the scene index of the named sewing group."
+    ),
+    (
+        "pattern_api.GetSeamlinePairGroupIndexFromNameW",
+        "(name)",
+        "Find the scene index of the named sewing group."
+    ),
+    (
+        "pattern_api.GetSeamlinePairGroupNameW",
+        "(index)",
+        "Get the name of the sewing group."
+    ),
+    (
+        "pattern_api.GetSelectedPattern",
+        "()",
+        "List the pattern names selected in the workbench."
+    ),
+    (
+        "pattern_api.GetSelectedPatternViaIndex",
+        "(index)",
+        "Check whether the pattern is selected."
+    ),
+    (
+        "pattern_api.SelectPatternViaIndex",
+        "(index, select)",
+        "Change selection for one pattern."
+    ),
+    (
+        "pattern_api.SelectPatternViaName",
+        "(name, select)",
+        "Change selection for the named pattern."
+    ),
+    (
+        "pattern_api.SetPatternPieceFabricIndex",
+        "(index, fabric)",
+        "Assign an existing fabric to the specified pattern."
+    ),
+    (
         "utility_api.DeleteAvatar",
         "(indices)",
         "Delete the specified in-scene avatars."
@@ -477,6 +547,17 @@ const FUNCTIONS: &[Entry] = functions![
 ];
 
 const TYPES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "ApiTypes.CloApiAvatarMeasurement",
+        &[
+            ("basicLength", "0.0"),
+            ("measurementName", "\"\""),
+            ("measurementType", "\"\""),
+            ("surfaceLength", "0.0"),
+            ("unit", "\"\""),
+            ("value", "0.0"),
+        ],
+    ),
     ("ApiTypes.ExportDxfOption", &[("m_bMetric", "true")]),
     (
         "ApiTypes.ImportDxfOption",
@@ -529,7 +610,7 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
         return Err("limit must be 1..500".into());
     }
     let mut entries = Vec::new();
-    let mut add = |name: &str, kind: &str, signature: &str, summary: &str| {
+    let mut add = |name: &str, kind: &str, signature: Option<&str>, summary: &str| {
         if !module.is_empty() && name.split('.').next() != Some(module) {
             return;
         }
@@ -539,15 +620,23 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
         }
     };
     for entry in FUNCTIONS {
-        add(entry.name, "function", entry.signature, entry.doc);
+        add(entry.name, "function", Some(entry.signature), entry.doc);
     }
     for (name, _) in TYPES {
+        add(name, "type", Some("()"), "Structured API value.");
+    }
+    for family in enums::FAMILIES {
         add(
-            name,
+            &format!("ApiTypes.{}", family.name),
             "type",
-            "()",
-            "Options for an import or export operation.",
+            None,
+            "Members:",
         );
+        for (member, _, global) in family.members {
+            if *global {
+                add(&format!("ApiTypes.{member}"), "constant", None, "Members:");
+            }
+        }
     }
     entries.sort_by_key(|entry| {
         let name = entry["name"].as_str().unwrap_or_default();
@@ -579,7 +668,18 @@ pub(super) fn describe(name: &str) -> ToolResult {
             .iter()
             .map(|(field, default)| json!({"name":field,"doc":format!("Default: {default}")}))
             .collect();
-        return Ok(json!({"name":name,"doc":"Import/export options.","members":members}));
+        return Ok(json!({"name":name,"doc":"Structured API value.","members":members}));
+    }
+    if let Some(family) = enums::family(name) {
+        let members = family
+            .members
+            .iter()
+            .map(|(name, value, _)| json!({"name":name,"doc":format!("Value: {value}")}))
+            .collect::<Vec<_>>();
+        return Ok(json!({"name":name,"doc":"Members:","members":members}));
+    }
+    if let Some((family, member, value)) = enums::member(name) {
+        return Ok(json!({"name":name,"doc":format!("{family}.{member}: {value}"),"members":[]}));
     }
     Err(format!(
         "Unknown Rust API name: {name}. Use clo_api_catalog for implemented entries."
@@ -590,10 +690,10 @@ pub(super) fn doc(name: &str) -> ToolResult {
     if name.contains('.') {
         return describe(name);
     }
-    let matches: Vec<_> = FUNCTIONS
+    let available = catalog(&json!({"query":name,"limit":500}))?;
+    let matches: Vec<_> = array(&available["entries"])
         .iter()
-        .map(|entry| entry.name)
-        .chain(TYPES.iter().map(|(qualified, _)| *qualified))
+        .filter_map(|entry| entry["name"].as_str())
         .filter(|qualified| qualified.rsplit('.').next() == Some(name))
         .collect();
     match matches.as_slice() {
@@ -616,7 +716,8 @@ fn typed(name: &str, fields: &Value) -> ToolResult {
         let default: Value = serde_json::from_str(default).map_err(|error| error.to_string())?;
         let value = fields.get(*field).unwrap_or(&default);
         if !((default.is_number() && value.is_number())
-            || (default.is_boolean() && value.is_boolean()))
+            || (default.is_boolean() && value.is_boolean())
+            || (default.is_string() && value.is_string()))
         {
             return Err(format!("Invalid value for field {name}.{field}"));
         }
@@ -654,11 +755,14 @@ fn decode(value: &Value, state: &Value) -> ToolResult {
             .cloned()
             .ok_or_else(|| format!("Unknown or released API handle: {id}"));
     }
-    if let Some(selected) = map.get("$enum") {
+    if map.contains_key("$enum") {
         if map.len() != 1 {
             return Err("Enum must be the only key".into());
         }
-        return Err(format!("Unknown Rust API enum member: {selected}"));
+        let selected = text(value, "$enum")?;
+        return enums::member(selected)
+            .map(|(_, _, value)| json!(value))
+            .ok_or_else(|| format!("Unknown Rust API enum member: {selected}"));
     }
     if map.contains_key("$type") {
         let name = text(value, "$type")?;
@@ -667,6 +771,17 @@ fn decode(value: &Value, state: &Value) -> ToolResult {
             .any(|key| !["$type", "args", "fields"].contains(&key.as_str()))
         {
             return Err("Unknown typed object keys".into());
+        }
+        if let Some(family) = enums::family(name) {
+            if value["fields"]
+                .as_object()
+                .is_some_and(|fields| !fields.is_empty())
+            {
+                return Err(format!("{name} has no writable fields"));
+            }
+            let arguments = decode(&value["args"], state)?;
+            let (_, result) = enum_value(family.name, family.members, &arguments)?;
+            return Ok(json!(result));
         }
         if value["args"]
             .as_array()
@@ -683,7 +798,7 @@ fn decode(value: &Value, state: &Value) -> ToolResult {
         .map(Value::Object)
 }
 
-fn handle(name: &str, fields: Value, state: &mut Value) -> ToolResult {
+fn handle(kind: &str, repr: String, fields: Value, state: &mut Value) -> ToolResult {
     if state["runtime"]["handles"].as_object().map_or(0, Map::len) >= 1_000 {
         return Err("Handle storage full. Release handles before another call.".into());
     }
@@ -692,10 +807,12 @@ fn handle(name: &str, fields: Value, state: &mut Value) -> ToolResult {
         .unwrap_or(0)
         .saturating_add(1);
     state["runtime"]["handle_sequence"] = json!(sequence);
-    let id = format!("{:08x}{sequence:016x}", std::process::id());
-    let kind = name.rsplit('.').next().unwrap_or(name);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos());
+    let id = format!("{:08x}{timestamp:08x}{sequence:016x}", std::process::id());
     state["runtime"]["handles"][&id] = json!({"type":kind,"fields":fields});
-    Ok(json!({"$handle":id,"type":kind,"repr":format!("<{name}>")}))
+    Ok(json!({"$handle":id,"type":kind,"repr":repr}))
 }
 
 pub(super) fn release(args: &Value, state: &mut Value) -> ToolResult {
@@ -721,7 +838,29 @@ pub(super) fn release(args: &Value, state: &mut Value) -> ToolResult {
 
 pub(super) fn call(args: &Value, state: &mut Value, domain: DomainCall) -> ToolResult {
     let name = text(args, "name")?;
-    let value = invoke(name, &args["args"], &args["kwargs"], state, domain)?;
+    let mut value = invoke(name, &args["args"], &args["kwargs"], state, domain)?;
+    if name == "utility_api.GetAvatarMeasurements" {
+        let rows = value.as_array().ok_or("Invalid avatar measurement rows")?;
+        let current = state["runtime"]["handles"].as_object().map_or(0, Map::len);
+        if current.saturating_add(rows.len()) > 1_000 {
+            return Err("Handle storage full. Release handles before another call.".into());
+        }
+        value = Value::Array(
+            rows.iter()
+                .map(|row| {
+                    handle(
+                        "CloApiAvatarMeasurement",
+                        format!(
+                            "<CloApiAvatarMeasurement {}>",
+                            row["measurementName"].as_str().unwrap_or_default()
+                        ),
+                        row.clone(),
+                        state,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
     Ok(json!({"name":name,"value":value}))
 }
 
@@ -870,6 +1009,41 @@ fn pattern_ref(value: &Value) -> Result<String, String> {
         .ok_or_else(|| format!("Invalid pattern index: {value}"))
 }
 
+fn find_name(records: &[Value], name: &Value) -> Option<usize> {
+    let name = name.as_str()?;
+    records
+        .iter()
+        .position(|record| record["name"].as_str() == Some(name))
+}
+
+fn pattern_reference(state: &Value, value: &Value) -> Result<String, String> {
+    if value.is_number() {
+        return pattern_ref(value);
+    }
+    find_name(array(&state["patterns"]), value)
+        .map(|index| index.to_string())
+        .ok_or_else(|| format!("Unknown pattern name: {value}"))
+}
+
+fn enum_value<'a>(
+    family: &str,
+    members: &'a [(&str, i32, bool)],
+    args: &Value,
+) -> Result<(&'a str, i32), String> {
+    let values = args
+        .as_array()
+        .filter(|args| args.len() == 1)
+        .ok_or_else(|| format!("{family} expects one integer"))?;
+    let requested = values[0]
+        .as_i64()
+        .ok_or_else(|| format!("{family} expects one integer"))?;
+    members
+        .iter()
+        .find(|(_, value, _)| i64::from(*value) == requested)
+        .map(|(member, value, _)| (*member, *value))
+        .ok_or_else(|| format!("Unknown {family} value: {requested}"))
+}
+
 pub(super) fn invoke(
     name: &str,
     args: &Value,
@@ -879,6 +1053,23 @@ pub(super) fn invoke(
 ) -> ToolResult {
     let args = decode(args, state)?;
     let kwargs = decode(kwargs, state)?;
+    if let Some((family, member, value)) = enums::member(name) {
+        return handle(
+            family,
+            format!("<{family}.{member}: {value}>"),
+            json!(value),
+            state,
+        );
+    }
+    if let Some(family) = enums::family(name) {
+        let (member, value) = enum_value(family.name, family.members, &args)?;
+        return handle(
+            family.name,
+            format!("<{}.{member}: {value}>", family.name),
+            json!(value),
+            state,
+        );
+    }
     if TYPES.iter().any(|(qualified, _)| *qualified == name) {
         if !array(&args).is_empty()
             || (!args.is_null() && !args.is_array())
@@ -888,7 +1079,8 @@ pub(super) fn invoke(
             return Err(format!("{name} accepts no arguments"));
         }
         let fields = typed(name, &Value::Null)?;
-        return handle(name, fields, state);
+        let kind = name.rsplit('.').next().unwrap_or(name);
+        return handle(kind, format!("<{name}>"), fields, state);
     }
     let entry = FUNCTIONS
         .iter()
@@ -912,7 +1104,7 @@ pub(super) fn invoke(
     let pattern_info = |state: &mut Value, field: &str| {
         domain(
             "pattern_info",
-            &json!({"pattern":pattern_ref(&arg[0])?}),
+            &json!({"pattern":pattern_reference(state,&arg[0])?}),
             state,
         )
         .map(|result| property(&result, field))
@@ -997,6 +1189,32 @@ pub(super) fn invoke(
         "pattern_api.CreatePatternWithPoints" => domain("pattern_create", &json!({"points":arg[0]}),state).map(|result| property(&result,"index")),
         "pattern_api.DeletePatternPiece" => domain("pattern_delete", &json!({"patterns":[pattern_ref(&arg[0])?]}),state).map(|_| json!(true)),
         "pattern_api.GetPatternCount" => Ok(json!(patterns.len())),
+        "pattern_api.GetPatternIndex" | "pattern_api.GetPatternIndexW" => {
+            if !arg[0].is_string() {return Err("Pattern name must be a string".into());}
+            Ok(json!(find_name(patterns,&arg[0]).map(|index| index as i64).unwrap_or(-1)))
+        }
+        "pattern_api.GetSelectedPattern" => {
+            let current = super::ui::selected_indices(state).iter().map(|index| property(&patterns[*index],"name")).collect::<Vec<_>>();
+            Ok(json!(current))
+        }
+        "pattern_api.GetSelectedPatternViaIndex" => {
+            let index = arg[0].as_u64().ok_or("Invalid pattern index")?;
+            Ok(json!(super::ui::selected_indices(state).contains(&(index as usize))))
+        }
+        "pattern_api.SelectPatternViaIndex" | "pattern_api.SelectPatternViaName" => {
+            let reference = pattern_reference(state,&arg[0])?;
+            let index = reference.parse::<usize>().map_err(|error| error.to_string())?;
+            let on = arg[1].as_bool().ok_or("Selection flag must be boolean")?;
+            super::ui::modify_selection(state,index,on)?;
+            Ok(Value::Null)
+        }
+        "pattern_api.SetPatternPieceFabricIndex" => {
+            let pattern = index(&arg[0],patterns.len(),"pattern")?;
+            let fabric = index(&arg[1],fabrics.len(),"fabric")?;
+            state["patterns"][pattern]["fabric_index"] = json!(fabric);
+            state["simulation"] = Value::Null;
+            Ok(Value::Null)
+        }
         "pattern_api.GetLineLength" => {
             if !arg[2].is_null() { return Err("Internal line length is unavailable without an internal-edge model".into()); }
             let data = pattern_info(state,"line_info")?;
@@ -1026,13 +1244,22 @@ pub(super) fn invoke(
         "pattern_api.GetPatternPiecePos" => pattern_info(state,"pos_2d"),
         "pattern_api.GetPatternPieceFabricIndex" => pattern_info(state,"fabric_index"),
         "pattern_api.GetPatternLayer" => pattern_info(state,"layer"),
-        "pattern_api.GetArrangementOfPattern" => pattern_info(state,"arrangement"),
-        "pattern_api.GetParticleDistanceOfPattern" => pattern_info(state,"particle_distance"),
+        "pattern_api.GetArrangementOfPattern" | "pattern_api.GetArrangementOfPatternW" => pattern_info(state,"arrangement"),
+        "pattern_api.GetParticleDistanceOfPattern" | "pattern_api.GetParticleDistanceOfPatternW" => pattern_info(state,"particle_distance"),
         "pattern_api.GetSeamlinePairGroupListInPattern" => pattern_info(state,"seam_groups"),
-        "pattern_api.GetBoundingBoxOfPattern" => pattern_info(state,"bbox"),
-        "pattern_api.GetPatternInputInformation" | "pattern_api.GetPatternLineInfo" => {
+        "pattern_api.GetBoundingBoxOfPattern" | "pattern_api.GetBoundingBoxOfPatternW" => pattern_info(state,"bbox"),
+        "pattern_api.GetPatternInputInformation" | "pattern_api.GetPatternInputInformationW" | "pattern_api.GetPatternLineInfo" => {
             let field = if name.ends_with("LineInfo") {"line_info"} else {"input_info"};
-            let data = pattern_info(state,field)?;
+            let data = if field == "input_info" && arg[0].is_null() {
+                let mut all = Vec::new();
+                for index in 0..patterns.len() {
+                    let single = domain("pattern_info",&json!({"pattern":index.to_string()}),state)?;
+                    all.extend_from_slice(array(&single["input_info"]["Pattern InputInformation"]));
+                }
+                json!({"Pattern InputInformation":all})
+            } else {
+                pattern_info(state,field)?
+            };
             serde_json::to_string(&data).map(Value::String).map_err(|error| error.to_string())
         }
         "pattern_api.GetArrangementList" => {
@@ -1040,7 +1267,11 @@ pub(super) fn invoke(
             Ok(json!(array(&result["names"]).iter().enumerate().map(|(index,name)| json!({"ArrangementIndex":index.to_string(),"ArrangementName":name})).collect::<Vec<_>>()))
         }
         "pattern_api.GetSeamlinePairGroupCount" => Ok(json!(array(&state["seams"]).len())),
-        "pattern_api.GetSeamlinePairGroupName" => {
+        "pattern_api.GetSeamlinePairGroupIndexFromName" | "pattern_api.GetSeamlinePairGroupIndexFromNameW" => {
+            if !arg[0].is_string() {return Err("Seam group name must be a string".into());}
+            Ok(json!(find_name(array(&state["seams"]),&arg[0]).map(|index| index as i64).unwrap_or(-1)))
+        }
+        "pattern_api.GetSeamlinePairGroupName" | "pattern_api.GetSeamlinePairGroupNameW" => {
             let seams = array(&state["seams"]);
             Ok(property(&seams[index(&arg[0],seams.len(),"seam group")?],"name"))
         }
@@ -1094,11 +1325,12 @@ pub(super) fn invoke(
         }
         "utility_api.GetAvatarMeasurements" => {
             let index = index(&arg[0],avatar_names(state).len(),"avatar")?;
-            if index == 0 {
-                domain("avatar_measurements", &json!({}),state).map(|result| property(&result,"measurements"))
+            let body = if index == 0 {
+                property(&domain("avatar_measurements", &json!({}),state)?,"body")
             } else {
-                Ok(property(&state["additional_avatars"][index-1],"body"))
-            }
+                property(&state["additional_avatars"][index-1],"body")
+            };
+            Ok(super::measurements::rows(&body))
         }
         "utility_api.GetCurrentColorwayIndex" => Ok(json!(state["current_colorway"].as_u64().unwrap_or(0))),
         "utility_api.GetCLOTemporaryFolderPath" => Ok(json!(std::env::temp_dir())),
