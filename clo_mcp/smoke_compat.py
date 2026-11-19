@@ -154,24 +154,36 @@ async def check_material_export(session, directory, png):
     assert failed.isError and set(Path(directory).iterdir()) == files
     assert obj.read_bytes() == object_bytes and material_file.read_bytes() == material_bytes
 
-    async with open_backend("rust") as reopened:
-        await successful(reopened, "scene_open", {"path": str(obj)})
-        info = await json_result(reopened, "scene_info")
-        assert info["pattern_count"] == 0
-        readback = Path(directory) / "reopened.glb"
-        await successful(reopened, "scene_export", {"path": str(readback)})
-        model, data = read_gltf_export(readback)
-        primitive = model["meshes"][0]["primitives"][0]
-        assert model["meshes"][0]["name"] == "smoke-front"
-        assert model["accessors"][primitive["attributes"]["TEXCOORD_0"]]["count"] == 3
-        pbr = model["materials"][primitive["material"]]["pbrMetallicRoughness"]
-        assert pbr["baseColorFactor"] == [0.2, 0.4, 0.6, 1.0]
-        image = model["images"][model["textures"][pbr["baseColorTexture"]["index"]]["source"]]
-        view = model["bufferViews"][image["bufferView"]]
-        offset = view.get("byteOffset", 0)
-        assert data[offset:offset + view["byteLength"]] == png
-        snapshot = await successful(reopened, "snapshot", {"views": ["front"]})
-        assert any(block.type == "image" for block in snapshot.content)
+    for mesh_file in (obj, fbx):
+        async with open_backend("rust") as reopened:
+            await successful(reopened, "scene_open", {"path": str(mesh_file)})
+            info = await json_result(reopened, "scene_info")
+            assert info["pattern_count"] == 0
+            readback = Path(directory) / f"reopened-{mesh_file.suffix[1:]}.glb"
+            await successful(reopened, "scene_export", {"path": str(readback)})
+            model, data = read_gltf_export(readback)
+            primitive = model["meshes"][0]["primitives"][0]
+            assert model["meshes"][0]["name"] == "smoke-front"
+            assert model["accessors"][primitive["attributes"]["TEXCOORD_0"]]["count"] == 3
+            pbr = model["materials"][primitive["material"]]["pbrMetallicRoughness"]
+            assert pbr["baseColorFactor"] == [0.2, 0.4, 0.6, 1.0]
+            image = model["images"][model["textures"][pbr["baseColorTexture"]["index"]]["source"]]
+            view = model["bufferViews"][image["bufferView"]]
+            offset = view.get("byteOffset", 0)
+            assert data[offset:offset + view["byteLength"]] == png
+            snapshot = await successful(reopened, "snapshot", {"views": ["front"]})
+            assert any(block.type == "image" for block in snapshot.content)
+            if mesh_file == fbx:
+                await successful(reopened, "scene_open", {"path": str(fbx), "mode": "append"})
+                await successful(reopened, "scene_export", {"path": str(readback)})
+                appended, _ = read_gltf_export(readback)
+                assert len(appended["meshes"]) == 2 * len(model["meshes"])
+                invalid = Path(directory) / "invalid.fbx"
+                invalid.write_bytes(b"this is not FBX")
+                result = await reopened.call_tool("scene_open", {"path": str(invalid)})
+                assert result.isError
+                await successful(reopened, "scene_export", {"path": str(readback)})
+                assert read_gltf_export(readback)[0] == appended
 
 
 async def smoke_rust():

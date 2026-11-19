@@ -17,11 +17,62 @@ pub struct BaseTexture {
 
 impl BaseTexture {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let file = File::open(path).map_err(|error| format!("open PNG: {error}"))?;
+        let file = File::open(path).map_err(|error| format!("open texture: {error}"))?;
         if file.metadata().map_err(|error| error.to_string())?.len() > MAX_FILE_BYTES {
-            return Err("base texture PNG exceeds 64 MiB".into());
+            return Err("texture exceeds 64 MiB".into());
         }
-        Self::decode(BufReader::new(file))
+        let mut source = BufReader::new(file);
+        if is_jpeg(source.fill_buf().map_err(|error| error.to_string())?) {
+            Self::decode_jpeg(source)
+        } else {
+            Self::decode(source)
+        }
+    }
+
+    fn decode_jpeg(source: impl Read) -> Result<Self, String> {
+        let mut decoder = jpeg_decoder::Decoder::new(source);
+        decoder.set_max_decoding_buffer_size(DECODE_BYTES);
+        decoder
+            .read_info()
+            .map_err(|error| format!("decode JPEG: {error}"))?;
+        let image = decoder.info().ok_or("JPEG has no image metadata")?;
+        let (width, height) = (u32::from(image.width), u32::from(image.height));
+        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(format!(
+                "JPEG texture dimensions must be within {MAX_DIMENSION} × {MAX_DIMENSION}"
+            ));
+        }
+        let channels = match image.pixel_format {
+            jpeg_decoder::PixelFormat::L8 => 1,
+            jpeg_decoder::PixelFormat::RGB24 => 3,
+            _ => return Err("JPEG textures must be 8-bit grayscale or RGB".into()),
+        };
+        let pixels = decoder
+            .decode()
+            .map_err(|error| format!("read JPEG pixels: {error}"))?;
+        Ok(Self {
+            width: width as usize,
+            height: height as usize,
+            channels,
+            pixels,
+        })
+    }
+
+    fn encode_png(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, self.width as u32, self.height as u32);
+        encoder.set_color(if self.channels == 1 {
+            png::ColorType::Grayscale
+        } else {
+            png::ColorType::Rgb
+        });
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(&self.pixels)
+            .map_err(|error| error.to_string())?;
+        writer.finish().map_err(|error| error.to_string())?;
+        Ok(bytes)
     }
 
     fn decode<R: BufRead + Seek>(source: R) -> Result<Self, String> {
@@ -99,6 +150,10 @@ fn composite(fg: [u8; 3], alpha: u8, bg: [u8; 3]) -> [u8; 3] {
     })
 }
 
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xff, 0xd8, 0xff])
+}
+
 pub(crate) fn png_for_export(path: &Path) -> Result<Vec<u8>, String> {
     let file = File::open(path).map_err(|error| format!("open base texture: {error}"))?;
     let mut bytes = Vec::new();
@@ -106,8 +161,12 @@ pub(crate) fn png_for_export(path: &Path) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read base texture: {error}"))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("base texture PNG exceeds 64 MiB".into());
+        return Err("texture exceeds 64 MiB".into());
     }
-    BaseTexture::decode(Cursor::new(&bytes))?;
-    Ok(bytes)
+    if is_jpeg(&bytes) {
+        BaseTexture::decode_jpeg(Cursor::new(bytes))?.encode_png()
+    } else {
+        BaseTexture::decode(Cursor::new(&bytes))?;
+        Ok(bytes)
+    }
 }

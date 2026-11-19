@@ -272,8 +272,8 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             }
         }
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
-        "obj" => {
-            let mut imported = formats::read_obj_scene(path)?;
+        ext @ ("obj" | "fbx") => {
+            let mut imported = formats::read_mesh_scene(path, ext)?;
             let fabrics = prepare_archived_fabrics(state, &mut imported, true)?;
             if !append {
                 clear_garment(state);
@@ -373,7 +373,6 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             reply["warnings"] = loaded["warnings"].clone();
             return Ok(reply);
         }
-        "fbx" => return Err("native fbx input is unavailable in the Rust backend".into()),
         ext => return Err(format!("unsupported import extension {ext:?}")),
     }
     Ok(open_reply(state, path))

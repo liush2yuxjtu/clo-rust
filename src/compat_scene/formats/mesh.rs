@@ -1,4 +1,6 @@
 mod fbx_export;
+#[cfg(not(target_arch = "wasm32"))]
+mod fbx_import;
 mod obj_export;
 mod obj_import;
 
@@ -283,8 +285,13 @@ pub(in crate::compat_scene) fn read_mesh(path: &Path) -> Result<Vec<Value>, Stri
         .collect()
 }
 
-pub(in crate::compat_scene) fn read_obj_scene(path: &Path) -> Result<Value, String> {
-    let (meshes, fabrics, warnings) = obj_import::read(path, true)?;
+pub(in crate::compat_scene) fn read_mesh_scene(path: &Path, format: &str) -> Result<Value, String> {
+    let (meshes, fabrics, warnings) = match format {
+        "obj" => obj_import::read(path, true)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        "fbx" => fbx_import::read(path)?,
+        _ => return Err(format!("{format} mesh import is unavailable on this target")),
+    };
     Ok(json!({"imported_meshes": meshes, "fabrics": fabrics, "warnings": warnings}))
 }
 

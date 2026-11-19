@@ -10,7 +10,7 @@ Native garment pattern and mesh diagnostics for Linux and macOS. The Cargo packa
 | `avatar-source`, `avatar-import` | Compare local avatar assets and bake a saved GLB avatar pose to OBJ in millimetres. |
 | `collision-avatar`, `collision-obj` | Check static body–cloth triangle intersections and optionally export VTK contact markers. |
 
-Build and verify with Rust, Cargo, and Node.js 22 or later.
+Build and verify with Rust, Cargo, a C compiler for the native FBX reader, and Node.js 22 or later.
 
 ```sh
 cargo test --locked
