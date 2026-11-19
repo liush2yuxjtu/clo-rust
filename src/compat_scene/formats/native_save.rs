@@ -2,8 +2,8 @@
 
 use super::{
     clo_native::{member, open_archive, ARCHIVE_LIMIT, ZPAC, ZPRJ},
-    native_pose::{map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    write,
+    native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
+    native_recolor, write,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -30,9 +30,12 @@ fn stamp(path: &Path) -> Result<Value, String> {
     Ok(json!([meta.len(), time.as_secs(), time.subsec_nanos()]))
 }
 
-fn hash_except(value: &Value, omitted: &str, hash: &mut DefaultHasher) {
+fn hash_except(value: &Value, omitted: &[&str], hash: &mut DefaultHasher) {
     if let Some(fields) = value.as_object() {
-        for (key, value) in fields.iter().filter(|(key, _)| key.as_str() != omitted) {
+        for (key, value) in fields
+            .iter()
+            .filter(|(key, _)| !omitted.contains(&key.as_str()))
+        {
             key.hash(hash);
             value.hash(hash);
         }
@@ -44,12 +47,11 @@ fn hash_except(value: &Value, omitted: &str, hash: &mut DefaultHasher) {
 fn garment_fingerprint(state: &Value) -> u64 {
     let mut hash = DefaultHasher::new();
     for pattern in super::super::array(state, "patterns") {
-        hash_except(pattern, "name", &mut hash);
+        hash_except(pattern, &["name"], &mut hash);
     }
     for key in [
         "seams",
         "native_seam_groups",
-        "fabrics",
         "garment_spec",
         "colorways",
         "current_colorway",
@@ -57,10 +59,13 @@ fn garment_fingerprint(state: &Value) -> u64 {
     ] {
         state[key].hash(&mut hash);
     }
+    for fabric in super::super::array(state, "fabrics") {
+        hash_except(fabric, &["color", "rgba"], &mut hash);
+    }
     let simulation = &state["simulation"];
-    hash_except(simulation, "meshes", &mut hash);
+    hash_except(simulation, &["meshes"], &mut hash);
     for mesh in super::super::array(simulation, "meshes") {
-        hash_except(mesh, "name", &mut hash);
+        hash_except(mesh, &["name"], &mut hash);
     }
     hash.finish()
 }
@@ -89,22 +94,14 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
     state[SOURCE] = value;
 }
 
-fn encoded_list(records: &[Cow<'_, [u8]>]) -> Result<Vec<u8>, String> {
-    let mut output = (records.len() as u32).to_le_bytes().to_vec();
-    if !records.is_empty() {
-        output.push(MAP_TYPE);
-        for record in records {
-            output.extend(
-                u32::try_from(record.len())
-                    .map_err(|_| "PAC record too large")?
-                    .to_le_bytes(),
-            );
-        }
-        for record in records {
-            output.extend_from_slice(record.as_ref());
+pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64) {
+    if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
+        let indices = super::super::vec_mut(source, "recolored");
+        let index = json!(index);
+        if !indices.contains(&index) {
+            indices.push(index);
         }
     }
-    Ok(output)
 }
 
 fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
@@ -304,7 +301,7 @@ pub(in crate::compat_scene) fn save(
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
         || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
     {
-        return Err("native save currently preserves the loaded scene and pattern renames; save other edits as .clorust".into());
+        return Err("native save currently preserves the loaded scene, pattern renames and fabric recolors; save other edits as .clorust".into());
     }
     let expected = stamp(template)?;
     if expected != source["stamp"] {
@@ -325,7 +322,13 @@ pub(in crate::compat_scene) fn save(
         &mut open_archive(Cursor::new(garment.as_slice()), ZPAC)?,
         "pac",
     )?;
-    let edited = renamed_pac(&pac, state)?;
+    let renamed = renamed_pac(&pac, state)?;
+    let recolored = native_recolor::recolor(
+        renamed.as_deref().unwrap_or(&pac),
+        state,
+        super::super::array(source, "recolored"),
+    )?;
+    let edited = recolored.or(renamed);
     let has_edits = edited.is_some();
     let garment = match edited {
         Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes)?,

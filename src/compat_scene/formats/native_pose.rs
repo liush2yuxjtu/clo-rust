@@ -2,6 +2,7 @@
 
 use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 
 pub(super) const MAP_TYPE: u8 = 22;
 pub(super) const LIST_TYPE: u8 = 20;
@@ -135,6 +136,24 @@ fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String
     Ok(
         json!({"id": id, "name": name, "positions": positions, "triangles": indices, "texcoords": texcoords}),
     )
+}
+
+pub(super) fn encoded_list(records: &[Cow<'_, [u8]>]) -> Result<Vec<u8>, String> {
+    let mut output = (records.len() as u32).to_le_bytes().to_vec();
+    if !records.is_empty() {
+        output.push(MAP_TYPE);
+        for record in records {
+            output.extend(
+                u32::try_from(record.len())
+                    .map_err(|_| "PAC record too large")?
+                    .to_le_bytes(),
+            );
+        }
+        for record in records {
+            output.extend_from_slice(record.as_ref());
+        }
+    }
+    Ok(output)
 }
 
 pub(super) fn map_list(data: &[u8], limit: usize) -> Result<Vec<Fields<'_>>, String> {

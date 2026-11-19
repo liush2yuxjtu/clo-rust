@@ -816,9 +816,12 @@ pub fn fabric_set_color(args: &Value, state: &mut Value) -> Result<Value, String
     let rgb = parse_color(&args["color"])?;
     let fabric = find_fabric_mut(state, index)?;
     fabric["color"] = json!(rgb);
+    let [r, g, b] = rgb;
+    fabric["rgba"] = json!([r, g, b, 1.0]);
     if let Some(maps) = fabric["texture_maps"].as_object_mut() {
         maps.remove("base");
     }
+    crate::compat_scene::mark_native_fabric_color(state, index);
     Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}))
 }
 

@@ -3,6 +3,7 @@ mod dxf;
 mod mesh;
 mod native_materials;
 mod native_pose;
+mod native_recolor;
 pub(super) mod native_save;
 mod native_seams;
 

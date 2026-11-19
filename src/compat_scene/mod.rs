@@ -19,6 +19,10 @@ pub(crate) fn read_project_avatar_dan(
     formats::clo_native::read_project_avatar_dan(path)
 }
 
+pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64) {
+    formats::native_save::mark_color(state, index);
+}
+
 type Reply = Result<Value, String>;
 
 pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Reply> {
