@@ -337,7 +337,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             reply["native_import"]["embedded_avatar_loaded"] = json!(embedded_avatar);
             let mut warnings = vec![
                 "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.".to_owned(),
-                "Native textures, cloth calibration, panel arrangement and official solver continuation state were not imported.".to_owned(),
+                "Cloth calibration, panel arrangement and official solver continuation state were not imported.".to_owned(),
                 "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list.".to_owned(),
             ];
             if embedded_avatar {
@@ -354,6 +354,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             } else if pose.is_empty() {
                 warnings.push("The saved 3D pose could not be validated for this file.".into());
             }
+            warnings.extend(array(&loaded, "native_texture_warnings").iter().filter_map(Value::as_str).map(str::to_owned));
             reply["warnings"] = json!(warnings);
             return Ok(reply);
         }

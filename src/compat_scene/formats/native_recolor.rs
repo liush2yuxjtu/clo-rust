@@ -94,36 +94,58 @@ fn update_face(face: &Fields<'_>, color: &Color) -> Result<Option<Vec<u8>>, Stri
     Ok(Some(data))
 }
 
-fn update_faces(material: &Fields<'_>, color: &Color) -> Result<Vec<u8>, String> {
+fn update_faces<T>(
+    material: &Fields<'_>,
+    edit: &T,
+    face_edit: impl Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Vec<u8>, String> {
     update_list(material, b"listFaceMaterial", 64, |_, face| {
-        update_face(face, color)
+        face_edit(face, edit)
     })
 }
 
-fn material_list(record: &Fields<'_>, color: &Color) -> Result<Vec<u8>, String> {
+fn material_list<T>(
+    record: &Fields<'_>,
+    edit: &T,
+    face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Vec<u8>, String> {
     update_list(record, b"listMaterial2D", 64, |_, material| {
-        Ok(Some(update_faces(material, color)?))
+        Ok(Some(update_faces(material, edit, face_edit)?))
     })
 }
 
-fn update_fabric(record: &Fields<'_>, color: &Color) -> Result<Vec<u8>, String> {
-    let original = update_map(record, b"mapMaterial2D", |map| update_faces(map, color))?;
+fn update_fabric<T>(
+    record: &Fields<'_>,
+    edit: &T,
+    face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Vec<u8>, String> {
+    let original = update_map(record, b"mapMaterial2D", |map| {
+        update_faces(map, edit, face_edit)
+    })?;
     update_map(&Fields::read(&original)?, b"mapColorwayInfo", |info| {
         if map_list(info.get(b"listColorwayInfo", LIST_TYPE)?, 4096)?.len() != 1 {
             return Err("native fabric edits require one verified legacy colorway record".into());
         }
         update_list(info, b"listColorwayInfo", 1, |_, legacy| {
-            let legacy = update_faces(legacy, color)?;
-            Ok(Some(material_list(&Fields::read(&legacy)?, color)?))
+            let legacy = update_faces(legacy, edit, face_edit)?;
+            Ok(Some(material_list(
+                &Fields::read(&legacy)?,
+                edit,
+                face_edit,
+            )?))
         })
     })
 }
 
-fn update_colorway(record: &Fields<'_>, fabrics: &HashMap<u32, Color>) -> Result<Vec<u8>, String> {
+fn update_colorway<T>(
+    record: &Fields<'_>,
+    fabrics: &HashMap<u32, &T>,
+    face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Vec<u8>, String> {
     let colorways = record.map(b"mapNewColorway")?;
     let list = map_list(colorways.get(b"listColorway", LIST_TYPE)?, 4096)?;
     if list.len() != 1 || uint(record, b"uiCurrentCoordinationIndex", UINT)? != 0 {
-        return Err("native recoloring is only verified for a single colorway".into());
+        return Err("native material edits are only verified for a single colorway".into());
     }
     let assignment = list[0].map(b"mapAssignStyleChip")?;
     let mut selected = HashMap::new();
@@ -143,7 +165,7 @@ fn update_colorway(record: &Fields<'_>, fabrics: &HashMap<u32, Color>) -> Result
             4096,
             |_, vector| {
                 let uid = uint(vector, b"uiStyleID", UINT)?;
-                let Some(color) = fabrics.get(&uid) else {
+                let Some(&edit) = fabrics.get(&uid) else {
                     return Ok(None);
                 };
                 let chip_id = selected
@@ -156,7 +178,7 @@ fn update_colorway(record: &Fields<'_>, fabrics: &HashMap<u32, Color>) -> Result
                     if !updated.insert(uid) {
                         return Err("duplicate native material style chip".into());
                     }
-                    Ok(Some(material_list(chip, color)?))
+                    Ok(Some(material_list(chip, edit, face_edit)?))
                 })?;
                 Ok(Some(encoded))
             },
@@ -210,31 +232,48 @@ pub(super) fn recolor(
     state: &Value,
     edited: &[Value],
 ) -> Result<Option<Vec<u8>>, String> {
-    if edited.is_empty() {
+    let fabrics = super::super::array(state, "fabrics");
+    let colors = edited
+        .iter()
+        .map(|item| {
+            let index = item
+                .as_u64()
+                .and_then(|id| usize::try_from(id).ok())
+                .ok_or("invalid fabric edit index")?;
+            let fabric = fabrics
+                .get(index)
+                .ok_or("native fabric index is no longer present")?;
+            Ok((index, scene_color(fabric, index)?))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
+    edit_materials(data, &colors, update_face)
+}
+
+pub(super) fn edit_materials<T>(
+    data: &[u8],
+    edits: &HashMap<usize, T>,
+    face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    if edits.is_empty() {
         return Ok(None);
     }
     let root = Fields::read(data)?;
-    let fabrics = super::super::array(state, "fabrics");
-    let mut colors = HashMap::new();
+    let mut by_id = HashMap::new();
     let rewritten = update_list(&root, b"listFabric", 4096, |index, record| {
-        if !edited.iter().any(|id| id.as_u64() == Some(index as u64)) {
+        let Some(edit) = edits.get(&index) else {
             return Ok(None);
-        }
-        let fabric = fabrics
-            .get(index)
-            .ok_or("native fabric index is no longer present")?;
-        let color = scene_color(fabric, index)?;
-        let result = update_fabric(record, &color)?;
-        if colors.insert(uint(record, b"uiID", UINT)?, color).is_some() {
+        };
+        let result = update_fabric(record, edit, face_edit)?;
+        if by_id.insert(uint(record, b"uiID", UINT)?, edit).is_some() {
             return Err("duplicate native fabric identifier".into());
         }
         Ok(Some(result))
     })?;
-    if colors.len() != edited.len() {
+    if by_id.len() != edits.len() {
         return Err("native fabric edit could not be matched to the archive".into());
     }
     let root = Fields::read(&rewritten)?;
     Ok(Some(update_map(&root, b"mapColorWay", |map| {
-        update_colorway(map, &colors)
+        update_colorway(map, &by_id, face_edit)
     })?))
 }

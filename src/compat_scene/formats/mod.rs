@@ -5,6 +5,7 @@ mod native_materials;
 mod native_pose;
 mod native_recolor;
 pub(super) mod native_save;
+mod native_textures;
 mod native_seams;
 
 pub(super) use dxf::{read_dxf, write_dxf};

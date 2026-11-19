@@ -3,11 +3,11 @@
 use super::{
     clo_native::{member, open_archive, ARCHIVE_LIMIT, ZPAC, ZPRJ},
     native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_recolor, write,
+    native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Write};
@@ -60,7 +60,7 @@ fn garment_fingerprint(state: &Value) -> u64 {
         state[key].hash(&mut hash);
     }
     for fabric in super::super::array(state, "fabrics") {
-        hash_except(fabric, &["color", "rgba"], &mut hash);
+        hash_except(fabric, &["color", "rgba", "texture_maps"], &mut hash);
     }
     let simulation = &state["simulation"];
     hash_except(simulation, &["meshes"], &mut hash);
@@ -88,6 +88,7 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "project": project,
                 "garment": garment_fingerprint(state),
                 "avatars": avatar_fingerprint(state),
+                "textures": super::super::array(state, "fabrics").iter().map(|fabric| &fabric["texture_maps"]).collect::<Vec<_>>(),
             }))
         })
         .unwrap_or(Value::Null);
@@ -100,6 +101,16 @@ pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64) {
         let index = json!(index);
         if !indices.contains(&index) {
             indices.push(index);
+        }
+    }
+}
+
+pub(in crate::compat_scene) fn mark_texture(state: &mut Value, index: u64, map: &str) {
+    if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
+        let edits = super::super::vec_mut(source, "retextured");
+        let edit = json!({"fabric": index, "map": map});
+        if !edits.contains(&edit) {
+            edits.push(edit);
         }
     }
 }
@@ -194,6 +205,7 @@ fn replace_member(
     header: &[u8],
     suffix: &[u8],
     replacement: &[u8],
+    mut assets: HashMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     let (prefix, _) = split_archive(input)?;
     let mut source = open_archive(Cursor::new(input), header)?;
@@ -206,26 +218,34 @@ fn replace_member(
     let mut replaced = false;
     for index in 0..source.len() {
         let file = source.by_index(index).map_err(|error| error.to_string())?;
-        if file.name_raw().len() >= suffix.len()
-            && file.name_raw()[file.name_raw().len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        let name = file.name_raw();
+        let asset = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| assets.remove(name));
+        let body = if name.len() >= suffix.len()
+            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
         {
             if replaced {
                 return Err("multiple native archive members match the replacement".into());
             }
+            replaced = true;
+            Some(replacement)
+        } else {
+            asset.as_deref()
+        };
+        if let Some(bytes) = body {
             let name = file.name().map_err(|error| error.to_string())?;
             let options =
                 SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             zip.start_file(name, options)
                 .map_err(|error| error.to_string())?;
-            zip.write_all(replacement)
-                .map_err(|error| error.to_string())?;
-            replaced = true;
+            zip.write_all(bytes).map_err(|error| error.to_string())?;
         } else {
             zip.raw_copy_file(file).map_err(|error| error.to_string())?;
         }
     }
-    if !replaced {
-        return Err("native archive is missing the member being replaced".into());
+    if !replaced || !assets.is_empty() {
+        return Err("native archive is missing a member being replaced".into());
     }
     let output = zip
         .finish()
@@ -301,7 +321,7 @@ pub(in crate::compat_scene) fn save(
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
         || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
     {
-        return Err("native save currently preserves the loaded scene, pattern renames and fabric recolors; save other edits as .clorust".into());
+        return Err("native save currently preserves the loaded scene, pattern renames and verified fabric edits; save other edits as .clorust".into());
     }
     let expected = stamp(template)?;
     if expected != source["stamp"] {
@@ -329,14 +349,22 @@ pub(in crate::compat_scene) fn save(
         super::super::array(source, "recolored"),
     )?;
     let edited = recolored.or(renamed);
+    let (textures, assets) = native_textures::replacements(
+        edited.as_deref().unwrap_or(&pac),
+        state,
+        super::super::array(source, "textures"),
+        super::super::array(source, "recolored"),
+        super::super::array(source, "retextured"),
+    )?;
+    let edited = textures.or(edited);
     let has_edits = edited.is_some();
     let garment = match edited {
-        Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes)?,
+        Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes, assets)?,
         None => garment,
     };
     let output = if project {
         let project_bytes = if has_edits {
-            replace_member(&original, ZPRJ, b".zpac", &garment)?
+            replace_member(&original, ZPRJ, b".zpac", &garment, HashMap::new())?
         } else {
             original
         };

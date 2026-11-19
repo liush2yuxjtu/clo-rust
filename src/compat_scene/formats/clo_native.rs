@@ -163,16 +163,6 @@ pub(in crate::compat_scene) fn read_member(
     member(&mut open_archive(bounded_file(path)?, header)?, extension)
 }
 
-fn package(path: &Path, project: bool) -> Result<Vec<u8>, String> {
-    if !project {
-        return crate::compat_scene::read_native_archive_member(path, ZPAC, "pac");
-    }
-    let mut outer = open_archive(bounded_file(path)?, ZPRJ)?;
-    let garment = member(&mut outer, "zpac")?;
-    let mut inner = open_archive(Cursor::new(garment), ZPAC)?;
-    member(&mut inner, "pac")
-}
-
 struct NamedPanel<'a> {
     start: usize,
     body: usize,
@@ -407,8 +397,23 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
     }))
 }
 
+fn read_garment<R: Read + Seek>(mut archive: ZipArchive<R>) -> Result<Value, String> {
+    let pac = member(&mut archive, "pac")?;
+    let mut state = parse(&pac)?;
+    if let Err(error) = super::native_textures::hydrate(&pac, &mut archive, &mut state) {
+        state["native_texture_warnings"] = json!([error]);
+    }
+    Ok(state)
+}
+
 pub(in crate::compat_scene) fn read(path: &Path, project: bool) -> Result<Value, String> {
-    parse(&package(path, project)?)
+    if project {
+        let mut outer = open_archive(bounded_file(path)?, ZPRJ)?;
+        let garment = member(&mut outer, "zpac")?;
+        read_garment(open_archive(Cursor::new(garment), ZPAC)?)
+    } else {
+        read_garment(open_archive(bounded_file(path)?, ZPAC)?)
+    }
 }
 
 #[cfg(test)]

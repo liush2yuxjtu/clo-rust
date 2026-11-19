@@ -832,6 +832,7 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
     let kind = string(args, "map", "base");
     let path = texture(string(args, "image_path", ""), kind)?;
     find_fabric_mut(state, index)?["texture_maps"][kind] = json!(path);
+    crate::compat_scene::mark_native_fabric_texture(state, index, kind);
     state["current_fabric"] = json!(index);
     Ok(json!({"ok":true}))
 }
