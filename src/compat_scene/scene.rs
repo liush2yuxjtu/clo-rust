@@ -248,22 +248,45 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                 state["current_colorway"] = json!(0);
                 set_project(state, path);
             }
+            let pose = array(&loaded, "saved_pose");
+            if !append && !pose.is_empty() {
+                state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
+            }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
             reply["native_import"] = loaded["native_import"].clone();
-            reply["warnings"] = json!([
+            let mut warnings = vec![
                 "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.",
-                "Native fabric assignments, avatars, arrangement and draped simulation were not imported.",
+                "Native fabric assignments, avatars, arrangement and solver continuation state were not imported.",
                 "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list."
-            ]);
+            ];
+            if append && !pose.is_empty() {
+                warnings.push("The saved 3D pose is loaded in replace mode only.");
+            } else if pose.is_empty() {
+                warnings.push("The saved 3D pose could not be validated for this file.");
+            }
+            reply["warnings"] = json!(warnings);
             return Ok(reply);
         }
-        "avt" | "fbx" => {
-            return Err(format!(
-                "native {} input is unavailable in the Rust backend",
-                extension(path)
-            ))
+        "avt" => {
+            let saved_pose = (state["simulation"]["source"] == "native_saved_pose")
+                .then(|| state["simulation"].clone());
+            let loaded = crate::compat_fit::dispatch(
+                "avatar_load",
+                &json!({"name_or_path": path, "replace": false}),
+                state,
+            )
+            .ok_or("Rust avatar loader unavailable")??;
+            if let Some(pose) = saved_pose {
+                state["simulation"] = pose;
+            }
+            let mut reply = open_reply(state, path);
+            reply["partial"] = json!(true);
+            reply["rest_geometry"] = loaded["rest_geometry"].clone();
+            reply["warnings"] = loaded["warnings"].clone();
+            return Ok(reply);
         }
+        "fbx" => return Err("native fbx input is unavailable in the Rust backend".into()),
         ext => return Err(format!("unsupported import extension {ext:?}")),
     }
     Ok(open_reply(state, path))
@@ -311,7 +334,12 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
         "fbx" => return Err("FBX export is unavailable in the Rust backend".into()),
         _ => return Err(format!("unsupported export extension {ext:?}")),
     }
-    Ok(json!({"path": path, "result": path}))
+    let result = match ext.as_str() {
+        "obj" | "glb" | "gltf" => json!([path]),
+        "json" => json!(true),
+        _ => json!(path),
+    };
+    Ok(json!({"path": path, "result": result}))
 }
 
 fn checkpoint_dir() -> PathBuf {

@@ -270,6 +270,12 @@ fn mesh(data: &[u8]) -> Result<(usize, usize, &[u8]), String> {
     Err("missing native PAC rest mesh".into())
 }
 
+pub(super) fn posed_topology(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    let (triangle_marker, triangle_count, rest) = mesh(data)?;
+    let start = triangle_marker + TRIANGLES.len();
+    Ok((&data[start..start + triangle_count * 12], rest))
+}
+
 fn outline(data: &[u8]) -> Result<(Vec<Value>, usize, usize), String> {
     let (mesh_start, triangles, positions) = mesh(data)?;
     let outline_data = &data[..mesh_start];
@@ -345,15 +351,21 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         }));
     }
     let sewing = super::native_seams::read(pac, &edge_counts)?;
+    let (pose, pose_error) = match super::native_pose::read(pac, &patterns) {
+        Ok(meshes) => (meshes, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
     let native_import = json!({
         "rest_vertices_validated": rest_vertices, "rest_triangles_validated": triangles,
         "seam_groups_recovered": sewing.annotations.len(),
         "full_edge_seams_restored": sewing.constraints.len(),
-        "unreadable_seam_records": sewing.unreadable
+        "unreadable_seam_records": sewing.unreadable,
+        "saved_pose_meshes": pose.len(), "saved_pose_unavailable": pose_error
     });
     Ok(json!({
         "patterns": patterns, "seams": sewing.constraints,
-        "native_seam_groups": sewing.annotations, "native_import": native_import
+        "native_seam_groups": sewing.annotations, "native_import": native_import,
+        "saved_pose": pose
     }))
 }
 

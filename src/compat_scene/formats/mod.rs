@@ -1,6 +1,7 @@
 pub(super) mod clo_native;
 mod dxf;
 mod mesh;
+mod native_pose;
 mod native_seams;
 
 pub(super) use dxf::{read_dxf, write_dxf};

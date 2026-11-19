@@ -225,6 +225,7 @@ fn gltf_meshes(
     buffers: &[Vec<u8>],
     meshes: &mut Vec<Mesh>,
     depth: usize,
+    units_to_mm: f64,
 ) -> Result<(), String> {
     if depth > 256 {
         return Err("glTF node hierarchy is too deep or cyclic".into());
@@ -247,7 +248,7 @@ fn gltf_meshes(
                             + (0..3)
                                 .map(|j| world[j][i] * f64::from(point[j]))
                                 .sum::<f64>())
-                            * 1000.
+                            * units_to_mm
                     })
                 })
                 .collect();
@@ -273,7 +274,7 @@ fn gltf_meshes(
         }
     }
     for child in node.children() {
-        gltf_meshes(child, &world, buffers, meshes, depth + 1)?;
+        gltf_meshes(child, &world, buffers, meshes, depth + 1, units_to_mm)?;
     }
     Ok(())
 }
@@ -300,12 +301,24 @@ fn gltf_read(path: &Path) -> Result<Vec<Mesh>, String> {
     }
     let mut meshes = Vec::new();
     let identity = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 1. } else { 0. }));
+    let generator = asset
+        .document
+        .as_json()
+        .asset
+        .generator
+        .as_deref()
+        .unwrap_or("");
+    let units_to_mm = if generator.starts_with("CLO ") && generator != "CLO Rust" {
+        1.
+    } else {
+        1000.
+    };
     let scene = asset
         .default_scene()
         .or_else(|| asset.scenes().next())
         .ok_or("glTF has no scene")?;
     for node in scene.nodes() {
-        gltf_meshes(node, &identity, &buffers, &mut meshes, 0)?;
+        gltf_meshes(node, &identity, &buffers, &mut meshes, 0, units_to_mm)?;
     }
     if meshes.is_empty() {
         return Err("glTF scene contains no triangle meshes".into());
@@ -405,7 +418,7 @@ fn gltf_export(meshes: &[Mesh]) -> Result<(Value, Vec<u8>), String> {
         let mut max = [f32::NEG_INFINITY; 3];
         for point in &mesh.positions {
             for j in 0..3 {
-                let p = (point[j] / 1000.) as f32;
+                let p = point[j] as f32;
                 if !p.is_finite() {
                     return Err("coordinates exceed the glTF float32 range".into());
                 }
@@ -426,7 +439,7 @@ fn gltf_export(meshes: &[Mesh]) -> Result<(Value, Vec<u8>), String> {
         nodes.push(json!({"mesh": i, "name": mesh.name}));
     }
     let root = json!({
-        "asset": {"version": "2.0", "generator": "CLO Rust"}, "scene": 0,
+        "asset": {"version": "2.0", "generator": "CLO Rust (millimetres)"}, "scene": 0,
         "scenes": [{"nodes": (0..nodes.len()).collect::<Vec<_>>()}],
         "nodes": nodes, "meshes": definitions, "accessors": accessors, "bufferViews": views, "buffers": [{"byteLength": bin.len()}]
     });

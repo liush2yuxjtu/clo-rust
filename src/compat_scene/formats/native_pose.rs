@@ -1,0 +1,157 @@
+//! Read a stored native drape without claiming that it was solved by the Rust engine.
+
+use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
+use serde_json::{json, Value};
+
+const MAP_TYPE: u8 = 22;
+const LIST_TYPE: u8 = 20;
+const BYTE_TYPE: u8 = 15;
+const UINT_TYPE: u8 = 5;
+const LIMIT: usize = 4096;
+
+struct Field<'a> {
+    name: &'a [u8],
+    kind: u8,
+    value: &'a [u8],
+}
+
+struct Fields<'a>(Vec<Field<'a>>);
+
+impl<'a> Fields<'a> {
+    fn read(data: &'a [u8]) -> Result<Self, String> {
+        let mut cursor = 0;
+        let count = take(data, &mut cursor, 1)?[0] as usize;
+        let keys = take(data, &mut cursor, count)?;
+        let types = take(data, &mut cursor, count)?;
+        let lengths = take(data, &mut cursor, count * 4)?;
+        let mut fields = Vec::with_capacity(count);
+        for ((key, &kind), length) in keys.iter().zip(types).zip(sizes(lengths)) {
+            let name = take(data, &mut cursor, *key as usize)?;
+            let value = take(data, &mut cursor, length)?;
+            fields.push(Field { name, kind, value });
+        }
+        if cursor != data.len() {
+            return Err("unexpected bytes after native PAC map".into());
+        }
+        Ok(Self(fields))
+    }
+
+    fn get(&self, name: &[u8], kind: u8) -> Result<&'a [u8], String> {
+        self.0
+            .iter()
+            .find(|field| field.name == name && field.kind == kind)
+            .map(|field| field.value)
+            .ok_or_else(|| {
+                format!(
+                    "native PAC field {} is missing",
+                    String::from_utf8_lossy(name)
+                )
+            })
+    }
+
+    fn map(&self, name: &[u8]) -> Result<Self, String> {
+        Self::read(self.get(name, MAP_TYPE)?)
+    }
+}
+
+fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String> {
+    let geometry = record.get(b"mapFabricShape2D", MAP_TYPE)?;
+    let positions3d = record.get(b"baPosition3D", BYTE_TYPE)?;
+    let (triangles, positions2d) = posed_topology(geometry)?;
+    if positions3d.len() % 12 != 0 || positions3d.len() / 12 != positions2d.len() / 8 {
+        return Err(format!(
+            "native pose for {name:?} has inconsistent position counts"
+        ));
+    }
+    let positions: Vec<[f64; 3]> = positions3d
+        .chunks_exact(12)
+        .map(|bytes| {
+            std::array::from_fn(|i| {
+                f64::from(f32::from_le_bytes(
+                    bytes[i * 4..i * 4 + 4].try_into().expect("float width"),
+                ))
+            })
+        })
+        .collect();
+    let texcoords: Vec<[f64; 2]> = positions2d
+        .chunks_exact(8)
+        .map(|bytes| {
+            std::array::from_fn(|i| {
+                f64::from(f32::from_le_bytes(
+                    bytes[i * 4..i * 4 + 4].try_into().expect("float width"),
+                ))
+            })
+        })
+        .collect();
+    if positions
+        .iter()
+        .flatten()
+        .chain(texcoords.iter().flatten())
+        .any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "native pose for {name:?} contains non-finite coordinates"
+        ));
+    }
+    let indices: Vec<[usize; 3]> = triangles
+        .chunks_exact(12)
+        .map(|bytes| {
+            std::array::from_fn(|i| {
+                u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("index width"))
+                    as usize
+            })
+        })
+        .collect();
+    Ok(
+        json!({"id": id, "name": name, "positions": positions, "triangles": indices, "texcoords": texcoords}),
+    )
+}
+
+pub(super) fn read(pac: &[u8], panels: &[Value]) -> Result<Vec<Value>, String> {
+    let root = Fields::read(pac)?;
+    let editor = root.map(b"mapPatternEditor")?;
+    let patterns = editor.map(b"mapPatternList")?;
+    let records = patterns.get(b"listPattern", LIST_TYPE)?;
+    let mut cursor = 0;
+    let (lengths, _) = sized_list(records, &mut cursor, MAP_TYPE, LIMIT)?;
+    let mut result = Vec::new();
+    for length in sizes(lengths) {
+        let record = Fields::read(take(records, &mut cursor, length)?)?;
+        let mut offset = 0;
+        if uint(record.get(b"uiPatternType", UINT_TYPE)?, &mut offset)? != 0 {
+            continue;
+        }
+        let element = record.map(b"mapElement")?;
+        let name = std::str::from_utf8(element.get(b"qsNameUTF8", BYTE_TYPE)?)
+            .map_err(|e| e.to_string())?;
+        let panel = panels
+            .get(result.len())
+            .filter(|panel| panel["name"] == name)
+            .ok_or("stored native pose does not match the imported panel order")?;
+        result.push(pattern_pose(&record, &panel["id"], name)?);
+    }
+    if cursor != records.len() || result.len() != panels.len() {
+        return Err("stored native pose does not match the imported panel count".into());
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_map_table_respects_types_sizes_and_exact_bounds() {
+        let mut bytes = vec![2, 1, 2, UINT_TYPE, BYTE_TYPE];
+        bytes.extend(4u32.to_le_bytes());
+        bytes.extend(2u32.to_le_bytes());
+        bytes.extend(b"x");
+        bytes.extend(27u32.to_le_bytes());
+        bytes.extend(b"ysok");
+        let fields = Fields::read(&bytes).unwrap();
+        assert_eq!(fields.get(b"x", UINT_TYPE).unwrap(), 27u32.to_le_bytes());
+        assert_eq!(fields.get(b"ys", BYTE_TYPE).unwrap(), b"ok");
+        assert!(fields.get(b"x", BYTE_TYPE).is_err());
+        assert!(Fields::read(&bytes[..bytes.len() - 1]).is_err());
+    }
+}

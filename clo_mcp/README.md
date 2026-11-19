@@ -43,8 +43,9 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 
 48 项工具的接口已登记，行为兼容性需要逐项核实。Rust 端当前可从已验证的
 `.zprj` 和 `.zpac` 工程中读取纸样轮廓、缝合组及其区间。能转换的完整裁片边
-会建立 Rust 缝线。此类导入会返回 `partial` 及明确的缺项。
-`avatar_load` 可读取 `.avt` 的静态网格和排布点。可用 `CLO_RUST_AVATAR_DIR`
+会建立 Rust 缝线。替换模式也会载入验证过的保存姿态网格。此类导入会返回
+`partial` 及明确的缺项。MCP 的 GLB 导出使用 CLO 实测的毫米坐标。
+`avatar_load` 和 `scene_open` 可读取 `.avt` 的静态网格和排布点。可用 `CLO_RUST_AVATAR_DIR`
 指定本地人台库。骨骼动作和原生量体校准尚未包含。
 使用 `.clorust` 保存 Rust 工程。PNG 基础贴图可用于 2D 和 3D 快照。
 完整原生工程写回、求解器一致性和全部底层 CLO API 仍有差异。

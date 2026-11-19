@@ -151,7 +151,27 @@ fn export_import_formats_use_geometry_and_append_remaps_ids() {
     assert_eq!(ids, [&json!(1), &json!(2), &json!(3)]);
     for ext in ["obj", "glb", "gltf"] {
         let path = root.0.join(format!("piece.{ext}"));
-        tool(&mut state, "scene_export", json!({"path":path}));
+        let exported = tool(&mut state, "scene_export", json!({"path":path}));
+        assert_eq!(exported["result"], json!([path]));
+        if ext == "gltf" {
+            let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(data["accessors"][0]["max"], json!([100., 50., 0.]));
+            let mut standard = data;
+            standard["asset"]["generator"] = json!("Generic glTF exporter");
+            let standard_path = root.0.join("standard.gltf");
+            fs::write(&standard_path, serde_json::to_vec(&standard).unwrap()).unwrap();
+            let mut standard_readback = scene();
+            tool(
+                &mut standard_readback,
+                "scene_open",
+                json!({"path":standard_path}),
+            );
+            assert!(standard_readback["imported_meshes"][0]["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p[0] == 100000.));
+        }
         let mut readback = scene();
         tool(&mut readback, "scene_open", json!({"path":path}));
         assert_eq!(readback["imported_meshes"].as_array().unwrap().len(), 3);
