@@ -1,4 +1,8 @@
-use std::{fs::File, io::BufReader, path::Path};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, Cursor, Read, Seek},
+    path::Path,
+};
 
 const MAX_DIMENSION: u32 = 4096;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -17,8 +21,12 @@ impl BaseTexture {
         if file.metadata().map_err(|error| error.to_string())?.len() > MAX_FILE_BYTES {
             return Err("base texture PNG exceeds 64 MiB".into());
         }
+        Self::decode(BufReader::new(file))
+    }
+
+    fn decode<R: BufRead + Seek>(source: R) -> Result<Self, String> {
         let mut decoder = png::Decoder::new_with_limits(
-            BufReader::new(file),
+            source,
             png::Limits {
                 bytes: DECODE_BYTES,
             },
@@ -89,4 +97,17 @@ fn composite(fg: [u8; 3], alpha: u8, bg: [u8; 3]) -> [u8; 3] {
     std::array::from_fn(|i| {
         ((u16::from(fg[i]) * alpha + u16::from(bg[i]) * (255 - alpha) + 127) / 255) as u8
     })
+}
+
+pub(crate) fn png_for_export(path: &Path) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|error| format!("open base texture: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read base texture: {error}"))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err("base texture PNG exceeds 64 MiB".into());
+    }
+    BaseTexture::decode(Cursor::new(&bytes))?;
+    Ok(bytes)
 }

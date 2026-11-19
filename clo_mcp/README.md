@@ -51,7 +51,9 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 `simulate` 未指定新粒距时，可从保存的网格和零初速度启动 Rust CPU 求解，
 后续调用保留 Rust 计算出的速度。显式指定新粒距会重新划分网格。
 使用 `.clorust` 保存 Rust 工程。PNG 基础贴图可用于 2D 和 3D 快照。
-完整原生工程写回、求解器一致性和全部底层 CLO API 仍有差异。
+GLB 和 glTF 导出会保留已分配的面料底色和基础 PNG 贴图，并支持单色卡的
+`colorways=true`。导出的 `TEXCOORD_0` 是贴图 UV。
+原生工程写回、部分仿真参数和其他公开 MCP 调用仍待兼容。
 
 如需设置环境变量，在注册命令中加入 `--env NAME=VALUE`，放在 `--` 前。也可以在 MCP 客户端配置中设置同名环境变量。用 `CLO_RUST_OUTPUT_DIR` 指定本机结果目录，服务会为每次执行创建独立子目录。
 

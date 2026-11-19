@@ -382,10 +382,12 @@ pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
 
 pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
-    if flag(args, "colorways", false) {
-        return Err("multiple colorway export is unavailable in the Rust backend".into());
-    }
     let ext = extension(path);
+    if flag(args, "colorways", false)
+        && (!matches!(ext.as_str(), "glb" | "gltf") || array(state, "colorways").len() > 1)
+    {
+        return Err("exporting colorways is supported for a single GLB or glTF colorway".into());
+    }
     match ext.as_str() {
         "clorust" | "zprj" | "zpac" => return save(args, state),
         "json" => {

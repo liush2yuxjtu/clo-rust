@@ -4,6 +4,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -14,6 +15,10 @@ struct Mesh {
     id: Value,
     #[serde(default)]
     name: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    fabric_index: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    texcoords: Vec<[f64; 2]>,
     positions: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
 }
@@ -122,6 +127,8 @@ fn obj_read(path: &Path) -> Result<Vec<Mesh>, String> {
         meshes.push(Mesh {
             id: Value::Null,
             name,
+            fabric_index: Value::Null,
+            texcoords: Vec::new(),
             positions: compact,
             triangles,
         });
@@ -268,6 +275,10 @@ fn gltf_meshes(
             meshes.push(Mesh {
                 id: Value::Null,
                 name: name.into(),
+                fabric_index: Value::Null,
+                texcoords: reader.read_tex_coords(0).map_or_else(Vec::new, |coords| {
+                    coords.into_f32().map(|uv| uv.map(f64::from)).collect()
+                }),
                 positions,
                 triangles,
             });
@@ -401,17 +412,32 @@ fn layout_mesh(pattern: &Value) -> Result<Mesh, String> {
     Ok(Mesh {
         id: pattern["id"].clone(),
         name: pattern["name"].as_str().unwrap_or("Pattern").into(),
+        fabric_index: pattern["fabric_index"].clone(),
+        texcoords: crate::compat_fit::uv_coordinates(
+            &points
+                .iter()
+                .map(|point| [point.x, point.y])
+                .collect::<Vec<_>>(),
+        ),
         positions,
         triangles: triangulate(&points)?,
     })
 }
 
-fn gltf_export(meshes: &[Mesh]) -> Result<(Value, Vec<u8>), String> {
+fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), String> {
     let mut bin = Vec::new();
     let mut views = Vec::new();
     let mut accessors = Vec::new();
     let mut definitions = Vec::new();
     let mut nodes = Vec::new();
+    let mut images = Vec::new();
+    let mut textures = Vec::new();
+    let mut materials = Vec::new();
+    let mut material_indices = HashMap::new();
+    let fabric_by_index: HashMap<_, _> = fabrics
+        .iter()
+        .filter_map(|fabric| Some((fabric["index"].as_u64()?, fabric)))
+        .collect();
     for (i, mesh) in meshes.iter().enumerate() {
         let start = bin.len();
         let mut min = [f32::INFINITY; 3];
@@ -427,22 +453,96 @@ fn gltf_export(meshes: &[Mesh]) -> Result<(Value, Vec<u8>), String> {
                 bin.extend_from_slice(&p.to_le_bytes());
             }
         }
+        let position_accessor = accessors.len();
+        accessors.push(json!({"bufferView": views.len(), "componentType": 5126, "count": mesh.positions.len(), "type": "VEC3", "min": min, "max": max}));
         views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": bin.len() - start, "target": 34962}));
-        accessors.push(json!({"bufferView": 2 * i, "componentType": 5126, "count": mesh.positions.len(), "type": "VEC3", "min": min, "max": max}));
         let start = bin.len();
         for index in mesh.triangles.iter().flatten() {
             bin.extend_from_slice(&index.to_le_bytes());
         }
+        let indices_accessor = accessors.len();
+        accessors.push(json!({"bufferView": views.len(), "componentType": 5125, "count": mesh.triangles.len() * 3, "type": "SCALAR"}));
         views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": bin.len() - start, "target": 34963}));
-        accessors.push(json!({"bufferView": 2 * i + 1, "componentType": 5125, "count": mesh.triangles.len() * 3, "type": "SCALAR"}));
-        definitions.push(json!({"name": mesh.name, "primitives": [{"attributes": {"POSITION": 2 * i}, "indices": 2 * i + 1, "mode": 4}]}));
+        let mut attributes = json!({"POSITION": position_accessor});
+        if !mesh.texcoords.is_empty() {
+            if mesh.texcoords.len() != mesh.positions.len() {
+                return Err(format!(
+                    "mesh {:?} has mismatched texture coordinates",
+                    mesh.name
+                ));
+            }
+            let start = bin.len();
+            for coordinate in mesh.texcoords.iter().flatten() {
+                let coord = *coordinate as f32;
+                if !coord.is_finite() {
+                    return Err("texture coordinates exceed the glTF float32 range".into());
+                }
+                bin.extend_from_slice(&coord.to_le_bytes());
+            }
+            attributes["TEXCOORD_0"] = json!(accessors.len());
+            accessors.push(json!({"bufferView": views.len(), "componentType": 5126, "count": mesh.texcoords.len(), "type": "VEC2"}));
+            views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": bin.len() - start, "target": 34962}));
+        }
+        let mut primitive =
+            json!({"attributes": attributes, "indices": indices_accessor, "mode": 4});
+        if let Some((id, fabric)) = mesh
+            .fabric_index
+            .as_u64()
+            .and_then(|id| fabric_by_index.get(&id).map(|fabric| (id, *fabric)))
+        {
+            let texture_path = fabric["texture_maps"]["base"]
+                .as_str()
+                .filter(|path| !path.is_empty() && !mesh.texcoords.is_empty());
+            let key = (id, texture_path.is_some());
+            let material_index = if let Some(index) = material_indices.get(&key) {
+                *index
+            } else {
+                let rgb: [f64; 3] =
+                    serde_json::from_value(fabric["color"].clone()).unwrap_or([1.0; 3]);
+                let alpha = fabric["rgba"]
+                    .as_array()
+                    .and_then(|rgba| rgba.get(3))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0);
+                let mut pbr = json!({"baseColorFactor": [rgb[0], rgb[1], rgb[2], alpha], "metallicFactor": 0.0});
+                let mut material = json!({"name": fabric["name"].as_str().unwrap_or("Fabric"), "doubleSided": true});
+                if alpha < 1.0 || texture_path.is_some() {
+                    material["alphaMode"] = json!("BLEND");
+                }
+                if let Some(path) = texture_path {
+                    let png = crate::compat_fit::png_for_export(Path::new(path))?;
+                    let start = bin.len();
+                    bin.extend_from_slice(&png);
+                    images.push(json!({"bufferView": views.len(), "mimeType": "image/png"}));
+                    views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": png.len()}));
+                    bin.resize(bin.len().next_multiple_of(4), 0);
+                    pbr["baseColorTexture"] = json!({"index": textures.len()});
+                    textures.push(json!({"source": images.len() - 1}));
+                }
+                material["pbrMetallicRoughness"] = pbr;
+                let index = materials.len();
+                materials.push(material);
+                material_indices.insert(key, index);
+                index
+            };
+            primitive["material"] = json!(material_index);
+        }
+        definitions.push(json!({"name": mesh.name, "primitives": [primitive]}));
         nodes.push(json!({"mesh": i, "name": mesh.name}));
     }
-    let root = json!({
+    let mut root = json!({
         "asset": {"version": "2.0", "generator": "CLO Rust (millimetres)"}, "scene": 0,
         "scenes": [{"nodes": (0..nodes.len()).collect::<Vec<_>>()}],
         "nodes": nodes, "meshes": definitions, "accessors": accessors, "bufferViews": views, "buffers": [{"byteLength": bin.len()}]
     });
+    if !materials.is_empty() {
+        root["materials"] = json!(materials);
+    }
+    if !images.is_empty() {
+        root["images"] = json!(images);
+        root["textures"] = json!(textures);
+    }
     Ok((root, bin))
 }
 
@@ -467,6 +567,8 @@ fn procedural_avatar_mesh(avatar: &Value) -> Result<Mesh, String> {
     let mut mesh = Mesh {
         id: avatar["id"].clone(),
         name: avatar["name"].as_str().unwrap_or("Avatar").to_owned(),
+        fabric_index: Value::Null,
+        texcoords: Vec::new(),
         positions: Vec::new(),
         triangles: Vec::new(),
     };
@@ -504,10 +606,22 @@ pub(in crate::compat_scene) fn write_mesh(
                 .iter()
                 .any(|p| p["id"] == mesh["id"] && flag(p, "hide", false))
             {
-                meshes.push(
-                    serde_json::from_value(mesh.clone())
-                        .map_err(|error| format!("invalid simulation mesh: {error}"))?,
-                );
+                let mut export_mesh: Mesh = serde_json::from_value(mesh.clone())
+                    .map_err(|error| format!("invalid simulation mesh: {error}"))?;
+                if let Some(pattern) = array(state, "patterns")
+                    .iter()
+                    .find(|p| p["id"] == mesh["id"])
+                {
+                    export_mesh.fabric_index = pattern["fabric_index"].clone();
+                }
+                if matches!(format, "glb" | "gltf")
+                    && (state["simulation"]["texcoords_units"] == "mm"
+                        || state["simulation"]["source"] == "native_saved_pose")
+                {
+                    export_mesh.texcoords =
+                        crate::compat_fit::uv_coordinates(&export_mesh.texcoords);
+                }
+                meshes.push(export_mesh);
             }
         }
     }
@@ -573,7 +687,7 @@ pub(in crate::compat_scene) fn write_mesh(
         }
         return write(path, obj.as_bytes());
     }
-    let (mut root, bin) = gltf_export(&meshes)?;
+    let (mut root, bin) = gltf_export(&meshes, array(state, "fabrics"))?;
     if format == "glb" {
         write(path, &glb_encode(&root, bin)?)
     } else {

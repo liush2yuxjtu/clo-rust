@@ -1,8 +1,10 @@
 """Exercise the common MCP entry point on Rust and, when configured, CLO 3D."""
 
 import asyncio
+import base64
 import json
 import os
+import struct
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -49,6 +51,56 @@ async def successful(session, name, args=None):
 async def json_result(session, name, args=None):
     result = await successful(session, name, args)
     return result.structuredContent or json.loads(result.content[0].text)
+
+
+def read_gltf_export(path):
+    if path.suffix == ".glb":
+        raw = path.read_bytes()
+        assert raw[:4] == b"glTF" and raw[16:20] == b"JSON"
+        binary_header = 20 + struct.unpack_from("<I", raw, 12)[0]
+        assert raw[binary_header + 4:binary_header + 8] == b"BIN\0"
+        return json.loads(raw[20:binary_header]), raw[binary_header + 8:]
+    model = json.loads(path.read_text())
+    return model, base64.b64decode(model["buffers"][0]["uri"].split(",", 1)[1])
+
+
+async def check_gltf_material_export(session, directory, png):
+    output = Path(directory) / "material.glb"
+    fabric = await json_result(session, "fabric_apply", {
+        "fabric": "cotton", "color": "#336699", "patterns": ["smoke-front"],
+    })
+    args = {"path": str(output), "colorways": True}
+    result = await json_result(session, "scene_export", args)
+    assert result == {"path": str(output), "result": [str(output)]}
+    raw = output.read_bytes()
+    model, _ = read_gltf_export(output)
+    primitive = model["meshes"][0]["primitives"][0]
+    assert model["materials"][primitive["material"]]["pbrMetallicRoughness"]["baseColorFactor"] == [
+        0.2, 0.4, 0.6, 1.0,
+    ]
+
+    source = Path(directory) / "base.png"
+    source.write_bytes(png)
+    await successful(session, "fabric_set_texture", {
+        "fabric_index": fabric["fabric"]["index"], "image_path": str(source),
+    })
+    for extension in ("glb", "gltf"):
+        standalone = Path(directory) / f"textured.{extension}"
+        await successful(session, "scene_export", {"path": str(standalone), "colorways": True})
+        model, data = read_gltf_export(standalone)
+        primitive = model["meshes"][0]["primitives"][0]
+        coords = model["accessors"][primitive["attributes"]["TEXCOORD_0"]]
+        assert coords["type"] == "VEC2" and coords["count"] == 3
+        pbr = model["materials"][primitive["material"]]["pbrMetallicRoughness"]
+        image = model["images"][model["textures"][pbr["baseColorTexture"]["index"]]["source"]]
+        assert image["mimeType"] == "image/png"
+        view = model["bufferViews"][image["bufferView"]]
+        offset = view.get("byteOffset", 0)
+        assert data[offset:offset + view["byteLength"]] == png
+
+    source.unlink()
+    failed = await session.call_tool("scene_export", args)
+    assert failed.isError and output.read_bytes() == raw
 
 
 async def smoke_rust():
@@ -105,6 +157,8 @@ async def smoke_rust():
                 "path": str(bad_path), "include_avatar": True,
             })
             assert failed.isError and bad_path.is_dir()
+            png = base64.b64decode(next(block.data for block in image.content if block.type == "image"))
+            await check_gltf_material_export(session, tmp, png)
         diagnostics = await json_result(
             session, "verify_seam", {"project_json": str(Path("samples/Carlton外层.pattern.json").resolve())}
         )

@@ -202,7 +202,7 @@ fn bounds(points: &[Point2]) -> (Point2, Point2) {
     (low, high)
 }
 
-fn uv_coordinates(points: &[Point2]) -> Vec<Point2> {
+pub(crate) fn uv_coordinates(points: &[Point2]) -> Vec<Point2> {
     let (low, high) = bounds(points);
     let width = (high[0] - low[0]).max(1e-10);
     let height = (high[1] - low[1]).max(1e-10);
