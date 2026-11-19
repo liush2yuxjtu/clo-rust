@@ -403,9 +403,9 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     let ext = extension(path);
     if flag(args, "colorways", false)
-        && (!matches!(ext.as_str(), "obj" | "glb" | "gltf") || array(state, "colorways").len() > 1)
+        && (!matches!(ext.as_str(), "obj" | "fbx" | "glb" | "gltf") || array(state, "colorways").len() > 1)
     {
-        return Err("exporting colorways is supported for a single OBJ, GLB or glTF colorway".into());
+        return Err("exporting colorways is supported for a single OBJ, FBX, GLB or glTF colorway".into());
     }
     match ext.as_str() {
         "clorust" | "zprj" | "zpac" => return save(args, state),
@@ -417,11 +417,10 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
             )?;
         }
         "dxf" => formats::write_dxf(path, array(state, "patterns"))?,
-        "obj" | "glb" | "gltf" => {
+        "obj" | "fbx" | "glb" | "gltf" => {
             let result = formats::write_mesh(path, &ext, state, flag(args, "include_avatar", false))?;
             return Ok(json!({"path": path, "result": result}));
         }
-        "fbx" => return Err("FBX export is unavailable in the Rust backend".into()),
         _ => return Err(format!("unsupported export extension {ext:?}")),
     }
     let result = match ext.as_str() {

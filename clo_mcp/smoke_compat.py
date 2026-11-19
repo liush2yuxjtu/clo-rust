@@ -118,6 +118,25 @@ async def check_material_export(session, directory, png):
     image_name = next(line.removeprefix("map_Kd ") for line in material_lines if line.startswith("map_Kd "))
     assert (material_file.parent / image_name).read_bytes() == png
 
+    fbx = Path(directory) / "textured.fbx"
+    fbx_args = {"path": str(fbx), "colorways": True, "include_avatar": True}
+    files = set(Path(directory).iterdir())
+    assert await json_result(session, "scene_export", fbx_args) == {
+        "path": str(fbx), "result": [str(fbx)],
+    }
+    fbx_bytes = fbx.read_bytes()
+    assert fbx_bytes[:27] == b"Kaydara FBX Binary  \0\x1a\0" + struct.pack("<I", 7700)
+    companions = set(Path(directory).iterdir()) - files - {fbx}
+    assert len(companions) == 1
+    texture, = companions
+    assert texture.suffix == ".png" and texture.read_bytes() == png
+    assert texture.name.encode() in fbx_bytes
+    forbidden_fbx = Path(directory) / "blocked.fbx"
+    forbidden_fbx.mkdir()
+    files = set(Path(directory).iterdir())
+    rejected = await session.call_tool("scene_export", {**fbx_args, "path": str(forbidden_fbx)})
+    assert rejected.isError and set(Path(directory).iterdir()) == files
+
     forbidden = Path(directory) / "blocked.obj"
     forbidden.mkdir()
     files = set(Path(directory).iterdir())
@@ -128,6 +147,9 @@ async def check_material_export(session, directory, png):
     failed = await session.call_tool("scene_export", args)
     assert failed.isError and output.read_bytes() == raw
     files = set(Path(directory).iterdir())
+    failed = await session.call_tool("scene_export", fbx_args)
+    assert failed.isError and set(Path(directory).iterdir()) == files
+    assert fbx.read_bytes() == fbx_bytes and texture.read_bytes() == png
     failed = await session.call_tool("scene_export", obj_args)
     assert failed.isError and set(Path(directory).iterdir()) == files
     assert obj.read_bytes() == object_bytes and material_file.read_bytes() == material_bytes

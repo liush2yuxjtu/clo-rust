@@ -1,3 +1,4 @@
+mod fbx_export;
 mod obj_export;
 mod obj_import;
 
@@ -559,6 +560,7 @@ pub(in crate::compat_scene) fn write_mesh(
                 .map_err(|error| format!("invalid imported mesh: {error}"))?,
         );
     }
+    let garment_mesh_count = meshes.len();
     if include_avatar {
         for avatar in std::iter::once(&state["avatar"])
             .chain(array(state, "additional_avatars"))
@@ -590,6 +592,10 @@ pub(in crate::compat_scene) fn write_mesh(
     }
     for mesh in &meshes {
         mesh.validate()?;
+    }
+    if format == "fbx" {
+        fbx_export::export(path, meshes, garment_mesh_count, array(state, "fabrics"))?;
+        return Ok(vec![path.to_owned()]);
     }
     if format == "obj" {
         let mtl = obj_export::export(path, &meshes, array(state, "fabrics"))?;
