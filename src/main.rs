@@ -1,3 +1,4 @@
+mod anthropometry;
 mod avatar;
 mod avatar_source;
 mod collision;
@@ -303,6 +304,11 @@ fn run() -> Result<(), String> {
                 return Err("缝合连通分组与参照结果不一致".into());
             }
         }
+        ["avatar-measure", input, units, request] | ["avatar-resize", input, units, request, _] => {
+            let request = read(request)?;
+            let record = anthropometry::run(input, units, request, args.get(4).map(String::as_str))?;
+            println!("{}", serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?);
+        }
         ["avatar-source", bundle, library, first, rest @ ..] => {
             let mut assets = vec![*first];
             assets.extend_from_slice(rest);
@@ -343,7 +349,7 @@ fn run() -> Result<(), String> {
             if !result.errors.is_empty() { return Err(serde_json::to_string_pretty(&result).unwrap()); }
             println!("{}",serde_json::to_string(&constraints(&project)).unwrap());
         }
-        _ => return Err("用法：pattern-native clo-import 边记录 边映射 缝合记录 工程 | draft-import 出样数据 工程 | audit 工程 | constraints 工程 | connectivity 缝合成员JSON [--strict] | mesh-metrics 服装GLB [调试VTK] | avatar-source 应用资产目录 用户资产目录 相对资源路径... | avatar-import 人台GLB 网格名 单位 [姿势OBJ] | collision-avatar 人台GLB 人台网格名 人台单位 服装GLB 服装网格名或JSON列表 服装单位 [碰撞VTK] | collision-obj 人衣OBJ 人体材质列表 服装材质前缀 [碰撞VTK]".into()),
+        _ => return Err("用法：pattern-native clo-import 边记录 边映射 缝合记录 工程 | draft-import 出样数据 工程 | audit 工程 | constraints 工程 | connectivity 缝合成员JSON [--strict] | mesh-metrics 服装GLB [调试VTK] | avatar-measure 人台 文件单位 量体配置JSON | avatar-resize 人台 文件单位 量体配置JSON 输出OBJ | avatar-source 应用资产目录 用户资产目录 相对资源路径... | avatar-import 人台GLB 网格名 单位 [姿势OBJ] | collision-avatar 人台GLB 人台网格名 人台单位 服装GLB 服装网格名或JSON列表 服装单位 [碰撞VTK] | collision-obj 人衣OBJ 人体材质列表 服装材质前缀 [碰撞VTK]".into()),
     }
     Ok(())
 }

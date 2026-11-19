@@ -73,3 +73,11 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 在 Boat 已安装 MCP 时，在 Boat 内运行服务并传入已准备的本地文件。当 MCP 运行在 Mac 时，
 把 Boat 内预热得到的 Linux 二进制路径交给原插件的 `run_boat.py --remote-native`。
 按原技能的数据清单传递必要输入，保留案例来源、视角、姿势、单位及裁片 ID。
+
+## 人台尺寸
+
+- `avatar_measure` 从单独的人台三角网格测量 Y 向身高，以及胸、腰、臀三个闭合水平截面的周长。
+- `avatar_resize` 输入 `height_mm`、`chest_mm`、`waist_mm`、`hips_mm`。它输出毫米制 OBJ 和校验 JSON，重新从保存的 OBJ 读回量体，四项误差均不超过 0.5 mm 时返回通过。
+- 输入可为 OBJ 或指定 `mesh` 名的 GLB。GLB 先应用保存的姿势与蒙皮。用 `units` 指定源单位 `mm`、`cm` 或 `m`。`sections` 的 `hips`、`waist`、`chest` 都是自模型脚底起算的身高比例。预设 0.54、0.62、0.755 适合本例 MakeHuman，使用其他人台或姿势时须现场校核截面，尤其要排除与手臂连通的胸部截面。
+- 目标限定在源网格各项量体的 ±20% 内。按截面做连续的几何变形，输出仅保存三角网格和该姿势；人体表面卷尺规则、重新绑定骨架、皮肤材质和 CLO AVS 不属于该输出格式。
+- 新命令需要含 `avatar-measure` 和 `avatar-resize` 的 `pattern-native`。开发环境可将 `CLO_RUST_BINARY` 指向当前检出的构建。已运行的 MCP 连接需要重新连接才会刷新工具列表。

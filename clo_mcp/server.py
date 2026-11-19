@@ -17,6 +17,7 @@ server = FastMCP("CLO Rust Boat", instructions=(
     "Select the Rust or official CLO backend with CLO_MCP_BACKEND. "
     "Use confirmable saved CLO evidence. Seam, strain and fold geometry run through "
     "pattern-native. Stress and pressure require their own recorded native evidence. "
+    "Avatar sizing requires measured closed torso sections on a Y-up body mesh. "
     "Only replay timestamped simulation recordings."
 ), lifespan=compat.backend_lifespan)
 
@@ -79,6 +80,59 @@ def prewarm_runtime(download_release: bool = False) -> dict[str, Any]:
             "release": runtime.TAG if source != "configured" else None,
             "source": source, "version": probe.stdout.strip() or None, "binary": str(binary),
             "sha256": runtime.digest(binary)}
+
+
+class AvatarSections(BaseModel):
+    """Fraction of actual mesh height, measured upward from the lowest vertex."""
+
+    hips: float = 0.54
+    waist: float = 0.62
+    chest: float = 0.755
+
+
+def avatar_request(body, sections, mesh, target=None):
+    output = output_dir("avatar-size" if target else "avatar-measure")
+    request_path = output / "request.json"
+    payload = {"sections": (sections or AvatarSections()).model_dump(), "mesh": mesh}
+    if target is not None:
+        payload["target"] = target
+    evidence.write_json(request_path, payload)
+    return output, request_path, local_file(body)
+
+
+@server.tool()
+def avatar_measure(avatar: str, units: str = "mm", mesh: str | None = None,
+                   sections: AvatarSections | None = None) -> dict[str, Any]:
+    """实际测量三角 OBJ 或指定 GLB 网格。身高取 Y 向包围盒；胸腰臀取明确比例高度的闭合躯干截面。"""
+    output, request_path, source = avatar_request(avatar, sections, mesh)
+    result, mode = native(["avatar-measure", source, units, str(request_path)])
+    receipt = {**checked(result), "runtime": mode, "source_sha256": runtime.digest(Path(source))}
+    evidence.write_json(output / "measurements.json", receipt)
+    return receipt
+
+
+@server.tool()
+def avatar_resize(avatar: str, height_mm: float, chest_mm: float, waist_mm: float,
+                  hips_mm: float, units: str = "mm", mesh: str | None = None,
+                  sections: AvatarSections | None = None) -> dict[str, Any]:
+    """按毫米设置人台尺寸，输出变形后的三角 OBJ，再读取该 OBJ 独立量回实际几何尺寸。"""
+    target = dict(height_mm=height_mm, chest_mm=chest_mm, waist_mm=waist_mm, hips_mm=hips_mm)
+    output, request, source = avatar_request(avatar, sections, mesh, target)
+    obj = output / "avatar.obj"
+    resized, mode = native(["avatar-resize", source, units, str(request), str(obj)])
+    receipt = checked(resized)
+    check_request = output / "readback-request.json"
+    evidence.write_json(check_request, {"sections": receipt["sections"]})
+    measured, _ = native(["avatar-measure", str(obj), "mm", str(check_request)])
+    readback = checked(measured)["measured"]
+    errors = {key: abs(readback[key] - value) for key, value in target.items()}
+    if max(errors.values()) > receipt["tolerance_mm"]:
+        raise RuntimeError(f"保存后的 OBJ 复测超出容差，未验收：{errors}")
+    receipt.update(runtime=mode, measured=readback, absolute_errors_mm=errors,
+                   source_sha256=runtime.digest(Path(source)), avatar_obj=str(obj),
+                   avatar_obj_sha256=runtime.digest(obj), receipt=str(output / "measurements.json"))
+    evidence.write_json(output / "measurements.json", receipt)
+    return receipt
 
 
 @server.tool()
