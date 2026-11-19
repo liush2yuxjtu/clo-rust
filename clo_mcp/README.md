@@ -27,6 +27,25 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 
 如需设置环境变量，在注册命令中加入 `--env NAME=VALUE`，放在 `--` 前。也可以在 MCP 客户端配置中设置同名环境变量。用 `CLO_RUST_OUTPUT_DIR` 指定本机结果目录，服务会为每次执行创建独立子目录。
 
+### 共用 CLO MCP 接口
+
+同一个 stdio 入口提供 48 个 CLO MCP 工具外加 11 个试穿诊断工具。
+48 项接口的名称、输入和输出声明取自 clo3d-mcp 提交
+`d1af0b151e7f20be205102ffcb39d99f7c42d15d`。契约文件旁附有上游 MIT 许可证。
+
+- `CLO_MCP_BACKEND=rust` 使用本项目的 `pattern-native mcp-compat`，默认启用。
+  运行 `cargo build --release --locked` 后把 `CLO_RUST_BINARY` 指向本次构建的
+  `target/release/pattern-native`。Rust 工程状态保存在该 MCP 会话的引擎进程内。
+- `CLO_MCP_BACKEND=official` 通过 MCP stdio 连接已有的 clo3d-mcp 服务。
+  如果它与本服务使用不同的 Python 环境，把 `CLO_MCP_OFFICIAL_COMMAND`
+  设为 JSON 数组，例如 `["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp.server"]`。
+  官方后端的返回内容及错误直接透传。
+
+48 项工具的接口已登记，行为兼容性需要逐项核实。Rust 的文件格式、模拟数值、
+桌面操作和 API 覆盖取决于实际实现及测试证据。
+
+如需设置环境变量，在注册命令中加入 `--env NAME=VALUE`，放在 `--` 前。也可以在 MCP 客户端配置中设置同名环境变量。用 `CLO_RUST_OUTPUT_DIR` 指定本机结果目录，服务会为每次执行创建独立子目录。
+
 ## MCP 工具
 
 | 工具 | 需要的输入与结果 |

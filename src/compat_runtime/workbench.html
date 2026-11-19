@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Pattern workbench</title>
+<style>
+:root { font: 14px system-ui, sans-serif; color: #102824; background: #eef3f0; }
+* { box-sizing: border-box; }
+body { margin: 0; overflow: hidden; }
+header { position: absolute; inset: 0 0 auto; height: 110px; border-bottom: 1px solid #bdcdc5; background: #fbfaf3; }
+h1 { font-size: 22px; margin: 15px 20px; font-weight: 650; }
+button, input { color: inherit; font: inherit; }
+button { background: #e1eee7; border: 1px solid #a8bcb1; border-radius: 5px; height: 36px; }
+button:disabled, input:disabled { opacity: .45; }
+header button, header input { position: absolute; top: 54px; }
+header input { left: 574px; width: 226px; height: 36px; padding: 5px 10px; border: 1px solid #c9d6cd; border-radius: 5px; background: #fffefa; }
+aside { position: absolute; top: 110px; left: 0; width: 264px; bottom: 0; background: #faf9f2; border-right: 1px solid #bdcdc5; }
+h2 { margin: 13px 15px 9px; font-size: 14px; }
+ul { position: absolute; top: 41px; left: 0; right: 0; padding: 0; margin: 0; list-style: none; }
+li { height: 32px; padding: 5px 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+li.selected { color: #fff; background: #28584a; }
+i { vertical-align: middle; width: 12px; height: 12px; display: inline-block; margin-right: 8px; border-radius: 3px; border: 1px solid #506760; }
+svg { display: block; position: absolute; top: 110px; left: 264px; background: #eef3f0; }
+polygon { fill-opacity: .75; stroke: #55796d; stroke-width: 1.5; }
+polygon.selected { stroke: #197451; stroke-width: 3; }
+svg text { fill: #102824; text-anchor: middle; dominant-baseline: middle; font-size: 13px; }
+.context { position: absolute; width: 180px; height: 34px; background: #fffefa; box-shadow: 0 2px 9px #10282440; }
+</style>
+<header>
+<h1>Pattern workbench</h1>
+<!--WORKBENCH-->
+<input aria-label="Pattern name" placeholder="Select a pattern" value="<!--WORKBENCH-->" <!--WORKBENCH-->>
+</header>
+<aside aria-label="Patterns"><h2>Patterns</h2><ul><!--WORKBENCH--></ul></aside>
+<svg aria-label="Drafting area" width="760" height="610" role="img">
+<defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0 H0 V20" fill="none" stroke="#d2deda" stroke-width="1"/></pattern></defs>
+<rect width="760" height="610" fill="url(#grid)"/>
+<!--WORKBENCH-->
+</svg>
+<!--WORKBENCH-->
+</html>

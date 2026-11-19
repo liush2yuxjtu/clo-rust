@@ -1,6 +1,10 @@
 mod avatar;
 mod avatar_source;
 mod collision;
+mod compat_engine;
+mod compat_fit;
+mod compat_runtime;
+mod compat_scene;
 mod connectivity;
 mod mesh;
 
@@ -266,6 +270,7 @@ fn constraints(project: &Project) -> Vec<Constraint<'_>> {
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["mcp-compat"] => compat_engine::run()?,
         ["--version"] => println!("pattern-native {}", env!("CARGO_PKG_VERSION")),
         ["clo-import", edges, mapping, seams, out] => {
             let mut seams: Vec<Sewing> = read(seams)?;

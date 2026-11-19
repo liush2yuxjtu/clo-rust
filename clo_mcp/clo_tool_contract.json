@@ -1,0 +1,1107 @@
+[
+  {
+    "name": "clo_status",
+    "description": "Check whether CLO is running and the in-CLO bridge is reachable. Returns instructions when it is not.",
+    "inputSchema": {
+      "properties": {},
+      "title": "clo_statusArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_launch",
+    "description": "Launch CLO (macOS). Passing -python clo_bridge.py is attempted, but CLO 2026.1 did not run it at startup in testing,\n    so after CLO is up start the bridge with the menu item Plugins > start_bridge (or ask the user to click it).",
+    "inputSchema": {
+      "properties": {
+        "with_bridge": {
+          "default": true,
+          "title": "With Bridge",
+          "type": "boolean"
+        }
+      },
+      "title": "clo_launchArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "clo_launchOutput",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_stop_bridge",
+    "description": "Stop the bridge loop inside CLO (frees the Python editor; CLO keeps running).",
+    "inputSchema": {
+      "properties": {},
+      "title": "clo_stop_bridgeArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "clo_stop_bridgeOutput",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_run_python",
+    "description": "Run Python inside CLO with the CLO API modules pre-imported (import_api, export_api, fabric_api, pattern_api,\n    utility_api, rest_api, ApiTypes). A single expression returns its value; otherwise assign to `result`.\n    stdout is captured. Coordinates: mm, Y up. Example: pattern_api.GetPatternCount()",
+    "inputSchema": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 600,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "clo_run_pythonArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_search",
+    "description": "Search names and docstrings in the running CLO API. Requires the bridge. Use clo_api_catalog for pagination.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "limit": {
+          "default": 40,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "clo_api_searchArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "clo_api_searchOutput",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_doc",
+    "description": "Read live documentation for a CLO function. Prefer a qualified name such as pattern_api.GetPatternCount.",
+    "inputSchema": {
+      "properties": {
+        "function_name": {
+          "title": "Function Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function_name"
+      ],
+      "title": "clo_api_docArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "clo_api_docOutput",
+      "type": "object"
+    }
+  },
+  {
+    "name": "scene_info",
+    "description": "Current CLO scene: project, avatars, pattern pieces (with arrangement point and fabric), fabrics, colorways, seams.",
+    "inputSchema": {
+      "properties": {},
+      "title": "scene_infoArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "scene_clear",
+    "description": "Delete all pattern pieces (keep_avatar=True) or start a fresh project (keep_avatar=False).",
+    "inputSchema": {
+      "properties": {
+        "keep_avatar": {
+          "default": true,
+          "title": "Keep Avatar",
+          "type": "boolean"
+        }
+      },
+      "title": "scene_clearArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "scene_open",
+    "description": "Open a file in CLO: .zprj (project), .zpac (garment), .avt (avatar), .dxf (patterns), pattern .json, .obj/.fbx.\n    mode 'replace' or 'append'.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "mode": {
+          "default": "replace",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "scene_openArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "scene_save",
+    "description": "Save the project (.zprj) or garment (.zpac) to a path.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "thumbnail": {
+          "default": true,
+          "title": "Thumbnail",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "scene_saveArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "scene_export",
+    "description": "Export the garment: .obj, .fbx, .glb, .gltf, .dxf (patterns), .json (CLO pattern JSON), .zprj, .zpac.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "include_avatar": {
+          "default": false,
+          "title": "Include Avatar",
+          "type": "boolean"
+        },
+        "colorways": {
+          "default": false,
+          "title": "Colorways",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "scene_exportArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "snapshot",
+    "description": "Capture the 3D window from one or more views and return the images. views: front, back, left, right, 3/4-right,\n    3/4-left, top. Default: front and 3/4-right.",
+    "inputSchema": {
+      "properties": {
+        "views": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Views"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "title": "snapshotArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "snapshot_2d",
+    "description": "Capture the 2D pattern window (pattern pieces layout).",
+    "inputSchema": {
+      "properties": {},
+      "title": "snapshot_2dArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "avatar_list",
+    "description": "Avatars in the scene and the .avt files available in the CLO asset library.",
+    "inputSchema": {
+      "properties": {},
+      "title": "avatar_listArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "avatar_load",
+    "description": "Load an avatar by alias (mia, luka, female mannequin, male mannequin, melody, oliver), file name or path.",
+    "inputSchema": {
+      "properties": {
+        "name_or_path": {
+          "default": "mia",
+          "title": "Name Or Path",
+          "type": "string"
+        },
+        "replace": {
+          "default": true,
+          "title": "Replace",
+          "type": "boolean"
+        }
+      },
+      "title": "avatar_loadArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "avatar_measurements",
+    "description": "Body measurements (mm) of the avatar in the scene, used for drafting. Source: CLO's measurement API (needs the\n    Avatar Editor opened once per session in CLO), a cache, or an approximation from the avatar mesh.",
+    "inputSchema": {
+      "properties": {
+        "refresh": {
+          "default": false,
+          "title": "Refresh",
+          "type": "boolean"
+        }
+      },
+      "title": "avatar_measurementsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "arrangement_points",
+    "description": "List the avatar's arrangement points (names used to place pattern pieces on the body).",
+    "inputSchema": {
+      "properties": {},
+      "title": "arrangement_pointsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_list",
+    "description": "List pattern pieces (index, name, arrangement, fabric, bbox). detail=True adds each outline line with its\n    length/location (line indices are what sew() uses) and the seam groups per piece.",
+    "inputSchema": {
+      "properties": {
+        "detail": {
+          "default": false,
+          "title": "Detail",
+          "type": "boolean"
+        }
+      },
+      "title": "pattern_listArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_info",
+    "description": "Full information about one piece (by name or index): lines, points (2D mm), arrangement, fabric, seams.",
+    "inputSchema": {
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "title": "pattern_infoArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_create",
+    "description": "Create a pattern piece from outline points [[x, y, type], ...] in mm (Y up). type 0 = corner (default),\n    2 = spline curve point, 3 = bezier control point. Lines are numbered by corner order (line i joins corner i to\n    i+1). Optionally place it on an arrangement point (see arrangement_points).",
+    "inputSchema": {
+      "properties": {
+        "points": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "arrangement": {
+          "default": "",
+          "title": "Arrangement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "points"
+      ],
+      "title": "pattern_createArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_delete",
+    "description": "Delete pieces by name or index.",
+    "inputSchema": {
+      "properties": {
+        "patterns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "patterns"
+      ],
+      "title": "pattern_deleteArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_set_arrangement",
+    "description": "Place a piece on an avatar arrangement point (e.g. Body_Front_Center_3, Leg_Skirt_Back, Arm_Outside_2_L).",
+    "inputSchema": {
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "point": {
+          "title": "Point",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern",
+        "point"
+      ],
+      "title": "pattern_set_arrangementArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_edit_points",
+    "description": "Move outline points of a piece. moves: [{\"point\": i, \"x\": .., \"y\": ..}] absolute or [{\"point\": i, \"dx\": .., \"dy\": ..}]\n    relative (mm, 2D pattern space). Use pattern_info to see point indices/positions. Only corner points are indexed;\n    curve (spline) points on an edge stay where they are, so moving corners of a curved hem distorts it. For built\n    garments prefer garment_rebuild({\"length\": ...}); use this for straight-edged pieces or small tweaks, then simulate.",
+    "inputSchema": {
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "moves": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Moves",
+          "type": "array"
+        }
+      },
+      "required": [
+        "pattern",
+        "moves"
+      ],
+      "title": "pattern_edit_pointsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "pattern_ops",
+    "description": "Piece operations. op: rename{name}, move_2d{x,y|dx,dy}, flip{horizontal,each}, copy{dx,dy}, symmetry{with_sewing},\n    unfold{line,half_symmetry}, layer{layer}, particle_distance{mm}, freeze{on}, hide{on}, strengthen{on},\n    elastic{line,on,total_length,strength}, shirring{line,on}, delete_line{line}, delete_point{point}.",
+    "inputSchema": {
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "op": {
+          "title": "Op",
+          "type": "string"
+        },
+        "args": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args"
+        }
+      },
+      "required": [
+        "pattern",
+        "op"
+      ],
+      "title": "pattern_opsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "sew",
+    "description": "Sew line_a of pattern_a to line_b of pattern_b (segment sewing). Directions follow each line's point order;\n    when the two lines run in opposite physical directions set dir_b=False (e.g. front right side <-> back left side\n    with clockwise outlines). Check the result with simulate + snapshot; there is no API to remove a seam, so save a\n    checkpoint first.",
+    "inputSchema": {
+      "properties": {
+        "pattern_a": {
+          "title": "Pattern A",
+          "type": "string"
+        },
+        "line_a": {
+          "title": "Line A",
+          "type": "integer"
+        },
+        "pattern_b": {
+          "title": "Pattern B",
+          "type": "string"
+        },
+        "line_b": {
+          "title": "Line B",
+          "type": "integer"
+        },
+        "dir_a": {
+          "default": true,
+          "title": "Dir A",
+          "type": "boolean"
+        },
+        "dir_b": {
+          "default": true,
+          "title": "Dir B",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pattern_a",
+        "line_a",
+        "pattern_b",
+        "line_b"
+      ],
+      "title": "sewArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "seams_list",
+    "description": "List sewing groups and the pieces involved.",
+    "inputSchema": {
+      "properties": {},
+      "title": "seams_listArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fabric_library",
+    "description": "List .zfab fabrics available in the CLO asset library (optionally filtered by substring).",
+    "inputSchema": {
+      "properties": {
+        "filter": {
+          "default": "",
+          "title": "Filter",
+          "type": "string"
+        }
+      },
+      "title": "fabric_libraryArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fabric_list",
+    "description": "Fabrics currently in the project's object browser.",
+    "inputSchema": {
+      "properties": {},
+      "title": "fabric_listArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fabric_apply",
+    "description": "Add a fabric (keyword like 'satin', 'chiffon', 'denim', 'jersey'..., a library file name, or a .zfab path) and\n    assign it to the given pieces (default: all). Optional colour ('#hex' or a colour name) and base texture image.",
+    "inputSchema": {
+      "properties": {
+        "fabric": {
+          "title": "Fabric",
+          "type": "string"
+        },
+        "color": {
+          "default": "",
+          "title": "Color",
+          "type": "string"
+        },
+        "patterns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Patterns"
+        },
+        "texture_image": {
+          "default": "",
+          "title": "Texture Image",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fabric"
+      ],
+      "title": "fabric_applyArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fabric_set_color",
+    "description": "Set the base colour of a fabric already in the project ('#hex' or colour name).",
+    "inputSchema": {
+      "properties": {
+        "fabric_index": {
+          "title": "Fabric Index",
+          "type": "integer"
+        },
+        "color": {
+          "title": "Color",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fabric_index",
+        "color"
+      ],
+      "title": "fabric_set_colorArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fabric_set_texture",
+    "description": "Apply an image as a fabric's base colour texture (or normal/roughness/opacity map).",
+    "inputSchema": {
+      "properties": {
+        "fabric_index": {
+          "title": "Fabric Index",
+          "type": "integer"
+        },
+        "image_path": {
+          "title": "Image Path",
+          "type": "string"
+        },
+        "map": {
+          "default": "base",
+          "title": "Map",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fabric_index",
+        "image_path"
+      ],
+      "title": "fabric_set_textureArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "simulate",
+    "description": "Run the cloth simulation for N steps (about 30 steps per simulated second). quality: 0 normal, 1 stable,\n    2 accurate, 3 GPU-fast. particle_distance in mm (smaller = finer, slower; 20 default, 10 for final quality).",
+    "inputSchema": {
+      "properties": {
+        "steps": {
+          "default": 100,
+          "title": "Steps",
+          "type": "integer"
+        },
+        "particle_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Particle Distance"
+        },
+        "quality": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quality"
+        }
+      },
+      "title": "simulateArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "simulation_reset",
+    "description": "Reset the garment to its arrangement positions (undo the simulation drape).",
+    "inputSchema": {
+      "properties": {},
+      "title": "simulation_resetArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "checkpoint_save",
+    "description": "Save the current project as a named checkpoint (.zprj under ~/.clo3d-mcp/checkpoints) so a failed edit or\n    seam can be undone with checkpoint_restore.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "title": "checkpoint_saveArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "checkpoint_restore",
+    "description": "Reload a checkpoint saved with checkpoint_save (replaces the scene).",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "checkpoint_restoreArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "checkpoint_list",
+    "description": "List saved checkpoints.",
+    "inputSchema": {
+      "properties": {},
+      "title": "checkpoint_listArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "garment_plan_preview",
+    "description": "",
+    "inputSchema": {
+      "properties": {
+        "spec": {
+          "additionalProperties": true,
+          "title": "Spec",
+          "type": "object"
+        },
+        "use_scene_measurements": {
+          "default": false,
+          "title": "Use Scene Measurements",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "title": "garment_plan_previewArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "garment_build",
+    "description": "",
+    "inputSchema": {
+      "properties": {
+        "spec": {
+          "additionalProperties": true,
+          "title": "Spec",
+          "type": "object"
+        },
+        "simulate_steps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Simulate Steps"
+        },
+        "snapshots": {
+          "default": true,
+          "title": "Snapshots",
+          "type": "boolean"
+        },
+        "replace_existing": {
+          "default": true,
+          "title": "Replace Existing",
+          "type": "boolean"
+        },
+        "views": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Views"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "title": "garment_buildArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "garment_rebuild",
+    "description": "Re-draft the last built garment with modified spec fields (e.g. {\"length\": \"midi\"}, {\"neckline\": \"v\", \"sleeve\": \"long\"},\n    {\"color\": \"navy\"}, {\"fit\": \"loose\"}). Replaces the pieces in CLO and re-simulates.",
+    "inputSchema": {
+      "properties": {
+        "changes": {
+          "additionalProperties": true,
+          "title": "Changes",
+          "type": "object"
+        },
+        "simulate_steps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Simulate Steps"
+        },
+        "snapshots": {
+          "default": true,
+          "title": "Snapshots",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changes"
+      ],
+      "title": "garment_rebuildArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "garment_last_spec",
+    "description": "The normalized spec and plan summary of the last garment built in this session.",
+    "inputSchema": {
+      "properties": {},
+      "title": "garment_last_specArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_catalog",
+    "description": "Discover functions, types and constants in the RUNNING CLO version. Paged; no API functions are executed. Search names and docstrings. Modules include rest_api and ApiTypes. Follow next_offset for full coverage.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "module": {
+          "default": "",
+          "title": "Module",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "clo_api_catalogArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_describe",
+    "description": "Live docstring/overloads and class fields for a qualified name, e.g. pattern_api.GetPatternCount or ApiTypes.ImportExportOption. Documents the running version.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "clo_api_describeArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_call",
+    "description": "Call any public function discovered in clo_api_catalog, or read a constant. Read its live documentation first. JSON supports {$type:'ApiTypes.TypeName',args:[],fields:{...}}, {$enum:'ApiTypes.Enum.Member'}, and {$handle:'id'}. Non-JSON return objects get session handles. A false result is NOT success. Never retry a timed-out mutation blindly; inspect scene/UI first. Use checkpoint_save before risky scene edits.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "args": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args"
+        },
+        "kwargs": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kwargs"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "clo_api_callArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_api_release",
+    "description": "Release native API object handles when finished; handles expire when CLO restarts.",
+    "inputSchema": {
+      "properties": {
+        "handles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Handles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "handles"
+      ],
+      "title": "clo_api_releaseArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_control_guide",
+    "description": "Routing guide for CLO functions absent from the API, including desktop prerequisites and verification.",
+    "inputSchema": {
+      "properties": {},
+      "title": "clo_control_guideArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_ui_state",
+    "description": "Inspect CLO accessibility hierarchy, menus, dialogs, values and supported actions. Returns a snapshot token; use it for the next UI action. No bridge needed. Requires macos extra and Accessibility permission.",
+    "inputSchema": {
+      "properties": {
+        "max_nodes": {
+          "default": 1500,
+          "title": "Max Nodes",
+          "type": "integer"
+        },
+        "max_depth": {
+          "default": 16,
+          "title": "Max Depth",
+          "type": "integer"
+        }
+      },
+      "title": "clo_ui_stateArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_ui_action",
+    "description": "One CLO-only UI action followed by fresh state. action: press, set_value, ax_action (value must be an exposed action), click, right_click, double_click, drag, key, text, scroll (y is vertical wheel delta). Use observed element IDs or SCREEN coordinates from screenshot; key uses macOS virtual keycodes. modifiers: command,shift,option,control. Requires current snapshot token; state is consumed by an action. Never guess coordinates or perform blind action sequences.",
+    "inputSchema": {
+      "properties": {
+        "snapshot": {
+          "title": "Snapshot",
+          "type": "string"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "element": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Element"
+        },
+        "value": {
+          "default": "",
+          "title": "Value",
+          "type": "string"
+        },
+        "x": {
+          "default": 0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "default": 0,
+          "title": "Y",
+          "type": "number"
+        },
+        "end_x": {
+          "default": 0,
+          "title": "End X",
+          "type": "number"
+        },
+        "end_y": {
+          "default": 0,
+          "title": "End Y",
+          "type": "number"
+        },
+        "keycode": {
+          "default": 0,
+          "title": "Keycode",
+          "type": "integer"
+        },
+        "modifiers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modifiers"
+        }
+      },
+      "required": [
+        "snapshot",
+        "action"
+      ],
+      "title": "clo_ui_actionArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "clo_ui_screenshot",
+    "description": "Capture CLO's window as an image, including UI-only tools and dialogs; independent of API snapshots. Requires Screen Recording. Coordinates in clo_ui_state are screen points, not image pixels.",
+    "inputSchema": {
+      "properties": {},
+      "title": "clo_ui_screenshotArguments",
+      "type": "object"
+    }
+  }
+]

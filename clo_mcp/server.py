@@ -11,13 +11,14 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
-from . import evidence, runtime
+from . import compat, evidence, runtime
 
 server = FastMCP("CLO Rust Boat", instructions=(
+    "Select the Rust or official CLO backend with CLO_MCP_BACKEND. "
     "Use confirmable saved CLO evidence. Seam, strain and fold geometry run through "
     "pattern-native. Stress and pressure require their own recorded native evidence. "
     "Only replay timestamped simulation recordings."
-))
+), lifespan=compat.backend_lifespan)
 
 
 def local_file(value):
@@ -308,4 +309,5 @@ if __name__ == "__main__":
     if parser.parse_args().prewarm:
         print(prewarm_runtime()["binary"])
     else:
+        compat.register(server)
         server.run(transport="stdio")
