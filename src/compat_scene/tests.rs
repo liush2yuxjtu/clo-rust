@@ -213,3 +213,47 @@ fn portable_project_ignores_archived_runtime_state() {
     tool(&mut state, "scene_open", json!({"path": path}));
     assert_eq!(state["runtime"], active);
 }
+
+#[test]
+fn obj_material_import_preserves_uv_seams_and_remaps_on_append() {
+    let root = Temporary::new();
+    let object = root.0.join("window.obj");
+    fs::write(
+        root.0.join("my fabric.mtl"),
+        "newmtl Satin red\nKd 1 0 0\nTr 0.25\nmap_Kd missing.png\n",
+    )
+    .unwrap();
+    fs::write(
+        &object,
+        "mtllib my fabric.mtl\no panel\nusemtl Satin red\n         v 0 0 0\nv 40 0 0\nv 0 60 0\nv 40 60 0\n         vt 0 0\nvt 1 0\nvt 0 1\nvt 1 1\nvt 0.25 0.75\n         f -4/-5 -3/-4 -2/-3\nf 1/5 2/2 4/4\n",
+    )
+    .unwrap();
+    let mut state = scene();
+    state["fabrics"] = json!([{"index": 7, "name": "existing"}]);
+    let result = tool(
+        &mut state,
+        "scene_open",
+        json!({"path": object, "mode":"append"}),
+    );
+    assert!(result["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("missing.png"));
+    assert_eq!(state["fabrics"][1]["rgba"], json!([1.0, 0.0, 0.0, 0.75]));
+    let mesh = &state["imported_meshes"][0];
+    assert_eq!(mesh["fabric_index"], 8);
+    assert_eq!(mesh["triangles"], json!([[0, 1, 2], [3, 1, 4]]));
+    assert_eq!(mesh["positions"][0], mesh["positions"][3]);
+    assert_eq!(mesh["texcoords"][0], json!([0.0, 1.0]));
+    assert_eq!(mesh["texcoords"][3], json!([0.25, 0.25]));
+    let original = state.clone();
+    fs::write(
+        &object,
+        "v 0 0 0\nv 10 0 0\nv 0 10 0\nvt 0\nf 1/2 2/1 3/1\n",
+    )
+    .unwrap();
+    assert!(dispatch("scene_open", &json!({"path": object}), &mut state)
+        .unwrap()
+        .is_err());
+    assert_eq!(state, original);
+}

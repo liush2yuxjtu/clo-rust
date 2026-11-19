@@ -28,6 +28,20 @@ struct Drawing {
     texture: Option<Rc<BaseTexture>>,
 }
 
+impl Drawing {
+    fn from_mesh(mesh: &Value) -> Result<Self, String> {
+        Ok(Self {
+            color: [0; 3],
+            points: serde_json::from_value(mesh["positions"].clone())
+                .map_err(|e| format!("invalid snapshot mesh positions: {e}"))?,
+            faces: serde_json::from_value(mesh["triangles"].clone())
+                .map_err(|e| format!("invalid snapshot mesh faces: {e}"))?,
+            texcoords: serde_json::from_value(mesh["texcoords"].clone()).unwrap_or_default(),
+            texture: None,
+        })
+    }
+}
+
 #[derive(Default)]
 struct TextureCache {
     by_path: BTreeMap<String, Option<Rc<BaseTexture>>>,
@@ -111,15 +125,7 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
                 .iter()
                 .find(|p| p["id"] == mesh["id"])
                 .map_or(&mesh["fabric_index"], |p| &p["fabric_index"]);
-            let mut drawing = Drawing {
-                color: [0; 3],
-                points: serde_json::from_value(mesh["positions"].clone())
-                    .map_err(|e| format!("invalid saved mesh positions: {e}"))?,
-                faces: serde_json::from_value(mesh["triangles"].clone())
-                    .map_err(|e| format!("invalid saved mesh faces: {e}"))?,
-                texcoords: serde_json::from_value(mesh["texcoords"].clone()).unwrap_or_default(),
-                texture: None,
-            };
+            let mut drawing = Drawing::from_mesh(mesh)?;
             textures.apply(state, fabric_id, index, &mut drawing);
             Ok(drawing)
         })
@@ -480,6 +486,13 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
     }
     let mut textures = TextureCache::default();
     drawings.extend(pieces(state, flat, &mut textures)?);
+    if !flat {
+        for (index, mesh) in array(&state["imported_meshes"]).iter().enumerate() {
+            let mut drawing = Drawing::from_mesh(mesh)?;
+            textures.apply(state, &mesh["fabric_index"], index, &mut drawing);
+            drawings.push(drawing);
+        }
+    }
     let mut images = Vec::new();
     for view in &views {
         match make_image(&drawings, &root, string(args, "label", "snap"), view, flat) {

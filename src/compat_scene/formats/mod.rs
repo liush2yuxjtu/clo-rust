@@ -6,7 +6,7 @@ mod native_pose;
 mod native_seams;
 
 pub(super) use dxf::{read_dxf, write_dxf};
-pub(super) use mesh::{read_mesh, write_mesh};
+pub(super) use mesh::{read_mesh, read_obj_scene, write_mesh};
 
 use super::patterns::Point;
 use serde_json::{json, Value};

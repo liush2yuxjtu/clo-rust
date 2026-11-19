@@ -224,12 +224,17 @@ fn prepare_archived_fabrics(
                 .checked_add(index as u64)
                 .ok_or("native material-index limit exceeded")?);
         }
-        for panel in vec_mut(loaded, "patterns") {
-            let index = super::index(panel, "fabric_index")?;
-            let index = offset
-                .checked_add(index as u64)
-                .ok_or("native material-index limit exceeded")?;
-            panel["fabric_index"] = json!(index);
+        for field in ["patterns", "imported_meshes"] {
+            for piece in vec_mut(loaded, field) {
+                if piece["fabric_index"].is_null() && field == "imported_meshes" {
+                    continue;
+                }
+                let index = super::index(piece, "fabric_index")?;
+                let index = offset
+                    .checked_add(index as u64)
+                    .ok_or("native material-index limit exceeded")?;
+                piece["fabric_index"] = json!(index);
+            }
         }
     }
     Ok(fabrics)
@@ -267,7 +272,21 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             }
         }
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
-        "obj" | "glb" | "gltf" => {
+        "obj" => {
+            let mut imported = formats::read_obj_scene(path)?;
+            let fabrics = prepare_archived_fabrics(state, &mut imported, true)?;
+            if !append {
+                clear_garment(state);
+            }
+            vec_mut(state, "fabrics").extend(fabrics);
+            vec_mut(state, "imported_meshes").append(vec_mut(&mut imported, "imported_meshes"));
+            let mut reply = open_reply(state, path);
+            if !array(&imported, "warnings").is_empty() {
+                reply["warnings"] = imported["warnings"].clone();
+            }
+            return Ok(reply);
+        }
+        "glb" | "gltf" => {
             let meshes = formats::read_mesh(path)?;
             if !append {
                 clear_garment(state);

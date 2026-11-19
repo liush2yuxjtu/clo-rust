@@ -1,4 +1,5 @@
 mod obj_export;
+mod obj_import;
 
 use super::{
     super::{array, flag, patterns},
@@ -60,94 +61,6 @@ impl Mesh {
 
 fn filename(path: &Path) -> &str {
     path.file_stem().and_then(|n| n.to_str()).unwrap_or("Mesh")
-}
-
-fn face_vertex(term: &str, vertices: usize) -> Result<u32, String> {
-    let v: i64 = term
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .parse()
-        .map_err(|_| "invalid OBJ vertex index")?;
-    let absolute = if v > 0 { v - 1 } else { vertices as i64 + v };
-    if v == 0 || absolute < 0 || absolute >= vertices as i64 {
-        return Err("OBJ face vertex index is out of range".into());
-    }
-    u32::try_from(absolute).map_err(|_| "OBJ has too many vertex indices".into())
-}
-
-fn obj_read(path: &Path) -> Result<Vec<Mesh>, String> {
-    let data = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut positions = Vec::new();
-    let mut parts: Vec<(String, Vec<[u32; 3]>)> = Vec::new();
-    let mut name = filename(path).to_string();
-    let mut triangles = Vec::new();
-    for line in data.lines() {
-        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
-        match words.next() {
-            Some("v") => {
-                let mut point = [0.; 3];
-                for coordinate in &mut point {
-                    *coordinate = words
-                        .next()
-                        .ok_or("OBJ vertex has fewer than three coordinates")?
-                        .parse()
-                        .map_err(|_| "invalid OBJ vertex coordinate")?;
-                }
-                positions.push(point);
-            }
-            Some("o" | "g") => {
-                if !triangles.is_empty() {
-                    parts.push((name, std::mem::take(&mut triangles)));
-                }
-                name = words.collect::<Vec<_>>().join(" ");
-            }
-            Some("f") => {
-                let indices: Vec<_> = words
-                    .map(|s| face_vertex(s, positions.len()))
-                    .collect::<Result<_, _>>()?;
-                if indices.len() < 3 {
-                    return Err("OBJ face has fewer than three vertices".into());
-                }
-                for i in 1..indices.len() - 1 {
-                    triangles.push([indices[0], indices[i], indices[i + 1]]);
-                }
-            }
-            _ => {}
-        }
-    }
-    if !triangles.is_empty() {
-        parts.push((name, triangles));
-    }
-    if parts.is_empty() {
-        return Err("OBJ has no triangle geometry".into());
-    }
-    let mut meshes = Vec::new();
-    for (name, faces) in parts {
-        let mut compact = Vec::new();
-        let mut mapping = std::collections::HashMap::new();
-        let triangles = faces
-            .into_iter()
-            .map(|face| {
-                face.map(|index| {
-                    *mapping.entry(index).or_insert_with(|| {
-                        let next = compact.len() as u32;
-                        compact.push(positions[index as usize]);
-                        next
-                    })
-                })
-            })
-            .collect();
-        meshes.push(Mesh {
-            id: Value::Null,
-            name,
-            fabric_index: Value::Null,
-            texcoords: Vec::new(),
-            positions: compact,
-            triangles,
-        });
-    }
-    Ok(meshes)
 }
 
 const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -356,7 +269,7 @@ pub(in crate::compat_scene) fn read_mesh(path: &Path) -> Result<Vec<Value>, Stri
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("obj"))
     {
-        obj_read(path)?
+        obj_import::read(path, false)?.0
     } else {
         gltf_read(path)?
     };
@@ -367,6 +280,11 @@ pub(in crate::compat_scene) fn read_mesh(path: &Path) -> Result<Vec<Value>, Stri
             serde_json::to_value(mesh).map_err(|err| err.to_string())
         })
         .collect()
+}
+
+pub(in crate::compat_scene) fn read_obj_scene(path: &Path) -> Result<Value, String> {
+    let (meshes, fabrics, warnings) = obj_import::read(path, true)?;
+    Ok(json!({"imported_meshes": meshes, "fabrics": fabrics, "warnings": warnings}))
 }
 
 fn cross(a: patterns::Point, b: patterns::Point, c: patterns::Point) -> f64 {
