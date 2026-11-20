@@ -77,6 +77,16 @@ names for every panel, checks detailed arrangement, layer and particle distance
 for up to eight panels, and exercises a missing panel. The reported seam-group
 counts are separate observations. The case does not assert line geometry or sewing parity.
 
+Use `--compare-saved-pattern-outline` with a saved project containing straight
+and curved outer edges. Compare all panel corner records, line indices,
+straight/curve type, endpoints, orientation and location, and check detail rows
+from `pattern_list`. Accept at most 0.1 mm length difference, 0.001 mm midpoint
+or corner-bounds axis difference, and 0.001 normalized midpoint axis difference.
+Save and reopen a disposable Rust copy and confirm matching readback. Check
+that a rejected point edit preserves the outline metrics and a successful edit
+recomputes the affected lengths. Child shapes and exact curve evaluation
+require separate checks.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

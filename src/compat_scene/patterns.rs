@@ -132,6 +132,13 @@ fn curve(edge: &[Point], sampled: bool) -> Vec<Point> {
     result
 }
 
+pub(super) fn curve_length(edge: &[Point], sampled: bool) -> f64 {
+    curve(edge, sampled)
+        .windows(2)
+        .map(|p| p[0].distance(p[1]))
+        .sum()
+}
+
 pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
     let mut result = Vec::new();
     for edge in split_edges(&points(pattern)?) {
@@ -142,8 +149,11 @@ pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
 }
 
 fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
-    let [dx, dy] = offset(pattern);
-    Ok(outline(pattern)?.into_iter().fold(
+    Ok(point_bounds(outline(pattern)?, offset(pattern)))
+}
+
+fn point_bounds(points: impl IntoIterator<Item = Point>, [dx, dy]: [f64; 2]) -> [f64; 4] {
+    points.into_iter().fold(
         [
             f64::INFINITY,
             f64::INFINITY,
@@ -158,7 +168,7 @@ fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
                 top.max(p.y + dy),
             ]
         },
-    ))
+    )
 }
 
 fn bbox(bounds: [f64; 4]) -> Value {
@@ -167,9 +177,9 @@ fn bbox(bounds: [f64; 4]) -> Value {
 }
 
 fn slot(n: f64, before: &'static str, after: &'static str) -> &'static str {
-    if n < 1.0 / 3.0 {
+    if n < 0.34 {
         before
-    } else if n > 2.0 / 3.0 {
+    } else if n > 0.66 {
         after
     } else {
         ""
@@ -179,24 +189,20 @@ fn slot(n: f64, before: &'static str, after: &'static str) -> &'static str {
 fn lines(pattern: &Value) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
     let [dx, dy] = offset(pattern);
-    let [left, bottom, right, top] = bounds(pattern)?;
-    for (line, edge) in split_edges(&points(pattern)?).iter().enumerate() {
-        let sampled = curve(edge, flag(pattern, "sampled_polyline", false));
-        let length: f64 = sampled.windows(2).map(|p| p[0].distance(p[1])).sum();
-        let mut walked = 0.;
-        let mut mid = sampled[0];
-        for pair in sampled.windows(2) {
-            let step = pair[0].distance(pair[1]);
-            if walked + step >= length / 2. && step > 0. {
-                let t = (length / 2. - walked) / step;
-                mid.x = pair[0].x + t * (pair[1].x - pair[0].x);
-                mid.y = pair[0].y + t * (pair[1].y - pair[0].y);
-                break;
-            }
-            walked += step;
-        }
+    let points = points(pattern)?;
+    let [left, bottom, right, top] =
+        point_bounds(points.iter().copied().filter(|p| p.kind == 0), [dx, dy]);
+    for (line, edge) in split_edges(&points).iter().enumerate() {
         let start = edge[0];
         let end = edge[edge.len() - 1];
+        let length = pattern["native_outline_metrics"][line]["length"]
+            .as_f64()
+            .unwrap_or_else(|| curve_length(edge, flag(pattern, "sampled_polyline", false)));
+        let mid = Point {
+            x: (start.x + end.x) / 2.0,
+            y: (start.y + end.y) / 2.0,
+            kind: 0,
+        };
         let norm_x = if right > left {
             (mid.x + dx - left) / (right - left)
         } else {
@@ -340,11 +346,15 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
     let lines = lines(pattern)?;
     let mut line_list = vec![json!({"Line count": lines.len().to_string()})];
     line_list.extend(lines.iter().zip(edges).enumerate().map(|(n, (line, edge))| {
-        let kind = if edge.len() == 2 { "Straight type" } else { "" };
+        let straight = pattern["native_outline_metrics"][n]["straight"]
+            .as_bool()
+            .unwrap_or(edge.len() == 2);
+        let kind = if straight { "Straight type" } else { "" };
         json!({"Line index": n.to_string(), "Line length": line["length"], "Line type": kind})
     }));
     let limits = bounds(pattern)?;
-    let [left, bottom, right, top] = limits;
+    let [left, bottom, right, top] =
+        point_bounds(pts.iter().copied().filter(|p| p.kind == 0), [dx, dy]);
     let arrangement = if pattern["saved_arrangement"].is_object()
         && pattern["saved_arrangement"]["ArrangementName"] == pattern["arrangement"]
     {
@@ -468,8 +478,8 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
         };
         moved.push(json!({"point": cursor, "x": x, "y": y}));
     }
-    set_points(&mut state["patterns"][i], points);
     if !moved.is_empty() {
+        set_points(&mut state["patterns"][i], points);
         invalidate_geometry(state);
     }
     Ok(json!({"index": i, "moved": moved}))
@@ -477,6 +487,10 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
 
 fn set_points(pattern: &mut Value, points: Vec<Point>) {
     pattern["points"] = Value::Array(points.into_iter().map(Point::record).collect());
+    pattern
+        .as_object_mut()
+        .expect("pattern object")
+        .remove("native_outline_metrics");
 }
 
 fn reflect(p: Point, a: Point, b: Point) -> Point {

@@ -1,6 +1,7 @@
 //! Read a stored native drape without claiming that it was solved by the Rust engine.
 
 use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
+use crate::compat_scene::patterns::{curve_length, points, Point};
 use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -293,8 +294,85 @@ pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result
                 panel["saved_arrangement"] = settings;
             }
         }
+        if let Some(metrics) = outline_metrics(record, panel) {
+            panel["native_outline_metrics"] = json!(metrics);
+        }
     }
     Ok(())
+}
+
+fn coordinates<const N: usize>(record: &Fields<'_>, key: &[u8], kind: u8) -> Option<[f64; N]> {
+    let data = record.get(key, kind).ok()?;
+    if data.len() != N * 4 {
+        return None;
+    }
+    let mut result = [0.0; N];
+    for (value, bytes) in result.iter_mut().zip(data.chunks_exact(4)) {
+        *value = f64::from(f32::from_le_bytes(bytes.try_into().ok()?));
+        if !value.is_finite() {
+            return None;
+        }
+    }
+    Some(result)
+}
+
+fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<Vec<Value>> {
+    let shape = record.map(b"mapShape2D").ok()?;
+    let transform = shape.map(b"mapTransformer2D").ok()?;
+    let [a, b, 0.0, c, d, 0.0, tx, ty, 1.0] = coordinates(&transform, b"m3Matrix", 13)? else {
+        return None;
+    };
+    let linear = |[x, y]: [f64; 2], kind| Point {
+        x: a * x + c * y,
+        y: b * x + d * y,
+        kind,
+    };
+    let vertices = map_list(shape.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let lines = map_list(shape.get(b"listLine", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let corners: Vec<_> = points(panel).ok()?.into_iter().filter(|p| p.kind == 0).collect();
+    if corners.len() != lines.len() {
+        return None;
+    }
+    let index = |row: &Fields<'_>, key| {
+        uint(row.get(key, UINT_TYPE).ok()?, &mut 0).ok()
+    };
+    let endpoint = |row, key| {
+        let vertex = vertices.get(index(row, key)?)?;
+        Some(linear(coordinates(vertex, b"v2Position", 10)?, 0))
+    };
+    let matches = |actual: Point, expected: Point| {
+        (actual.x + tx - expected.x).hypot(actual.y + ty - expected.y) <= 0.05
+    };
+    let mut metrics = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let start = endpoint(line, b"uiStartPointIndex")?;
+        let end = endpoint(line, b"uiEndPointIndex")?;
+        if !matches(start, corners[i]) || !matches(end, corners[(i + 1) % corners.len()]) {
+            return None;
+        }
+        let kind = i32::from_le_bytes(line.get(b"iLineType", 4).ok()?.try_into().ok()?);
+        let mut edge = vec![start];
+        match kind {
+            0 => (),
+            2 => {
+                let control = map_list(line.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
+                if control.is_empty() {
+                    return None;
+                }
+                for point in control {
+                    edge.push(linear(coordinates(&point, b"v2Position", 10)?, 2));
+                }
+            }
+            _ => return None,
+        }
+        edge.push(end);
+        let length = curve_length(&edge, false);
+        if !length.is_finite() {
+            return None;
+        }
+        metrics.push(json!({"length": length, "straight": kind == 0}));
+    }
+    Some(metrics)
 }
 
 fn float(record: &Fields<'_>, key: &[u8]) -> Option<f32> {

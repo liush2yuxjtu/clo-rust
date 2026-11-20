@@ -389,6 +389,76 @@ async def compare_saved_pattern_settings():
     }))
 
 
+async def compare_saved_pattern_outline():
+    async def read(session):
+        listing = await json_result(session, "pattern_list", {"detail": True})
+        assert listing["count"] == len(listing["patterns"]) > 0
+        panels = [
+            await json_result(session, "pattern_info", {"pattern": str(i)})
+            for i in range(listing["count"])
+        ]
+        missing = await session.call_tool("pattern_info", {"pattern": "__clo_verify_missing_panel__"})
+        assert missing.isError
+        return listing, panels
+
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene = await json_result(session, "scene_info")
+        reference, expected_panels = await read(session)
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        actual, observed_panels = await read(session)
+
+    assert actual["count"] == reference["count"]
+    checked = 0
+    length_error = 0.0
+    midpoint_error = 0.0
+    for expected, observed in zip(expected_panels, observed_panels, strict=True):
+        assert expected["name"] == observed["name"] and expected["index"] == observed["index"]
+        name, index = expected["name"], expected["index"]
+        expected_input, = expected["input_info"]["Pattern InputInformation"]
+        observed_input, = observed["input_info"]["Pattern InputInformation"]
+        assert expected_input["PointList"] == observed_input["PointList"], name
+        assert expected["line_info"]["lineCount"] == observed["line_info"]["lineCount"], name
+        expected_bounds = expected["line_info"]["boundingBox"]
+        observed_bounds = observed["line_info"]["boundingBox"]
+        assert expected_bounds.keys() == observed_bounds.keys(), name
+        for key, value in expected_bounds.items():
+            assert abs(value - observed_bounds[key]) <= 0.001, (name, key)
+        for expected_line, observed_line in zip(
+            expected_input["LineList"][1:], observed_input["LineList"][1:], strict=True,
+        ):
+            assert expected_line["Line index"] == observed_line["Line index"], name
+            assert expected_line["Line type"] == observed_line["Line type"], (name, expected_line, observed_line)
+            assert abs(expected_line["Line length"] - observed_line["Line length"]) <= 0.1
+        for e, o, listed_e, listed_o in zip(
+            expected["line_info"]["lines"], observed["line_info"]["lines"],
+            reference["patterns"][index]["lines"], actual["patterns"][index]["lines"], strict=True,
+        ):
+            for key in ("lineIndex", "location", "orientation", "start", "end"):
+                assert e[key] == o[key], (name, e["lineIndex"], key, e[key], o[key])
+            for axis in ("x", "y"):
+                delta = abs(e["mid"][axis] - o["mid"][axis])
+                assert delta <= 0.001, (name, e["lineIndex"], axis, delta)
+                midpoint_error = max(midpoint_error, delta)
+                assert abs(e["midNorm"][axis] - o["midNorm"][axis]) <= 0.001, (name, e["lineIndex"], axis)
+            delta = abs(e["length"] - o["length"])
+            assert delta <= 0.1, (name, e["lineIndex"], delta)
+            length_error = max(length_error, delta)
+            for key in ("line", "location", "start", "end"):
+                assert listed_e[key] == listed_o[key], (name, key)
+            assert abs(listed_e["length"] - listed_o["length"]) <= 0.100001
+            checked += 1
+    print(json.dumps({
+        "tools": ["pattern_info", "pattern_list"], "case": "saved outer outline",
+        "patterns": actual["count"], "lines": checked, "max_length_error_mm": length_error,
+        "max_midpoint_axis_error_mm": midpoint_error, "missing_panel_error": "pass",
+    }))
+
+
 async def main(comparison=None):
     if comparison is not None:
         await comparison()
@@ -566,6 +636,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-pattern-settings", action="store_const", dest="comparison",
                              const=compare_saved_pattern_settings,
                              help="compare live pattern settings against the same saved CLO project in Rust")
+    comparisons.add_argument("--compare-saved-pattern-outline", action="store_const", dest="comparison",
+                             const=compare_saved_pattern_outline,
+                             help="compare outer outline line descriptors for the same saved CLO project")
     comparisons.add_argument("--compare-saved-seams", action="store_const", dest="comparison",
                              const=compare_saved_seams,
                              help="compare ordered seam groups and panel membership in a saved CLO project")
