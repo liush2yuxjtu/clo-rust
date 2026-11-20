@@ -732,7 +732,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 mesh["name"] = pattern["name"].clone();
             }
         }
-    } else if op != "elastic" {
+    } else if !matches!(op, "elastic" | "shirring") {
         invalidate_geometry(state);
     }
     state["patterns"][i] = pattern;

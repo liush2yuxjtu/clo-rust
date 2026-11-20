@@ -5,7 +5,7 @@ use super::{array, assets, boolean, number, string};
 use crate::collision::MeshCollider;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 type Point = [f64; 3];
 type Point2 = [f64; 2];
@@ -61,7 +61,9 @@ pub struct Mesh {
     #[serde(skip)]
     frozen: bool,
     #[serde(skip)]
-    shirring_vertices: usize,
+    shirring_edges: Vec<Edge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_shirring_base: Option<NativeShirringBase>,
 }
 
 fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
@@ -305,7 +307,7 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
     if distance.is_finite() {
         refine(&mut points, &mut triangles, &mut sides, distance);
     }
-    let shirring_vertices =
+    let shirring_edges =
         shirring::refine(pattern, &mut points, &mut triangles, &mut sides, distance)?;
     let positions = placement(pattern, &points, &state["avatar"]);
     let velocities = vec![[0.0; 3]; positions.len()];
@@ -321,7 +323,8 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         sides,
         stiffness: panel_stiffness(pattern, state),
         frozen: boolean(pattern, "freeze", false),
-        shirring_vertices,
+        shirring_edges,
+        native_shirring_base: None,
     })
 }
 
@@ -447,8 +450,56 @@ fn native_sides(
     Ok(sides)
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct NativeShirringBase {
+    vertices: usize,
+    triangles: Vec<[usize; 3]>,
+}
+
+fn transfer_shirred_pose(
+    current_uvs: &[Point2],
+    edges: &[Edge],
+    previous_uvs: &[Point2],
+    previous_positions: &[Point],
+    previous_velocities: &[Point],
+) -> Option<(Vec<Point>, Vec<Point>)> {
+    let base = current_uvs.len().checked_sub(edges.len())?;
+    if previous_uvs.len() != previous_positions.len()
+        || previous_uvs.len() != previous_velocities.len()
+        || current_uvs[..base] != *previous_uvs.get(..base)?
+    {
+        return None;
+    }
+    let mut positions = previous_positions[..base].to_vec();
+    let mut velocities = previous_velocities[..base].to_vec();
+    let mut by_uv = HashMap::new();
+    for (i, &uv) in previous_uvs.iter().enumerate().skip(base) {
+        by_uv
+            .entry(coordinate_key(uv))
+            .and_modify(|index| *index = None)
+            .or_insert(Some(i));
+    }
+    for (j, &(a, b)) in edges.iter().enumerate() {
+        let i = base + j;
+        let uv = current_uvs[i];
+        let prior = if previous_uvs.get(i) == Some(&uv) {
+            Some(i)
+        } else {
+            by_uv.get(&coordinate_key(uv)).copied().flatten()
+        };
+        let midpoint = |points: &[Point]| {
+            std::array::from_fn(|axis| (points[a][axis] + points[b][axis]) * 0.5)
+        };
+        positions.push(prior.map_or_else(|| midpoint(&positions), |i| previous_positions[i]));
+        velocities.push(prior.map_or_else(|| midpoint(&velocities), |i| previous_velocities[i]));
+    }
+    Some((positions, velocities))
+}
+
 #[derive(Deserialize)]
 struct SavedPoseMesh {
+    #[serde(default)]
+    native_shirring_base: Option<NativeShirringBase>,
     positions: Vec<Point>,
     triangles: Vec<[usize; 3]>,
     texcoords: Vec<Point2>,
@@ -478,7 +529,18 @@ fn native_mesh(
     {
         return Err("saved native position or rest coordinate is invalid".into());
     }
-    let sides = native_sides(pattern, &saved.texcoords, &saved.triangles)?;
+    let (base_vertices, base_triangles) = saved
+        .native_shirring_base
+        .as_ref()
+        .map_or((vertex_count, saved.triangles.as_slice()), |base| {
+            (base.vertices, base.triangles.as_slice())
+        });
+    if base_vertices < 3 || base_vertices > vertex_count || base_triangles.is_empty() {
+        return Err("invalid base mesh in saved shirring state".into());
+    }
+    let mut points = saved.texcoords[..base_vertices].to_vec();
+    let mut triangles = base_triangles.to_vec();
+    let mut sides = native_sides(pattern, &points, &triangles)?;
     let velocities = if saved_pose {
         vec![[0.0; 3]; vertex_count]
     } else {
@@ -491,19 +553,38 @@ fn native_mesh(
         }
         velocities
     };
+    let distance = number(pattern, "particle_distance", 20.0);
+    if !(3.0..=500.0).contains(&distance) {
+        return Err("individual pattern particle_distance must be 3..500 mm".into());
+    }
+    let shirring_edges =
+        shirring::refine(pattern, &mut points, &mut triangles, &mut sides, distance)?;
+    let native_shirring_base = (!shirring_edges.is_empty()).then(|| NativeShirringBase {
+        vertices: base_vertices,
+        triangles: base_triangles.to_vec(),
+    });
+    let (positions, velocities) = transfer_shirred_pose(
+        &points,
+        &shirring_edges,
+        &saved.texcoords,
+        &saved.positions,
+        &velocities,
+    )
+    .ok_or("native shirring state is inconsistent")?;
     Ok(Mesh {
         id: pattern["id"].clone(),
         name: string(pattern, "name", "Pattern").to_owned(),
         fabric_index: pattern["fabric_index"].clone(),
-        positions: saved.positions,
-        triangles: saved.triangles,
+        positions,
+        triangles,
         velocities,
-        points: saved.texcoords.clone(),
-        texcoords: saved.texcoords,
+        texcoords: points.clone(),
+        points,
         sides,
         stiffness: panel_stiffness(pattern, state),
         frozen: boolean(pattern, "freeze", false),
-        shirring_vertices: 0,
+        shirring_edges,
+        native_shirring_base,
     })
 }
 
@@ -980,19 +1061,38 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 new_mesh(pattern, target, state)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let resume = (distance - number(existing, "particle_distance", -1.0)).abs() < 1e-9
+        let mut resume = (distance - number(existing, "particle_distance", -1.0)).abs() < 1e-9
             && meshes.len() == prior_meshes.len()
-            && meshes.iter().zip(prior_meshes).all(|(mesh, prior)| {
-                mesh.id == prior["id"] && mesh.positions.len() == array(&prior["positions"]).len()
-            });
+            && meshes
+                .iter()
+                .zip(prior_meshes)
+                .all(|(mesh, prior)| mesh.id == prior["id"]);
         if resume {
-            for (mesh, prior) in meshes.iter_mut().zip(prior_meshes) {
-                mesh.positions = Vec::<Point>::deserialize(&prior["positions"])
-                    .map_err(|e| format!("invalid saved simulation mesh: {e}"))?;
-                mesh.velocities = Vec::<Point>::deserialize(&prior["velocities"])
-                    .map_err(|e| format!("invalid saved simulation velocities: {e}"))?;
-                if mesh.velocities.len() != mesh.positions.len() {
+            let mut transferred = Vec::with_capacity(meshes.len());
+            for (mesh, prior) in meshes.iter().zip(prior_meshes) {
+                let saved = SavedPoseMesh::deserialize(prior)
+                    .map_err(|error| format!("invalid saved simulation mesh: {error}"))?;
+                let velocities = Vec::<Point>::deserialize(&prior["velocities"])
+                    .map_err(|error| format!("invalid saved simulation velocities: {error}"))?;
+                if saved.positions.len() != velocities.len() {
                     return Err("saved simulation velocities are inconsistent".into());
+                }
+                let Some(data) = transfer_shirred_pose(
+                    &mesh.texcoords,
+                    &mesh.shirring_edges,
+                    &saved.texcoords,
+                    &saved.positions,
+                    &velocities,
+                ) else {
+                    resume = false;
+                    break;
+                };
+                transferred.push(data);
+            }
+            if resume {
+                for (mesh, (positions, velocities)) in meshes.iter_mut().zip(transferred) {
+                    mesh.positions = positions;
+                    mesh.velocities = velocities;
                 }
             }
         }
@@ -1147,7 +1247,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             }
         }
     }
-    let shirring_vertices: usize = meshes.iter().map(|mesh| mesh.shirring_vertices).sum();
+    let shirring_vertices: usize = meshes.iter().map(|mesh| mesh.shirring_edges.len()).sum();
     state["simulation"] = json!({"steps":total,"quality":quality,"meshes":meshes});
     if use_native {
         state["simulation"]["source"] = json!(RUST_NATIVE_REST);

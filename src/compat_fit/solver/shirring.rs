@@ -43,10 +43,10 @@ pub(super) fn refine(
     triangles: &mut Vec<[usize; 3]>,
     sides: &mut [Vec<usize>],
     distance: f64,
-) -> Result<usize, String> {
+) -> Result<Vec<Edge>, String> {
     let props = &pattern["line_properties"];
     if props.is_null() || !distance.is_finite() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let all = boolean(&props["-1"]["shirring"], "on", false);
     let guides: Vec<_> = sides
@@ -60,7 +60,7 @@ pub(super) fn refine(
         })
         .collect();
     if guides.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let band2 = distance * distance;
@@ -69,7 +69,7 @@ pub(super) fn refine(
         .map(|&[a, b]| distance2(a, b))
         .fold(0.0, f64::max);
     let spacing2 = band2.min(boundary_spacing2) * 0.25;
-    let original = points.len();
+    let mut added = Vec::new();
     for _ in 0..2 {
         let mut edges = BTreeSet::<Edge>::new();
         for &[a, b, c] in triangles.iter() {
@@ -90,6 +90,7 @@ pub(super) fn refine(
             }
             midpoints.insert((a, b), points.len());
             points.push(middle);
+            added.push((a, b));
         }
         if midpoints.is_empty() {
             break;
@@ -111,7 +112,7 @@ pub(super) fn refine(
         }
         *triangles = refined;
     }
-    Ok(points.len() - original)
+    Ok(added)
 }
 
 #[cfg(test)]
