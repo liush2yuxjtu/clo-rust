@@ -1010,7 +1010,8 @@ pub fn fabric_list(state: &Value) -> Value {
                     "SupplierName": string(catalog, "SupplierName", "None"),
                     "Texture": string(catalog, "Texture", texture.unwrap_or("None")),
                     "Thickness": thickness, "Weight": weight,
-                    "material":material,"color":value["color"],"texture_maps":value["texture_maps"]
+                    "material":material,"color":value["color"],"texture_maps":value["texture_maps"],
+                    "base_texture_desaturated":value["base_texture_desaturated"] == true
                 }
             })
         })
@@ -1049,15 +1050,16 @@ fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) -> bool {
             }
         }
     }
+    if fabric["texture_maps"]["base"].is_string() {
+        fabric["base_texture_desaturated"] = json!(true);
+    }
     if let Some(maps) = fabric["texture_maps"].as_object_mut() {
-        maps.remove("base");
         if clear_opacity {
             maps.remove("opacity");
         }
     }
     if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
         catalog.remove("Color");
-        catalog.remove("Texture");
     }
     clear_opacity
 }
@@ -1065,6 +1067,7 @@ fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) -> bool {
 fn update_material_texture(fabric: &mut Value, kind: &str, path: &Path) {
     fabric["texture_maps"][kind] = json!(path);
     if kind == "base" {
+        fabric["base_texture_desaturated"] = json!(false);
         if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
             catalog.remove("Texture");
         }
@@ -1353,6 +1356,7 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
             maps.remove(kind);
         }
         if kind == "base" {
+            fabric["base_texture_desaturated"] = json!(false);
             if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
                 catalog.remove("Texture");
             }

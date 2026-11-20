@@ -448,7 +448,9 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
                     material["alphaMode"] = json!("BLEND");
                 }
                 if let Some(path) = texture_path {
-                    let png = crate::compat_fit::png_for_export(Path::new(path))?;
+                    let png = crate::compat_fit::png_for_export(
+                        Path::new(path), fabric["base_texture_desaturated"] == true,
+                    )?;
                     let start = bin.len();
                     bin.extend_from_slice(&png);
                     images.push(json!({"bufferView": views.len(), "mimeType": "image/png"}));

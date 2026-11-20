@@ -47,9 +47,10 @@ fn write_bundle(
             .fabric_index
             .as_u64()
             .and_then(|id| fabric_by_index.get(&id));
-        let texture = fabric
-            .and_then(|fabric| fabric["texture_maps"]["base"].as_str())
-            .filter(|path| has_uv && !path.is_empty());
+        let texture = fabric.and_then(|fabric| {
+            let path = fabric["texture_maps"]["base"].as_str()?;
+            (has_uv && !path.is_empty()).then_some((path, fabric["base_texture_desaturated"] == true))
+        });
         let key = (
             fabric.and_then(|fabric| fabric["index"].as_u64()),
             texture.is_some(),
@@ -63,8 +64,8 @@ fn write_bundle(
                 mtl,
                 "newmtl material_{id}\nKd {r} {g} {b}\nd {alpha}\nillum 1"
             );
-            if let Some(source) = texture {
-                let png = crate::compat_fit::png_for_export(Path::new(source))?;
+            if let Some((source, desaturated)) = texture {
+                let png = crate::compat_fit::png_for_export(Path::new(source), desaturated)?;
                 let name = format!("{stem}-{id}.png");
                 let target = mtl_path.with_file_name(&name);
                 let mut file = File::create_new(&target)

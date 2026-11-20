@@ -358,7 +358,7 @@ async def verify_fabric_recolor_opacity():
                 applied = await json_result(rust, "fabric_apply", {"fabric": name})
                 index = applied["fabric"]["index"]
                 indices.append(index)
-                for kind in ("normal", "opacity"):
+                for kind in ("base", "normal", "opacity"):
                     await set_map(index, kind)
                 await recolor(index)
             opaque, sheer = indices
@@ -372,8 +372,14 @@ async def verify_fabric_recolor_opacity():
             portable = root / "recolored.clorust"
             await json_result(rust, "scene_save", {"path": str(portable)})
             await json_result(rust, "scene_open", {"path": str(portable)})
-            assert await maps(opaque) == {"normal": str(image)}
-            assert await maps(sheer) == {"normal": str(image), "opacity": str(image)}
+            assert await maps(opaque) == {"base": str(image), "normal": str(image)}
+            assert await maps(sheer) == {"base": str(image), "normal": str(image), "opacity": str(image)}
+            assert all(item["info"]["base_texture_desaturated"] for item in await materials())
+            glb = root / "recolored.glb"
+            await json_result(rust, "scene_export", {"path": str(glb)})
+            model, _ = read_gltf_export(glb)
+            primitive = model["meshes"][0]["primitives"][0]
+            assert "baseColorTexture" in model["materials"][primitive["material"]]["pbrMetallicRoughness"]
             for index in (opaque, sheer):
                 await check_faces(index, expected_rgb)
 
@@ -390,11 +396,13 @@ async def verify_fabric_recolor_opacity():
                 await recolor(index)
                 live = await maps(index)
                 expected = {key: value for key, value in before.items() if key != "opacity" or label == "sheer"}
-                assert live == {key: value for key, value in expected.items() if key != "base"}
+                assert live == expected
                 path = root / (label + Path(fixture).suffix)
                 await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
                 await json_result(rust, "scene_open", {"path": str(path)})
                 assert await maps(index) == expected
+                reopened = next(item for item in await materials() if item["index"] == index)
+                assert reopened["info"]["base_texture_desaturated"] == ("base" in expected)
                 await check_faces(index, expected_rgb)
                 native[label] = {"fabric": fabric["name"], "opacity_kept": "opacity" in expected}
                 if label == "opaque":
@@ -407,7 +415,8 @@ async def verify_fabric_recolor_opacity():
                     native[label]["later_replacement_kept"] = True
     print(json.dumps({"tool": "fabric_set_color", "case": "recolor opacity policy", "portable_reopen": True,
                       "opaque_map_cleared": True, "sheer_map_preserved": True, "native": native,
-                      "face_rgba_readback": True, "invalid_recolor_kept_materials": True}))
+                      "face_rgba_readback": True, "invalid_recolor_kept_materials": True,
+                      "base_texture_retained_and_desaturated": True, "glb_base_texture_retained": True}))
 
 
 async def verify_fabric_texture_clear():

@@ -60,7 +60,11 @@ fn garment_fingerprint(state: &Value) -> u64 {
         state[key].hash(&mut hash);
     }
     for fabric in super::super::array(state, "fabrics") {
-        hash_except(fabric, &["color", "rgba", "texture_maps", "info"], &mut hash);
+        hash_except(
+            fabric,
+            &["color", "rgba", "texture_maps", "base_texture_desaturated", "info"],
+            &mut hash,
+        );
         hash_except(&fabric["info"], &["catalog", "face_colors"], &mut hash);
         for face in super::super::array(&fabric["info"], "face_colors") {
             if matches!(face["type"].as_u64(), Some(0..=2)) {

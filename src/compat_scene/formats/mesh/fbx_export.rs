@@ -322,9 +322,14 @@ fn texture(id: i64, video_id: i64, filename: &str, objects: &mut Vec<Node>) {
     ));
 }
 
-fn write_texture(path: &Path, source: &str, files: &mut Vec<PathBuf>) -> Result<String, String> {
+fn write_texture(
+    path: &Path,
+    source: &str,
+    desaturated: bool,
+    files: &mut Vec<PathBuf>,
+) -> Result<String, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let png = crate::compat_fit::png_for_export(Path::new(source))?;
+    let png = crate::compat_fit::png_for_export(Path::new(source), desaturated)?;
     loop {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let name = format!("clo-fbx-{}-{id}.png", std::process::id());
@@ -446,7 +451,8 @@ fn write_scene(
                             .as_str()
                             .filter(|path| !path.is_empty())
                         {
-                            let filename = write_texture(path, source, files)?;
+                            let desaturated = map == "base" && fabric["base_texture_desaturated"] == true;
+                            let filename = write_texture(path, source, desaturated, files)?;
                             let texture_id = id();
                             let video_id = id();
                             texture(texture_id, video_id, &filename, &mut objects);

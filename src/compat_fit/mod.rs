@@ -368,9 +368,13 @@ mod texture_tests {
             &mut state,
         )
         .unwrap();
-        assert!(state["fabrics"][0]["texture_maps"]["base"].is_null());
+        assert_eq!(
+            state["fabrics"][0]["texture_maps"]["base"],
+            json!(second.canonicalize().unwrap())
+        );
+        assert_eq!(state["fabrics"][0]["base_texture_desaturated"], true);
         let ([left, right], _) = capture(&mut state, true);
-        assert_eq!(left, right);
         assert!(left[0] > 200 && left[1] < 40 && left[2] < 30);
+        assert!(right[0] > 130 && right[0] < left[0] && right[1] < 30 && right[2] < 20);
     }
 }

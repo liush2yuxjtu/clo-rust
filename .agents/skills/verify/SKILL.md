@@ -35,7 +35,10 @@ base and normal maps to also check native archive reopen and preservation of the
 other maps. A live CLO reopen is a separate comparison.
 
 Run `--verify-fabric-recolor-opacity` to recolor opaque and sheer fabrics with
-normal and opacity maps, save, and read back both maps. Set
+base, normal and opacity maps. Verify the base image stays bound, its
+desaturation remains set after reopen, and the GLB still contains a base
+texture. The Rust texture test checks that the recolored snapshot keeps
+detail from the original texels. Set
 `CLO_RECOLOR_OPAQUE_FIXTURE` and `CLO_RECOLOR_SHEER_FIXTURE` to native archives
 with opacity maps to check native save and reopen. The opaque case also sets a
 new opacity image after recoloring and checks that its bytes survive the save.

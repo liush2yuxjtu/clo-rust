@@ -45,16 +45,21 @@ impl Drawing {
 
 #[derive(Default)]
 struct TextureCache {
-    by_path: BTreeMap<String, Option<Rc<BaseTexture>>>,
+    by_path: BTreeMap<(String, bool), Option<Rc<BaseTexture>>>,
     warnings: Vec<String>,
 }
 
 impl TextureCache {
-    fn load(&mut self, path: &str) -> Option<Rc<BaseTexture>> {
+    fn load(&mut self, path: &str, desaturated: bool) -> Option<Rc<BaseTexture>> {
         self.by_path
-            .entry(path.to_owned())
+            .entry((path.to_owned(), desaturated))
             .or_insert_with(|| match BaseTexture::load(Path::new(path)) {
-                Ok(texture) => Some(Rc::new(texture)),
+                Ok(mut texture) => {
+                    if desaturated {
+                        texture.desaturate();
+                    }
+                    Some(Rc::new(texture))
+                }
                 Err(error) => {
                     self.warnings
                         .push(format!("Base texture {path} was skipped: {error}"));
@@ -79,9 +84,11 @@ impl TextureCache {
                     [197, 135, 114],
                 ][fallback % 4],
             );
-        if let Some(path) = fabric.and_then(|f| f["texture_maps"]["base"].as_str()) {
+        if let Some((fabric, path)) =
+            fabric.and_then(|f| Some((f, f["texture_maps"]["base"].as_str()?)))
+        {
             if drawing.texcoords.len() == drawing.points.len() {
-                drawing.texture = self.load(path);
+                drawing.texture = self.load(path, fabric["base_texture_desaturated"] == true);
             } else {
                 let message="Base texture was skipped for a saved mesh without rest UVs. Simulate again to generate them.";
                 if !self.warnings.iter().any(|warning| warning == message) {

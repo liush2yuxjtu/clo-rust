@@ -13,6 +13,7 @@ pub struct BaseTexture {
     height: usize,
     channels: usize,
     pixels: Vec<u8>,
+    desaturated: bool,
 }
 
 impl BaseTexture {
@@ -55,16 +56,18 @@ impl BaseTexture {
             height: height as usize,
             channels,
             pixels,
+            desaturated: false,
         })
     }
 
     fn encode_png(&self) -> Result<Vec<u8>, String> {
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, self.width as u32, self.height as u32);
-        encoder.set_color(if self.channels == 1 {
-            png::ColorType::Grayscale
-        } else {
-            png::ColorType::Rgb
+        encoder.set_color(match self.channels {
+            1 => png::ColorType::Grayscale,
+            2 => png::ColorType::GrayscaleAlpha,
+            3 => png::ColorType::Rgb,
+            _ => png::ColorType::Rgba,
         });
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
@@ -125,7 +128,19 @@ impl BaseTexture {
             height,
             channels,
             pixels,
+            desaturated: false,
         })
+    }
+
+    pub fn desaturate(&mut self) {
+        if self.channels >= 3 {
+            for pixel in self.pixels.chunks_exact_mut(self.channels) {
+                let [r, g, b] = [pixel[0], pixel[1], pixel[2]].map(u32::from);
+                let luminance = ((2126 * r + 7152 * g + 722 * b + 5000) / 10_000) as u8;
+                pixel[..3].fill(luminance);
+            }
+        }
+        self.desaturated = true;
     }
 
     pub fn sample(&self, uv: [f64; 2], base: [u8; 3]) -> [u8; 3] {
@@ -134,6 +149,13 @@ impl BaseTexture {
         };
         let start = (at(uv[1], self.height) * self.width + at(uv[0], self.width)) * self.channels;
         let p = &self.pixels[start..start + self.channels];
+        if self.desaturated {
+            let tint = base.map(|channel| ((u16::from(p[0]) * u16::from(channel) + 127) / 255) as u8);
+            return match self.channels {
+                2 | 4 => composite(tint, p[self.channels - 1], base),
+                _ => tint,
+            };
+        }
         match self.channels {
             1 => [p[0]; 3],
             2 => composite([p[0]; 3], p[1], base),
@@ -154,7 +176,7 @@ fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xff, 0xd8, 0xff])
 }
 
-pub(crate) fn png_for_export(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn png_for_export(path: &Path, desaturated: bool) -> Result<Vec<u8>, String> {
     let file = File::open(path).map_err(|error| format!("open base texture: {error}"))?;
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1)
@@ -163,10 +185,18 @@ pub(crate) fn png_for_export(path: &Path) -> Result<Vec<u8>, String> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err("texture exceeds 64 MiB".into());
     }
-    if is_jpeg(&bytes) {
-        BaseTexture::decode_jpeg(Cursor::new(bytes))?.encode_png()
+    let jpeg = is_jpeg(&bytes);
+    let mut texture = if jpeg {
+        BaseTexture::decode_jpeg(Cursor::new(&bytes))?
     } else {
-        BaseTexture::decode(Cursor::new(&bytes))?;
+        BaseTexture::decode(Cursor::new(&bytes))?
+    };
+    if desaturated {
+        texture.desaturate();
+    }
+    if jpeg || desaturated {
+        texture.encode_png()
+    } else {
         Ok(bytes)
     }
 }

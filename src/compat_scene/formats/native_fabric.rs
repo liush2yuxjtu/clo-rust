@@ -104,6 +104,7 @@ pub(crate) fn read(path: &Path) -> Result<Value, String> {
     }
     Ok(json!({
         "name": name, "color": &color[..3], "rgba": color, "texture_maps": texture_maps,
+        "base_texture_desaturated": super::native_textures::front_desaturated(&material)?,
         "stiffness": stiffness,
         "info": {
             "source": "native_zfab", "path": path,

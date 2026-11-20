@@ -66,6 +66,18 @@ pub(super) fn base_texture_label<'a>(face: &Fields<'a>) -> Option<&'a str> {
         .to_str()
 }
 
+pub(super) fn front_desaturated(material: &Fields<'_>) -> Result<bool, String> {
+    let (faces, legacy_front) = face_records(material)?;
+    for (index, face) in faces.iter().enumerate() {
+        if face_type(face, index, legacy_front)? == 0 {
+            return Ok(face.get(b"fDesaturated", 6).ok()
+                .and_then(|raw| raw.try_into().ok())
+                .is_some_and(|raw| f32::from_le_bytes(raw) == 1.0));
+        }
+    }
+    Ok(false)
+}
+
 fn cache_image(bytes: &[u8]) -> Result<PathBuf, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let folder = std::env::var_os("CLO_RUST_OUTPUT_DIR")
@@ -178,6 +190,9 @@ pub(super) fn hydrate<R: Read + Seek>(
     let mut warnings = Vec::new();
     for (index, fabric) in fabrics.iter().enumerate() {
         let material = fabric.map(b"mapMaterial2D")?;
+        if front_desaturated(&material)? {
+            state["fabrics"][index]["base_texture_desaturated"] = json!(true);
+        }
         for (key, name) in front_texture_refs(&material)? {
             let cached = if let Some(path) = cache.get(name) {
                 path.clone()
@@ -211,6 +226,7 @@ struct Edit {
     kind: i32,
     image: Option<Vec<u8>>,
     matches: RefCell<Vec<String>>,
+    desaturated: bool,
 }
 
 fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, String> {
@@ -218,7 +234,7 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
         return Ok(None);
     }
     let list = textures(face)?;
-    let mut reset = false;
+    let mut desaturation = None;
     let mut converted = HashMap::new();
     let mut removed = Vec::new();
     for edit in edits {
@@ -229,7 +245,9 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
             }
             if edit.image.is_none() {
                 removed.push(index);
-                reset |= edit.kind == 0;
+                if edit.kind == 0 {
+                    desaturation = Some(false);
+                }
                 continue;
             }
             let name = filename(texture)?;
@@ -254,14 +272,17 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
         if edit.image.is_some() {
             let name = found.ok_or("native save requires an existing texture slot on the fabric")?;
             edit.matches.borrow_mut().push(name.to_owned());
-            reset |= edit.kind == 0;
+            if edit.kind == 0 {
+                desaturation = Some(edit.desaturated);
+            }
         }
     }
-    if !reset && converted.is_empty() && removed.is_empty() {
+    if desaturation.is_none() && converted.is_empty() && removed.is_empty() {
         return Ok(None);
     }
-    let mut updated = if reset {
-        face.replace(b"fDesaturated", 6, &0.0f32.to_le_bytes())?
+    let mut updated = if let Some(desaturated) = desaturation {
+        let flag = if desaturated { 1.0f32 } else { 0.0 };
+        face.replace(b"fDesaturated", 6, &flag.to_le_bytes())?
     } else {
         face.encoded().to_vec()
     };
@@ -329,7 +350,7 @@ pub(super) fn replacements(
             } else {
                 let path = current.as_str().filter(|path| !path.is_empty())
                     .ok_or("native texture removal requires an explicit texture edit")?;
-                Some(crate::compat_fit::png_for_export(Path::new(path))?)
+                Some(crate::compat_fit::png_for_export(Path::new(path), false)?)
             };
             image_bytes += image.as_ref().map_or(0, Vec::len);
             if image_bytes > 256 * 1024 * 1024 {
@@ -339,6 +360,7 @@ pub(super) fn replacements(
                 kind,
                 image,
                 matches: RefCell::new(Vec::new()),
+                desaturated: fabric["base_texture_desaturated"] == true,
             });
         }
     }
