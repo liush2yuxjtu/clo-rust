@@ -251,6 +251,76 @@ async def verify_fabric_assignment_workflow():
                       "invalid_assignment_preserved_scene": True, "glb_materials": material_names}))
 
 
+async def verify_fabric_recolor_opacity():
+    with TemporaryDirectory(prefix="clo-recolor-opacity-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+            await json_result(rust, "pattern_create", {"name": "Panel", "points": [[0, 0], [100, 0], [0, 100]]})
+            capture = await successful(rust, "snapshot_2d")
+            png, = [block for block in capture.content if block.type == "image"]
+            image = root.resolve() / "map.png"
+            image.write_bytes(base64.b64decode(png.data, validate=True))
+
+            async def materials():
+                return (await json_result(rust, "fabric_list"))["fabrics"]
+
+            async def maps(index):
+                return next(fabric for fabric in await materials() if fabric["index"] == index)["info"]["texture_maps"]
+
+            async def set_map(index, kind):
+                await json_result(rust, "fabric_set_texture", {"fabric_index": index, "map": kind, "image_path": str(image)})
+
+            async def recolor(index):
+                result = await json_result(rust, "fabric_set_color", {"fabric_index": index, "color": "#224466"})
+                assert result == {"rgb": [34 / 255, 68 / 255, 102 / 255], "result": {"ok": [True, True, True]}}
+
+            indices = []
+            for name in ("cotton", "chiffon"):
+                applied = await json_result(rust, "fabric_apply", {"fabric": name})
+                index = applied["fabric"]["index"]
+                indices.append(index)
+                for kind in ("normal", "opacity"):
+                    await set_map(index, kind)
+                await recolor(index)
+            opaque, sheer = indices
+            portable = root / "recolored.clorust"
+            await json_result(rust, "scene_save", {"path": str(portable)})
+            await json_result(rust, "scene_open", {"path": str(portable)})
+            assert await maps(opaque) == {"normal": str(image)}
+            assert await maps(sheer) == {"normal": str(image), "opacity": str(image)}
+
+            native = {}
+            for label, fixture_key in (("opaque", "CLO_RECOLOR_OPAQUE_FIXTURE"), ("sheer", "CLO_RECOLOR_SHEER_FIXTURE")):
+                if not (fixture := os.environ.get(fixture_key)):
+                    continue
+                await json_result(rust, "scene_open", {"path": fixture})
+                fabric = next(item for item in await materials() if "opacity" in (item["info"]["texture_maps"] or {}))
+                index = fabric["index"]
+                before = await maps(index)
+                if label == "opaque":
+                    await set_map(index, "opacity")
+                await recolor(index)
+                live = await maps(index)
+                expected = {key: value for key, value in before.items() if key != "opacity" or label == "sheer"}
+                assert live == {key: value for key, value in expected.items() if key != "base"}
+                path = root / (label + Path(fixture).suffix)
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                await json_result(rust, "scene_open", {"path": str(path)})
+                assert await maps(index) == expected
+                native[label] = {"fabric": fabric["name"], "opacity_kept": "opacity" in expected}
+                if label == "opaque":
+                    await json_result(rust, "scene_open", {"path": fixture})
+                    await recolor(index)
+                    await set_map(index, "opacity")
+                    await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                    await json_result(rust, "scene_open", {"path": str(path)})
+                    assert Path((await maps(index))["opacity"]).read_bytes() == image.read_bytes()
+                    native[label]["later_replacement_kept"] = True
+    print(json.dumps({"tool": "fabric_set_color", "case": "recolor opacity policy", "portable_reopen": True,
+                      "opaque_map_cleared": True, "sheer_map_preserved": True, "native": native}))
+
+
 async def verify_fabric_texture_clear():
     with TemporaryDirectory(prefix="clo-clear-texture-") as directory:
         root = Path(directory)
@@ -3047,6 +3117,9 @@ async def verify_mixed_native_append():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--verify-fabric-recolor-opacity", action="store_const", dest="comparison",
+                             const=verify_fabric_recolor_opacity,
+                             help="verify opacity map policy after recolor and archive reopen")
     comparisons.add_argument("--verify-fabric-assignment-workflow", action="store_const", dest="comparison",
                              const=verify_fabric_assignment_workflow,
                              help="add and assign fabrics separately while retaining a simulated pose")
@@ -3199,7 +3272,7 @@ if __name__ == "__main__":
                              const=verify_mixed_native_append,
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_texture_clear,
+    if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_recolor_opacity, verify_fabric_texture_clear,
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,

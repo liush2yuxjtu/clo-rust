@@ -32,6 +32,12 @@ Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
 base and normal maps to also check native archive reopen and preservation of the
 other maps. A live CLO reopen is a separate comparison.
 
+Run `--verify-fabric-recolor-opacity` to recolor opaque and sheer fabrics with
+normal and opacity maps, save, and read back both maps. Set
+`CLO_RECOLOR_OPAQUE_FIXTURE` and `CLO_RECOLOR_SHEER_FIXTURE` to native archives
+with opacity maps to check native save and reopen. The opaque case also sets a
+new opacity image after recoloring and checks that its bytes survive the save.
+
 Run `--verify-fabric-assignment-workflow` to register a fabric through
 `AddFabric`, then assign it to one panel through Python and apply a different
 fabric to another panel. Check that adding leaves both original assignments

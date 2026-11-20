@@ -26,8 +26,8 @@ pub(crate) fn read_project_avatar_dan(
     formats::clo_native::read_project_avatar_dan(path)
 }
 
-pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64) {
-    formats::native_save::mark_color(state, index);
+pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64, clear_opacity: bool) {
+    formats::native_save::mark_color(state, index, clear_opacity);
 }
 
 pub(crate) fn mark_native_fabric_texture(state: &mut Value, index: u64, map: &str, clear: bool) {

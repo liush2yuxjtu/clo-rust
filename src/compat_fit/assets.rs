@@ -1012,17 +1012,32 @@ pub fn fabric_list(state: &Value) -> Value {
     json!({"fabrics":fabrics,"current":current})
 }
 
-fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) {
+pub(crate) fn preserves_opacity_on_recolor(fabric: &Value) -> bool {
+    let name = fabric["name"].as_str().unwrap_or_default().to_ascii_lowercase();
+    [
+        "chiffon", "organza", "tulle", "mesh", "lace", "voile", "georgette", "gauze", "eyelet",
+        "crochet", "pointelle", "net",
+    ]
+    .iter()
+    .any(|hint| name.contains(hint))
+}
+
+fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) -> bool {
+    let clear_opacity = !preserves_opacity_on_recolor(fabric);
     fabric["color"] = json!(rgb);
     let [r, g, b] = rgb;
     fabric["rgba"] = json!([r, g, b, 1.0]);
     if let Some(maps) = fabric["texture_maps"].as_object_mut() {
         maps.remove("base");
+        if clear_opacity {
+            maps.remove("opacity");
+        }
     }
     if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
         catalog.remove("Color");
         catalog.remove("Texture");
     }
+    clear_opacity
 }
 
 fn update_material_texture(fabric: &mut Value, kind: &str, path: &Path) {
@@ -1298,8 +1313,11 @@ pub fn fabric_set_color(args: &Value, state: &mut Value) -> Result<Value, String
         .ok_or("fabric_index must be a nonnegative integer")?;
     let rgb = parse_color(&args["color"])?;
     let fabric = find_fabric_mut(state, index)?;
-    update_material_color(fabric, rgb);
-    crate::compat_scene::mark_native_fabric_color(state, index);
+    let clear_opacity = update_material_color(fabric, rgb);
+    if clear_opacity {
+        state["current_fabric"] = json!(index);
+    }
+    crate::compat_scene::mark_native_fabric_color(state, index, clear_opacity);
     Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}))
 }
 

@@ -316,8 +316,8 @@ pub(super) fn replacements(
             if current == &baseline[index][key] && explicit.is_none() {
                 continue;
             }
-            // A recolor keeps the source base image and selects desaturation in the archive.
-            if key == "base"
+            // The recolor pass handles desaturating base and clearing opacity.
+            if matches!(key, "base" | "opacity")
                 && current.is_null()
                 && recolored.iter().any(|id| id.as_u64() == Some(index as u64))
                 && !explicit.is_some_and(|edit| edit["clear"] == true)

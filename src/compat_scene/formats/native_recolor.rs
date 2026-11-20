@@ -190,7 +190,7 @@ fn update_colorway<T>(
     Ok(output)
 }
 
-fn scene_color(fabric: &Value, index: usize) -> Result<Color, String> {
+fn scene_color(fabric: &Value, index: usize, keep_replacement: bool) -> Result<Color, String> {
     if fabric["index"].as_u64() != Some(index as u64) {
         return Err("native fabric order no longer matches the loaded scene".into());
     }
@@ -200,30 +200,10 @@ fn scene_color(fabric: &Value, index: usize) -> Result<Color, String> {
         return Err("native fabric color channels must be within 0 and 1".into());
     }
     let [r, g, b, _] = rgba.map(|channel| (channel * 255.0).round() as u8);
-    let fabric_name = fabric["name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let keep_opacity = [
-        "chiffon",
-        "organza",
-        "tulle",
-        "mesh",
-        "lace",
-        "voile",
-        "georgette",
-        "gauze",
-        "eyelet",
-        "crochet",
-        "pointelle",
-        "net",
-    ]
-    .iter()
-    .any(|hint| fabric_name.contains(hint));
     Ok(Color {
         rgba,
         name: format!("{r:02X}{g:02X}{b:02X}"),
-        keep_opacity,
+        keep_opacity: keep_replacement || crate::compat_fit::preserves_opacity_on_recolor(fabric),
     })
 }
 
@@ -231,6 +211,7 @@ pub(super) fn recolor(
     data: &[u8],
     state: &Value,
     edited: &[Value],
+    retextured: &[Value],
 ) -> Result<Option<Vec<u8>>, String> {
     let fabrics = super::super::array(state, "fabrics");
     let colors = edited
@@ -243,7 +224,11 @@ pub(super) fn recolor(
             let fabric = fabrics
                 .get(index)
                 .ok_or("native fabric index is no longer present")?;
-            Ok((index, scene_color(fabric, index)?))
+            let keep_replacement = fabric["texture_maps"]["opacity"].is_string()
+                && retextured.iter().any(|edit| {
+                    edit["fabric"] == index && edit["map"] == "opacity" && edit["clear"] != true
+                });
+            Ok((index, scene_color(fabric, index, keep_replacement)?))
         })
         .collect::<Result<HashMap<_, _>, String>>()?;
     edit_materials(data, &colors, update_face)

@@ -97,12 +97,17 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
     state[SOURCE] = value;
 }
 
-pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64) {
+pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64, clear_opacity: bool) {
     if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
         let indices = super::super::vec_mut(source, "recolored");
         let index = json!(index);
         if !indices.contains(&index) {
-            indices.push(index);
+            indices.push(index.clone());
+        }
+        if clear_opacity {
+            if let Some(edits) = source.get_mut("retextured").and_then(Value::as_array_mut) {
+                edits.retain(|edit| edit["fabric"] != index || edit["map"] != "opacity");
+            }
         }
     }
 }
@@ -347,6 +352,7 @@ pub(in crate::compat_scene) fn save(
         renamed.as_deref().unwrap_or(&pac),
         state,
         super::super::array(source, "recolored"),
+        super::super::array(source, "retextured"),
     )?;
     let edited = recolored.or(renamed);
     let (textures, assets) = native_textures::replacements(
