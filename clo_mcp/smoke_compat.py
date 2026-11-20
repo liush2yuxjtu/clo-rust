@@ -6539,6 +6539,115 @@ async def compare_live_composed_zprj():
     print(json.dumps({"tool": "scene_save", "format": "ZPRJ", "cases": reports, "result": "pass"}))
 
 
+async def compare_live_authored_projects():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert root.is_dir() and not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    first = ("Rust 纸样", [[0, 0], [137, 0], [159, 188], [0, 208]])
+    second = ("Concave", [[320, 0], [430, 0], [430, 100], [385, 55], [320, 100]])
+    cases = [
+        ("project", "scene_save", ".zprj", [first]),
+        ("garment", "scene_export", ".zpac", [first, second]),
+        ("checkpoint", "checkpoint_save", ".zprj", [first, second]),
+    ]
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for label, tool, extension, patterns in cases:
+                outputs = {}
+                for writer, session in backends:
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    for index, (name, points) in enumerate(patterns):
+                        value = await json_result(session, "pattern_create", {"name": name, "points": points})
+                        assert value == {"index": index, "name": name}
+                    if label == "project":
+                        # Save once, then edit and save again without opening an external archive.
+                        initial = root / f"{label}-initial-{writer}.zprj"
+                        await json_result(session, "scene_save", {"path": str(initial), "thumbnail": False})
+                        await json_result(session, "pattern_ops", {"pattern": first[0], "op": "move_2d",
+                                                                   "args": {"dx": 15, "dy": -20}})
+                        await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#336699"})
+                    if tool == "checkpoint_save":
+                        result = await json_result(session, tool, {"name": f"{label}-{writer}"})
+                        output = Path(result["path"])
+                        assert result["name"] == f"{label}-{writer}"
+                    else:
+                        output = root / f"{label}-{writer}{extension}"
+                        args = {"path": str(output)}
+                        if tool == "scene_save":
+                            args["thumbnail"] = True
+                        assert await json_result(session, tool, args) == {"path": str(output)}
+                    assert output.suffix == extension and output.is_file()
+                    outputs[writer] = output
+
+                reads = 0
+                for writer, output in outputs.items():
+                    for reader, session in backends:
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        if label == "checkpoint":
+                            await json_result(session, "checkpoint_restore", {"name": f"{label}-{writer}"})
+                        else:
+                            await json_result(session, "scene_open", {"path": str(output)})
+                        info = await json_result(session, "scene_info")
+                        assert [panel["name"] for panel in info["patterns"]] == [name for name, _ in patterns]
+                        assert [panel["fabric_index"] for panel in info["patterns"]] == [0] * len(patterns)
+                        assert info["fabric_count"] == 1 and info["colorways"] == ["Default Colorway"]
+                        fabric = (await json_result(session, "fabric_list"))["fabrics"]
+                        expected_color = "#336699" if label == "project" else "#ffffff"
+                        assert len(fabric) == 1 and fabric[0]["info"]["ColorCode"] == expected_color, (
+                            label, writer, reader, fabric)
+                        for name, points in patterns:
+                            detail = await json_result(session, "pattern_info", {"pattern": name})
+                            lines = detail["line_info"]["lines"]
+                            assert len(lines) == len(points) and detail["particle_distance"] == 20
+                            shift = (15, -20) if label == "project" else (0, 0)
+                            for i, line in enumerate(lines):
+                                a, b = points[i], points[(i + 1) % len(points)]
+                                assert math.isclose(line["length"], math.dist(a, b), abs_tol=0.001)
+                                for endpoint, point in (("start", a), ("end", b)):
+                                    for k, axis in enumerate(("x", "y")):
+                                        assert math.isclose(line[endpoint][axis], point[k] + shift[k], abs_tol=0.001), (
+                                            label, writer, reader, line)
+                        mesh = root / f"{label}-{writer}-{reader}.glb"
+                        await json_result(session, "scene_export", {"path": str(mesh)})
+                        model, _ = read_gltf_export(mesh)
+                        assert len(model["meshes"]) >= 1 and sum(
+                            model["accessors"][primitive["indices"]]["count"]
+                            for mesh in model["meshes"] for primitive in mesh["primitives"]
+                        ) >= sum(3 * (len(points) - 2) for _, points in patterns)
+                        if label == "project":
+                            positions = [
+                                model["accessors"][primitive["attributes"]["POSITION"]]
+                                for mesh in model["meshes"] for primitive in mesh["primitives"]
+                            ]
+                            for key, combine, bounds in (
+                                ("min", min, (0, 0, 200)), ("max", max, (159, 208, 200)),
+                            ):
+                                actual = [combine(position[key][i] for position in positions) for i in range(3)]
+                                assert all(math.isclose(value, expected, abs_tol=0.001)
+                                           for value, expected in zip(actual, bounds, strict=True)), (
+                                               writer, reader, key, actual)
+                            factors = [material["pbrMetallicRoughness"]["baseColorFactor"]
+                                       for material in model["materials"]]
+                            expected = (0.2 ** 2.2, 0.4 ** 2.2, 0.6 ** 2.2, 1.0)
+                            assert factors and all(
+                                all(math.isclose(value, channel, abs_tol=0.000001)
+                                    for value, channel in zip(factor, expected, strict=True))
+                                for factor in factors
+                            ), (writer, reader, factors)
+                        reads += 1
+                reports.append({"case": label, "panels": len(patterns), "cross_reopens": reads,
+                                "coordinate_tolerance_mm": 0.001})
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": reports, "result": "pass"}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -7175,6 +7284,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-composed-zprj", action="store_const", dest="comparison",
                              const=compare_live_composed_zprj,
                              help="verify composed project saves and checkpoints with both backends")
+    comparisons.add_argument("--compare-live-authored-projects", action="store_const", dest="comparison",
+                             const=compare_live_authored_projects,
+                             help="write and cross-open native projects created from editable MCP panels")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

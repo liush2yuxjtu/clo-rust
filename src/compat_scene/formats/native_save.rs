@@ -3,7 +3,7 @@
 use super::{
     clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
     native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_avatar_ids::AvatarIdentities, native_compose, native_materials, native_recolor, native_textures, write,
+    native_avatar_ids::AvatarIdentities, native_author, native_compose, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use native_textures::{ColorwayTextureEdit, TextureAssets};
@@ -584,6 +584,33 @@ fn project_preview(input: Vec<u8>, thumbnail: bool, state: &Value) -> Result<Vec
     }
 }
 
+fn archive_members<const N: usize>(members: [(&str, &[u8]); N]) -> Result<Vec<u8>, String> {
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (name, bytes) in members {
+        zip.start_file(name, options).map_err(|error| error.to_string())?;
+        zip.write_all(bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(zip.finish().map_err(|error| error.to_string())?.into_inner())
+}
+
+fn authored_garment(state: &Value) -> Result<Vec<u8>, String> {
+    let body = native_author::encode(state)?;
+    let zip = archive_members([
+        ("garment.pac", body.as_slice()),
+        ("clofiles.json", br#"{"garment.pac":"garment.pac"}"#),
+    ])?;
+    let mut header = ZPAC.to_vec();
+    header.extend(12u32.to_le_bytes());
+    header.resize(40, 0);
+    join_archive(header, &zip)
+}
+
+fn author_scene(source: &Value) -> bool {
+    !source.is_object()
+        || (source["authored"] == true && super::super::array(source, "appended").is_empty())
+}
+
 fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Result<Vec<u8>, String> {
     const WORKSPACE: &str = "garment.osw";
     const GARMENT: &str = "garment.zpac";
@@ -632,13 +659,9 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
     ])?;
     let manifest = serde_json::to_vec(&json!({WORKSPACE: WORKSPACE, GARMENT: GARMENT}))
         .map_err(|error| error.to_string())?;
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    for (name, bytes) in [(WORKSPACE, workspace.as_slice()), (GARMENT, garment), ("clofiles.json", &manifest)] {
-        zip.start_file(name, options).map_err(|error| error.to_string())?;
-        zip.write_all(bytes).map_err(|error| error.to_string())?;
-    }
-    let archive = zip.finish().map_err(|error| error.to_string())?.into_inner();
+    let archive = archive_members([
+        (WORKSPACE, workspace.as_slice()), (GARMENT, garment), ("clofiles.json", &manifest),
+    ])?;
 
     let primary = crate::compat_fit::native_primary_preview(state)?;
     let primary_size = u32::try_from(primary.len()).map_err(|_| "native project thumbnail too large")?;
@@ -661,7 +684,7 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
 
 fn source_path(source: &Value) -> Result<&Path, String> {
     source["path"].as_str().map(Path::new).ok_or_else(||
-        "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene".into(),
+        "native source record has no archive path".into(),
     )
 }
 
@@ -886,6 +909,11 @@ pub(in crate::compat_scene) fn save(
     write(path, &output)?;
     if project {
         remember_project_save(state, path);
+    } else if author_scene(&state[SOURCE]) && state[SOURCE]["project"] != true {
+        remember(state, path, false);
+        if state[SOURCE].is_object() {
+            state[SOURCE]["authored"] = json!(true);
+        }
     } else if state[SOURCE]["empty_append"] == true {
         remember_empty_append(state, path, false);
     } else if state[SOURCE]["project"] != true {
@@ -901,11 +929,15 @@ pub(in crate::compat_scene) fn save(
 
 pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &Path) {
     let source = &state[SOURCE];
+    let authored = author_scene(source);
     let compacted = source["compacted_fabrics"] == true
         || (source["empty_append"] == true || !super::super::array(source, "appended").is_empty())
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
     let _ = rebind_project_avatars(state, path);
     remember(state, path, true);
+    if authored && state[SOURCE].is_object() {
+        state[SOURCE]["authored"] = json!(true);
+    }
     if compacted && state[SOURCE].is_object() {
         state[SOURCE]["compacted_fabrics"] = json!(true);
     }
@@ -917,6 +949,14 @@ pub(in crate::compat_scene) fn encode(
     thumbnail: bool,
 ) -> Result<Vec<u8>, String> {
     let source = &state[SOURCE];
+    if author_scene(source) {
+        let garment = authored_garment(state)?;
+        let output = if project { project_from_garment(&garment, state, thumbnail)? } else { garment };
+        if output.len() as u64 > ARCHIVE_LIMIT {
+            return Err("native output archive exceeds 512 MiB".into());
+        }
+        return Ok(output);
+    }
     source_path(source)?;
     let parts = super::super::array(source, "appended");
     let source_project = source["project"] == true;

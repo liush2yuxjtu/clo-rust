@@ -1043,6 +1043,17 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-authored-projects` with the native bridge up and
+`CLO_MCP_STATE` set to a fresh shared directory. Leave `CLO_RUST_CHECKPOINT_DIR`
+unset. Start each backend with a cleared scene and create the same editable
+panels through `pattern_create`. Compare two writers and two readers for a
+ZPRJ save, ZPAC export, and native checkpoint restore. Include distinct panel
+names, a concave outline, a move and recolor after the first save, and GLB export
+after reopening. Assert ordered edge endpoints and lengths within 0.001 mm,
+the material assignment and color, and nonempty exported mesh geometry. For
+the moved project check that 3D bounds stay at the original placement within
+0.001 mm. Check the recolored GLB base-color factors within 0.000001.
+
 Run `--compare-live-garment-to-project` with the native bridge up.
 Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
 and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave

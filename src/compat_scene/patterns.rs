@@ -406,7 +406,7 @@ pub(super) fn list(args: &Value, state: &mut Value) -> Reply {
     )
 }
 
-fn offset(pattern: &Value) -> [f64; 2] {
+pub(super) fn offset(pattern: &Value) -> [f64; 2] {
     let position = &pattern["pos_2d"];
     [
         position[0].as_f64().unwrap_or(0.),

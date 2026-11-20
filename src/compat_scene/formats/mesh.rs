@@ -305,7 +305,7 @@ fn cross(a: patterns::Point, b: patterns::Point, c: patterns::Point) -> f64 {
     (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
-fn triangulate(points: &[patterns::Point]) -> Result<Vec<[u32; 3]>, String> {
+pub(super) fn triangulate(points: &[patterns::Point]) -> Result<Vec<[u32; 3]>, String> {
     let area: f64 = points
         .iter()
         .zip(points.iter().cycle().skip(1))

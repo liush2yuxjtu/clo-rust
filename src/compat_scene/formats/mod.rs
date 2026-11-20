@@ -2,6 +2,7 @@ pub(super) mod clo_native;
 mod dxf;
 mod mesh;
 mod native_materials;
+mod native_author;
 mod native_compose;
 mod native_avatar_ids;
 pub(super) mod native_fabric;
