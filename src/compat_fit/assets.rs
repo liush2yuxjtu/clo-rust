@@ -1230,46 +1230,41 @@ pub(super) fn fabric_assign(args: &Value, state: &mut Value) -> Result<Value, St
 pub(super) fn apply_material(
     args: &Value,
     state: &mut Value,
-    (mut material, matched, file): (Value, String, Option<PathBuf>),
+    (material, matched, file): (Value, String, Option<PathBuf>),
 ) -> Result<Value, String> {
     let patterns = array(&state["patterns"]);
     let pattern_refs = array(&args["patterns"]);
-    let selected: Vec<_> = if pattern_refs.is_empty() {
-        (0..patterns.len()).collect()
+    let selection: Result<Vec<_>, _> = if pattern_refs.is_empty() {
+        Ok((0..patterns.len()).collect())
     } else {
         pattern_refs
             .iter()
             .map(|r| pattern_index(patterns, r))
-            .collect::<Result<_, _>>()?
+            .collect()
     };
-    let color = args
-        .get("color")
-        .filter(|v| !v.is_null() && v.as_str() != Some(""));
-    let rgb = color.map(parse_color).transpose()?;
-    let base_texture = args["texture_image"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|p| texture(p, "base"))
-        .transpose()?;
-    if let Some(rgb) = rgb {
-        update_material_color(&mut material, rgb);
-    }
-    if let Some(path) = &base_texture {
-        update_material_texture(&mut material, "base", path);
-    }
+    // A failed selection leaves the new fabric in the project and all pieces on their old fabrics.
+    let selected = selection.as_deref().unwrap_or_default();
     let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
         pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&i)
     });
     let name = material["name"].clone();
     let index = register_material(state, material, preserve_default)?;
+    let selected = selection?;
     assign_material(state, &selected, index);
     let mut result = json!({"fabric":{"index":index,"name":name},"matched":matched,"file":file,
         "assigned":{"assigned":vec![true;selected.len()],"patterns":selected}});
-    if let Some(rgb) = rgb {
+    if let Some(color) = args
+        .get("color")
+        .filter(|v| !v.is_null() && v.as_str() != Some(""))
+    {
+        let rgb = parse_color(color)?;
+        update_material_color(find_fabric_mut(state, index)?, rgb);
         result["rgb"] = json!(rgb);
         result["color"] = json!({"ok":[true,true,true]});
     }
-    if base_texture.is_some() {
+    if let Some(path) = args["texture_image"].as_str().filter(|s| !s.is_empty()) {
+        let path = texture(path, "base")?;
+        update_material_texture(find_fabric_mut(state, index)?, "base", &path);
         result["texture"] = json!({"ok":true});
     }
     Ok(result)

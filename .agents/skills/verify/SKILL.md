@@ -42,7 +42,9 @@ Run `--verify-fabric-assignment-workflow` to register a fabric through
 `AddFabric`, then assign it to one panel through Python and apply a different
 fabric to another panel. Use both its name and its numeric index as a string
 while another panel has that same numeric name. Verify both references select
-the index and that a list containing a missing name leaves assignments intact.
+the index. Read back the effects of each failed stage: a missing panel leaves
+the registered fabric and existing assignments, an invalid color leaves the
+new assignment, and a texture error leaves the applied color and assignment.
 Check that adding leaves both original assignments
 and the drape intact. Reopen at zero steps, compare positions and velocities,
 and check each GLB mesh's material. Optionally set `CLO_FABRIC_ASSIGN_FIXTURE`

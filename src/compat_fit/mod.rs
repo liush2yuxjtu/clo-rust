@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_material_application_does_not_mutate_state() {
+    fn failed_selection_keeps_registered_material_without_assignment() {
         let mut state = json!({"patterns":[{"id":0,"name":"Panel"}]});
         assert!(dispatch(
             "fabric_apply",
@@ -177,7 +177,9 @@ mod tests {
         )
         .unwrap()
         .is_err());
-        assert_eq!(state, json!({"patterns":[{"id":0,"name":"Panel"}]}));
+        assert_eq!(state["patterns"], json!([{"id":0,"name":"Panel"}]));
+        assert_eq!(array(&state["fabrics"]).len(), 2);
+        assert_eq!(state["current_fabric"], 1);
         let fabric = invoke(
             "fabric_apply",
             json!({"fabric":"cotton","color":"#0f0"}),

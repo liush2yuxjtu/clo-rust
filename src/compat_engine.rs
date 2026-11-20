@@ -41,10 +41,9 @@ fn execute(line: &str, state: &mut Value) -> Result<Value, String> {
                     Err("The CLO Rust bridge is stopped. Call clo_launch(with_bridge=true).".into())
                 }
             });
-    // Builds leave the candidate unchanged until drafting and simulation finish.
-    // Their subsequent capture can fail after that completed work is committed.
+    // Some tools retain completed steps if a later step fails.
     if result.is_ok() || matches!(request.name.as_str(),
-        "clo_run_python" | "clo_ui_action" | "garment_build" | "garment_rebuild"
+        "clo_run_python" | "clo_ui_action" | "garment_build" | "garment_rebuild" | "fabric_apply"
     ) {
         *state = candidate;
     }

@@ -238,10 +238,14 @@ async def verify_fabric_assignment_workflow():
             })
             assert numeric_assignment["value"] is True
             assert await assignments() == [new_index, back_index]
+            before_selection_error = (await json_result(rust, "fabric_list"))["fabrics"]
             bad_selection = await rust.call_tool("fabric_apply", {
                 "fabric": "cotton", "patterns": ["0", "missing-panel"],
             })
             assert bad_selection.isError and await assignments() == [new_index, back_index]
+            after_selection_error = (await json_result(rust, "fabric_list"))["fabrics"]
+            assert after_selection_error[:-1] == before_selection_error
+            assert after_selection_error[-1]["name"] == apply["fabric"]["name"]
             bad = await rust.call_tool("clo_api_call", {"name": "fabric_api.AssignFabricToPattern", "args": [new_index, 99, 3]})
             assert bad.isError and await assignments() == [new_index, back_index]
             path, updated = await saved("assigned")
@@ -258,6 +262,26 @@ async def verify_fabric_assignment_workflow():
             model, _ = read_gltf_export(glb)
             material_names = [model["materials"][mesh["primitives"][0]["material"]]["name"] for mesh in model["meshes"]]
             assert material_names == [updated["fabrics"][index]["name"] for index in (new_index, back_index)]
+
+            for label, options, expected_color in (
+                ("invalid-color", {"color": "#gggggg"}, [0.85, 0.85, 0.85]),
+                ("invalid-texture", {"color": "#246", "texture_image": str(root / "missing.png")},
+                 [34 / 255, 68 / 255, 102 / 255]),
+            ):
+                before = (await json_result(rust, "fabric_list"))["fabrics"]
+                result = await rust.call_tool("fabric_apply", {
+                    "fabric": "cotton", "patterns": ["Back"], **options,
+                })
+                assert result.isError, label
+                after = (await json_result(rust, "fabric_list"))["fabrics"]
+                assert after[:-1] == before
+                index = after[-1]["index"]
+                assert await assignments() == [new_index, index], label
+                _, saved_after_error = await saved(label)
+                assert saved_after_error["fabrics"][-1]["color"] == expected_color, label
+                assert saved_after_error["simulation"] == reopened["simulation"] | {
+                    "meshes": [expected[0], expected[1] | {"fabric_index": index}],
+                }, label
         if os.environ.get("CLO_FABRIC_ASSIGN_FIXTURE"):
             library = root / "Fabric"
             (library / "A-nested").mkdir(parents=True)
@@ -283,6 +307,9 @@ async def verify_fabric_assignment_workflow():
                       "case": "add fabric, assign one panel, preserve drape", "add_kept_assignments": True,
                       "assigned_indices": [new_index, back_index], "retained_step": 3,
                       "numeric_reference_preceded_name": True,
+                      "selection_error_retained_fabric": True,
+                      "color_error_retained_assignment": True,
+                      "texture_error_retained_color": True,
                       "invalid_assignment_preserved_scene": True, "glb_materials": material_names}
                      | library_report, ensure_ascii=False))
 
