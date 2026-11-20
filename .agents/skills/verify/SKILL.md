@@ -1253,6 +1253,20 @@ material is the assigned poplin, at index 0, with the base texture label
 and the exact RGBA returned by the MCP fabric API. This exposes native
 colorway conversions that can restore the default swatch after opening.
 
+Run `--compare-live-fresh-draft-archives` with the live bridge and installed
+Mia AVT and poplin assets. Set `CLO_FRESH_DRAFT_PROJECT` to the official
+six-panel cotton top saved after a zero-step build in an empty scene. Copy
+the matching Mia measurements and calibration caches into a fresh shared
+`CLO_MCP_STATE` and unset `CLO_RUST_CHECKPOINT_DIR`. The verifier builds the
+same draft on Rust, saves ZPRJ and ZPAC, then changes the color through
+`garment_rebuild`. Check that it creates an automatic ZPRJ checkpoint
+of the previous draft. Use both backends to open each output and restore
+the checkpoint by name. Compare the six arrangement records, panel order,
+2D positions and bounds at 0.001 mm, particle distance, sewing group members,
+fabric assignments and color. Check for Mia in ZPRJ, and verify restoring
+preserves the latest session spec. The 3D position comparison is a separate
+case. Inspect `baPosition3D` by panel in each typed PAC to compare world bounds.
+
 Run `--compare-live-garment-to-project` with the native bridge up.
 Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
 and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave

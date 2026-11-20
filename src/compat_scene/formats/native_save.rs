@@ -802,6 +802,11 @@ fn read_avatar_source(avatar: &Value) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+pub(super) fn read_avatar_dan(avatar: &Value) -> Result<Vec<u8>, String> {
+    let data = read_avatar_source(avatar)?;
+    member(&mut open_archive(Cursor::new(data), AVT)?, "dan")
+}
+
 fn project_avatar_edits(input: &[u8], state: &Value) -> Result<TextureAssets, String> {
     let mut outer = open_archive(Cursor::new(input), ZPRJ)?;
     let mut changes = TextureAssets::default();

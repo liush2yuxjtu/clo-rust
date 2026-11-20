@@ -4390,6 +4390,91 @@ async def compare_live_garment_workflow():
                       "new_session_history_empty": True, "result": "pass"}))
 
 
+async def compare_live_fresh_draft_archives():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    fixture = Path(os.environ["CLO_FRESH_DRAFT_PROJECT"])
+    avatar = "Mara_09_eye_Joint"
+    assert fixture.is_file()
+    for folder in ("calibration", "measurements"):
+        assert (root / folder / f"{avatar}.json").is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    request = {"spec": {"garment": "top", "silhouette": "regular", "neckline": "crew",
+                        "sleeve": "short", "fabric": "cotton", "color": "navy", "particle_distance": 45},
+               "simulate_steps": 0, "snapshots": False}
+
+    async def observations(session):
+        info = await read_composed_archive(session)
+        panels = (await json_result(session, "pattern_list"))["patterns"]
+        detailed = []
+        for panel in panels:
+            detail = await json_result(session, "pattern_info", {"pattern": panel["name"]})
+            detailed.append([detail["arrangement"], detail["particle_distance"]])
+        return (
+            {key: info[key] for key in ("patterns", "catalog_names", "current_colorway", "colorways",
+                                       "fabric_rgba_f32", "materials")},
+            [group["patterns"] for group in info["seams"]["groups"]],
+            detailed,
+            [[*panel["pos_2d"], float(panel["bbox"]["Width"]), float(panel["bbox"]["Height"])]
+             for panel in panels],
+        )
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        try:
+            reference = await json_result(rust, "scene_open", {"path": str(fixture)})
+            assert reference["avatars"] == [avatar]
+            expected = await observations(rust)
+            assert len(expected[0]["patterns"]) == 6 and len(expected[1]) == 14
+            assert expected[0]["catalog_names"] == ["V2_Woven_Poplin_1"]
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            built = await json_result(rust, "garment_build", request)
+            assert built["checkpoint_before_build"] is None and built["avatar"] == avatar
+            assert len(built["pieces"]) == 6 and len(built["seams"]) == 14
+            paths = [root / f"fresh-authored.{suffix}" for suffix in ("zprj", "zpac")]
+            for path in paths:
+                assert await json_result(rust, "scene_save", {
+                    "path": str(path), "thumbnail": False,
+                }) == {"path": str(path)}
+            rebuilt = await json_result(rust, "garment_rebuild", {
+                "changes": {"color": "red"}, "simulate_steps": 0, "snapshots": False,
+            })
+            checkpoint = Path(rebuilt["checkpoint_before_build"])
+            assert checkpoint.suffix == ".zprj" and checkpoint.name.startswith("auto_before_build_")
+            assert checkpoint.is_file() and checkpoint.parent == root / "checkpoints"
+            history = await json_result(rust, "garment_last_spec")
+            assert history["spec"]["color"] == "red"
+
+            reads = []
+            for path in (*paths, checkpoint):
+                for label, session in (("official", clo), ("rust", rust)):
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    if path == checkpoint:
+                        opened = await json_result(session, "checkpoint_restore", {"name": path.stem})
+                    else:
+                        opened = await json_result(session, "scene_open", {"path": str(path)})
+                    assert opened["pattern_count"] == 6
+                    assert opened["avatars"] == ([avatar] if path.suffix == ".zprj" else [])
+                    observed = await observations(session)
+                    assert observed[:3] == expected[:3], (path.name, label, observed[:3], expected[:3])
+                    delta = max(abs(actual - saved)
+                                for a, b in zip(observed[3], expected[3], strict=True)
+                                for actual, saved in zip(a, b, strict=True))
+                    assert delta <= 0.001, (path.name, label, delta)
+                    reads.append({"reader": label, "file": path.name, "bounds_max_delta_mm": delta})
+            assert await json_result(rust, "garment_last_spec") == history
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"result": "pass", "outputs": 3, "panels": 6, "seams": 14, "reads": reads,
+                      "restore_kept_latest_spec": True}))
+
+
 async def compare_live_build_checkpoint_avatar():
     root = Path(os.environ["CLO_MCP_STATE"])
     avatar_free = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
@@ -8508,6 +8593,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
                              const=compare_live_avatar_measurements,
                              help="compare live avatar mesh measurements and shared measurement cache behavior")
+    comparisons.add_argument("--compare-live-fresh-draft-archives", action="store_const", dest="comparison",
+                             const=compare_live_fresh_draft_archives,
+                             help="cross-open a newly drafted top and restore its native rebuild checkpoint")
     comparisons.add_argument("--compare-live-build-checkpoint-avatar", action="store_const", dest="comparison",
                              const=compare_live_build_checkpoint_avatar,
                              help="verify implicit and embedded avatars in native pre-build checkpoints")

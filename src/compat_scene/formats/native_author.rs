@@ -3,12 +3,12 @@
 mod seams;
 
 use super::mesh::triangulate;
-use super::native_pose::{encode_map, encoded_list, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
-use crate::compat_fit::{archive_pose_mesh, ArchivePoseMesh};
+use super::native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
+use crate::compat_fit::{archive_pose_mesh, placement, ArchivePoseMesh};
 use crate::compat_scene::{array, patterns};
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const BOOL: u8 = 1;
 const INT: u8 = 4;
@@ -99,6 +99,24 @@ fn flat_mesh(pattern: &Value) -> Result<ArchivePoseMesh, String> {
     })
 }
 
+fn arrangement_name(pattern: &Value) -> Option<&str> {
+    pattern["arrangement"].as_str().filter(|name| !matches!(*name, "" | "Arrangement Point"))
+}
+
+fn avatar_arrangements(dan: &[u8]) -> Result<HashMap<&str, &[u8]>, String> {
+    let root = Fields::read(dan)?;
+    let mut arrangements = HashMap::new();
+    for record in map_list(root.get(b"listArr", LIST_TYPE)?, 2048)? {
+        let name = record.get(b"qsNameUTF8", BYTE_TYPE)
+            .or_else(|_| record.get(b"qsName", BYTE_TYPE))
+            .ok().and_then(|name| std::str::from_utf8(name).ok());
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            arrangements.entry(name).or_insert(record.encoded());
+        }
+    }
+    Ok(arrangements)
+}
+
 fn panel(
     value: &Value,
     slot: u32,
@@ -106,6 +124,7 @@ fn panel(
     fabric: (usize, &[u8]),
     state: &Value,
     saved: Option<&Value>,
+    arrangement: Option<&[u8]>,
 ) -> Result<Panel, String> {
     let name = value["name"]
         .as_str()
@@ -122,7 +141,6 @@ fn panel(
     if ["half_symmetry", "hide", "freeze", "strengthen"]
         .into_iter()
         .any(|field| value[field] == true)
-        || value.get("draft_offset_x").is_some()
         || !value["line_properties"]
             .as_object()
             .is_none_or(|properties| properties.is_empty())
@@ -130,9 +148,8 @@ fn panel(
     {
         return Err("native authoring cannot preserve these panel properties".into());
     }
-    let arrangement = value["arrangement"].as_str().unwrap_or_default();
-    if !matches!(arrangement, "" | "Arrangement Point") {
-        return Err("native authoring has no placement calibration for this arrangement".into());
+    if value.get("draft_offset_x").is_some() && arrangement.is_none() {
+        return Err("native authoring requires a saved avatar arrangement for drafted panels".into());
     }
 
     let mut next = || {
@@ -141,10 +158,13 @@ fn panel(
     };
     let entry = element(name, next())?;
     let [dx, dy] = patterns::offset(value);
-    let geometry = match saved {
+    let mut geometry = match saved {
         Some(prior) => archive_pose_mesh(value, prior, state)?,
         None => flat_mesh(value)?,
     };
+    if saved.is_none() && arrangement.is_some() {
+        geometry.positions = placement(value, &geometry.rest, &state["avatar"]);
+    }
     if geometry.sides.len() != edges.len() || geometry.rest.len() > 130_000 {
         return Err("native pose boundary does not match the panel outline".into());
     }
@@ -156,6 +176,7 @@ fn panel(
         (b"fGrainAngleResetValue", FLOAT, &ZERO),
     ])?;
     // Moving an editable outline in 2D does not move its flat 3D placement.
+    let translation = if arrangement.is_some() { [0.; 3] } else { [cx - dx, cy - dy, 200.] };
     let placement = float_bytes([
         1.,
         0.,
@@ -169,9 +190,9 @@ fn panel(
         0.,
         1.,
         0.,
-        cx - dx,
-        cy - dy,
-        200.,
+        translation[0],
+        translation[1],
+        translation[2],
         1.,
     ])?;
     let rest = float_bytes(geometry.rest.iter().flat_map(|&[x, y]| [x + dx, y + dy]))?;
@@ -330,16 +351,17 @@ fn panel(
         ),
         (b"fSelfAvoidance", FLOAT, &one),
     ])?;
-    let arrangement = encode_map(&[
+    let default_arrangement = encode_map(&[
         (b"qsName", BYTE_TYPE, b"Arrangement Point"),
         (b"qsNameUTF8", BYTE_TYPE, b"Arrangement Point"),
         (b"enType", INT, &1i32.to_le_bytes()),
         (b"uiSpiralType", UINT, &1u32.to_le_bytes()),
     ])?;
+    let arrangement = arrangement.unwrap_or(&default_arrangement);
     let distance = float_bytes([value["particle_distance"].as_f64().unwrap_or(20.)])?;
     let record = encode_map(&[
         (b"mapFabricShape2D", MAP_TYPE, &shape),
-        (b"mapArrange", MAP_TYPE, &arrangement),
+        (b"mapArrange", MAP_TYPE, arrangement),
         (b"mapElement", MAP_TYPE, &entry),
         (
             b"mapOriginPatternPhysicalProperty",
@@ -555,11 +577,18 @@ pub(super) fn encode(state: &Value) -> Result<Garment, String> {
     {
         return Err("the saved pose refers to an unknown panel".into());
     }
+    let dan = panels.iter().any(|panel| arrangement_name(panel).is_some())
+        .then(|| super::native_save::read_avatar_dan(&state["avatar"])).transpose()?;
+    let arrangements = dan.as_deref().map(avatar_arrangements).transpose()?.unwrap_or_default();
     let panel_records = panels
         .iter()
         .enumerate()
         .map(|(index, panel_value)| {
             let saved = meshes.iter().find(|mesh| mesh["id"] == panel_value["id"]);
+            let arrangement = arrangement_name(panel_value).map(|name| {
+                arrangements.get(name).copied()
+                    .ok_or_else(|| format!("native avatar has no arrangement {name:?}"))
+            }).transpose()?;
             panel(
                 panel_value,
                 index as u32,
@@ -567,6 +596,7 @@ pub(super) fn encode(state: &Value) -> Result<Garment, String> {
                 (indices[panel_materials[index]], &properties[indices[panel_materials[index]]]),
                 state,
                 saved,
+                arrangement,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;

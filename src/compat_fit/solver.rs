@@ -430,7 +430,7 @@ fn flat_arrangement(pattern: &Value, points: &[Point2]) -> Vec<Point> {
     points.iter().map(|&[x, y]| [x + dx, y + dy, 200.0]).collect()
 }
 
-fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
+pub(crate) fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
     if avatar.is_null() && pattern.get("draft_offset_x").is_none() {
         return flat_arrangement(pattern, points);
     }
