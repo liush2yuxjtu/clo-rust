@@ -263,14 +263,14 @@ fn configured_avatar_paths() -> Vec<PathBuf> {
     result
 }
 
-fn native_alias_stem(alias: &str) -> &str {
+fn native_alias_path(alias: &str) -> &str {
     match alias {
-        "mia" => "FV2.1_Mia",
-        "luka" => "MV2.1_Luka",
-        "female mannequin" => "FV2.1_Mannequin",
-        "male mannequin" => "MV2.1_Mannequin",
-        "melody" => "KV1.1G_Melody_(7-20)",
-        "oliver" => "KV1.1B_Oliver_(7-20)",
+        "mia" => "Female/FV2.1_Mia.avt",
+        "luka" => "Male/MV2.1_Luka.avt",
+        "female mannequin" => "Mannequin/FV2.1_Mannequin.avt",
+        "male mannequin" => "Mannequin/MV2.1_Mannequin.avt",
+        "melody" => "Kid/KV1.1G_Melody_(7-20).avt",
+        "oliver" => "Kid/KV1.1B_Oliver_(7-20).avt",
         _ => alias,
     }
 }
@@ -280,15 +280,22 @@ fn avatar_lookup(reference: &str, alias: Option<&str>) -> Option<PathBuf> {
     if direct.is_file() {
         return Some(direct);
     }
+    if let Some(path) = alias
+        .and_then(|name| avatar_root().map(|root| root.join(native_alias_path(name))))
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
     let reference = reference.trim();
     let paths = configured_avatar_paths();
     let native = alias.and_then(|name| {
+        let expected = Path::new(native_alias_path(name)).file_stem()?;
         paths.iter().find(|path| {
             path.extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("avt"))
                 && path
                     .file_stem()
-                    .is_some_and(|stem| stem.eq_ignore_ascii_case(native_alias_stem(name)))
+                    .is_some_and(|stem| stem.eq_ignore_ascii_case(expected))
         })
     });
     let exact = native.or_else(|| {

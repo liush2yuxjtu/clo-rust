@@ -1376,7 +1376,6 @@ pub(super) fn invoke(
                     avatars.remove(index - 1);
                 }
             }
-            state["simulation"] = Value::Null;
             Ok(json!(true))
         }
         "utility_api.GetAvatarMeasurements" => {

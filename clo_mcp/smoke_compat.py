@@ -2512,6 +2512,15 @@ async def verify_avatar_changes_keep_drape():
             assert len(loaded["avatars"]) == 2 and loaded["avatars"][-1] == "contact"
             path, appended = await save("appended")
             assert appended["simulation"] == before["simulation"]
+            invalid_delete = await rust.call_tool("clo_api_call", {
+                "name": "utility_api.DeleteAvatar", "args": [[0, 99]],
+            })
+            assert invalid_delete.isError and (await json_result(rust, "avatar_list"))["in_scene"] == loaded["avatars"]
+            deleted = await json_result(rust, "clo_run_python", {"code": "utility_api.DeleteAvatar([0, 0])"})
+            assert deleted["value"] is True
+            assert (await json_result(rust, "avatar_list"))["in_scene"] == ["contact"]
+            _, unbound = await save("primary-deleted")
+            assert unbound["simulation"] == before["simulation"]
             await json_result(rust, "scene_open", {"path": str(path)})
             await json_result(rust, "simulate", {"steps": 0})
             _, zero = await save("zero")
@@ -2537,9 +2546,27 @@ async def verify_avatar_changes_keep_drape():
                 _, with_native = await save("native")
                 assert with_native["simulation"] == continued["simulation"]
                 native_append = "pass"
-    print(json.dumps({"tools": ["avatar_load", "avatar_list", "simulate", "scene_open"],
+        alias_directory = None
+        if library := os.environ.get("CLO_AVATAR_LIBRARY_FIXTURE"):
+            relative = Path("Female/FV2.1_Mia.avt")
+            configured = root.resolve() / "library"
+            original = configured / relative
+            original.parent.mkdir(parents=True)
+            shutil.copyfile(Path(library) / relative, original)
+            shadow = configured / "A-backup" / relative.name
+            shadow.parent.mkdir()
+            shadow.write_text("not a native avatar")
+            async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": str(configured)}) as rust:
+                assert (await json_result(rust, "avatar_list"))["library"] == [str(shadow), str(original)]
+                loaded = await json_result(rust, "avatar_load", {"name_or_path": " FeMaLe "})
+                direct = await json_result(rust, "avatar_load", {"name_or_path": str(original)})
+                assert loaded["path"] == direct["path"] == str(original)
+                assert loaded["avatars"] == direct["avatars"] and loaded["rest_geometry"] == direct["rest_geometry"]
+                alias_directory = relative.as_posix()
+    print(json.dumps({"tools": ["avatar_load", "avatar_list", "simulate", "scene_open", "clo_api_call", "clo_run_python"],
                       "case": "change avatars while retaining cloth",
                       "append_and_replace_preserved_drape": True, "continued_step": 4,
+                      "api_delete_preserved_drape": True, "canonical_alias_path": alias_directory,
                       "new_mesh_overlap_corrections": resumed["mesh_initial_overlap_corrections"],
                       "native_avt_append": native_append}))
 

@@ -361,6 +361,11 @@ already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the
 new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to also check
 the native avatar path through `scene_open`.
+Delete the primary avatar from Python and check that the remaining avatar is
+promoted and the saved positions and velocities stay identical. Verify an
+invalid batch leaves the avatars intact. Set `CLO_AVATAR_LIBRARY_FIXTURE` to an
+`Avatar` folder containing `Female/FV2.1_Mia.avt` to check that alias resolution
+prefers the standard library location over a same-name backup.
 
 Run `--verify-simulation-reset-quality` to compare arranged meshes before
 simulation and after reset. Exercise the public tools and corresponding
