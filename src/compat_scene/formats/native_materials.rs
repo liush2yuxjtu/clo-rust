@@ -194,6 +194,37 @@ pub(super) fn select_colorway(pac: &[u8], index: u32) -> Result<Vec<u8>, String>
     Fields::read(&root)?.replace(b"listFabric", LIST_TYPE, &encoded_list(&fabrics)?)
 }
 
+pub(super) fn default_append_colorway(pac: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let (names, active) = read_colorways(pac)?;
+    if names == [name] {
+        return Ok(pac.to_vec());
+    }
+    // An empty receiver has one colorway and imports the source's first
+    // material variant, even if the source was saved with another active.
+    let selected = (active != 0).then(|| select_colorway(pac, 0)).transpose()?;
+    let root = Fields::read(selected.as_deref().unwrap_or(pac))?;
+    let table = root.map(b"mapColorWay")?;
+    let new_colorway = table.map(b"mapNewColorway")?;
+    let records = map_list(new_colorway.get(b"listColorway", LIST_TYPE)?, 4096)?;
+    let legacy = map_list(table.get(b"listColorway", LIST_TYPE)?, 4096)?;
+    let [legacy] = legacy.as_slice() else {
+        return Err("native ZPAC composition requires a single legacy colorway record".into());
+    };
+    let rename = |record: &Fields<'_>| -> Result<Vec<u8>, String> {
+        let record = record.replace(b"qsNameUTF8", BYTE_TYPE, name.as_bytes())?;
+        Fields::read(&record)?.replace(b"qsName", BYTE_TYPE, name.as_bytes())
+    };
+    let first = records.first().ok_or("native ZPAC has no first colorway")?;
+    let colorway = rename(first)?;
+    let legacy = rename(legacy)?;
+    let record_list = |record: &[u8]| encoded_list(&[Cow::Borrowed(record)]);
+    let new_colorway = new_colorway.replace(b"listColorway", LIST_TYPE, &record_list(&colorway)?)?;
+    let table = table.replace(b"mapNewColorway", MAP_TYPE, &new_colorway)?;
+    let table = Fields::read(&table)?.replace(b"listColorway", LIST_TYPE, &record_list(&legacy)?)?;
+    let table = Fields::read(&table)?.replace(b"uiCurrentCoordinationIndex", UINT_TYPE, &0u32.to_le_bytes())?;
+    root.replace(b"mapColorWay", MAP_TYPE, &table)
+}
+
 fn select_fabric_material(fabric: &Fields<'_>, selected: &Fields<'_>) -> Result<Vec<u8>, String> {
     let legacy = fabric.map(b"mapColorwayInfo")?;
     let legacy_rows = map_list(legacy.get(b"listColorwayInfo", LIST_TYPE)?, 4096)?;

@@ -209,6 +209,13 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
     state[SOURCE] = value;
 }
 
+pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &Path, project: bool) {
+    remember(state, path, project);
+    if state[SOURCE].is_object() {
+        state[SOURCE]["empty_append"] = json!(true);
+    }
+}
+
 fn current_material_colorway(state: &Value, index: u64) -> usize {
     let colorway = state["current_colorway"].as_u64().unwrap_or(0) as usize;
     super::super::array(state, "fabrics").iter().find(|fabric| fabric["index"] == index)
@@ -516,7 +523,9 @@ pub(in crate::compat_scene) fn save(
 ) -> Result<(), String> {
     let output = encode(state, project, thumbnail)?;
     write(path, &output)?;
-    if (state[SOURCE]["project"] == true) == project {
+    if state[SOURCE]["empty_append"] == true {
+        remember_empty_append(state, path, false);
+    } else if (state[SOURCE]["project"] == true) == project {
         remember(state, path, project);
     }
     Ok(())
@@ -532,6 +541,10 @@ pub(in crate::compat_scene) fn encode(
         "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene",
     )?;
     let source_project = source["project"] == true;
+    let empty_append = source["empty_append"] == true;
+    if project && empty_append {
+        return Err("saving this appended scene as .zprj is unsupported; use .zpac or .clorust".into());
+    }
     if project && !source_project {
         return Err("saving a .zprj requires a loaded native .zprj project".into());
     }
@@ -542,10 +555,16 @@ pub(in crate::compat_scene) fn encode(
     let texture_edits: Vec<ColorwayTextureEdit> = serde_json::from_value(source["colorway_textures"].clone())
         .map_err(|_| "invalid native colorway texture targets")?;
     let write_colorways = switched || !recolors.is_empty() || !texture_edits.is_empty();
-    let can_save_materials = !write_colorways && !changed_material
-        || super::super::array(source, "recolored").is_empty()
+    let can_save_materials = if empty_append {
+        !write_colorways && !changed_material
+            && super::super::array(source, "recolored").is_empty()
             && super::super::array(source, "retextured").is_empty()
-            && verify_colorway_materials(state, source, &recolors, &texture_edits);
+    } else {
+        !write_colorways && !changed_material
+            || super::super::array(source, "recolored").is_empty()
+                && super::super::array(source, "retextured").is_empty()
+                && verify_colorway_materials(state, source, &recolors, &texture_edits)
+    };
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
         || !can_save_materials
         || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
@@ -574,7 +593,13 @@ pub(in crate::compat_scene) fn encode(
             .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
     };
     let renamed = renamed_pac(&pac, state)?;
-    let (edited, assets) = if write_colorways {
+    let (edited, assets) = if empty_append {
+        // Garment export omits the receiver's unused default material. The
+        // appended source already has the desired compact fabric indices.
+        let name = state["colorways"][0].as_str().ok_or("native ZPAC has no active colorway name")?;
+        let pac = native_materials::default_append_colorway(renamed.as_deref().unwrap_or(&pac), name)?;
+        (Some(pac), TextureAssets::default())
+    } else if write_colorways {
         let index = state["current_colorway"]
             .as_u64()
             .and_then(|index| u32::try_from(index).ok())

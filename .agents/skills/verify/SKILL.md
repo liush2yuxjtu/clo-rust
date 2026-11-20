@@ -965,6 +965,19 @@ in both modes. Append to an empty scene and confirm the receiving default
 fabric and colorway remain. Save and reopen the composed scene as CLORUST.
 To check native garment passthrough, replace-open the original ZPRJ and
 export its ZPAC, then append that archive and verify both saved poses.
+Use the same native fixtures and a fresh `CLO_MCP_STATE` for
+`python -m clo_mcp.smoke_compat --compare-live-composed-zpac`.
+Set `CLO_COMPOSED_ZPAC_CASE=empty` to isolate the empty-receiver ZPAC case
+or `CLO_COMPOSED_ZPAC_CASE=empty_project` for the ZPRJ source.
+Export through `scene_export` and confirm the live scene stays intact.
+Reopen each public output in both backends. The native export omits the
+unused default fabric, so both panels change from index 1 in the live
+scene to index 0 after reopening. Require the first source material
+variant even when the source was saved with its second colorway active.
+Read back fabrics, colorways and seams. Compare saved mesh coordinates,
+triangle indices and 2D rest coordinates via the reopened Rust scenes.
+The `nonempty` case probes composition into an existing project and
+requires both source garments and both colorways to survive reopening.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.

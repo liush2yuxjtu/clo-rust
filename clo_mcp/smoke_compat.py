@@ -6233,6 +6233,92 @@ async def compare_live_scene_open():
                       "result": "pass"}, ensure_ascii=False))
 
 
+async def compare_live_composed_zpac():
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    directory = Path(os.environ["CLO_MCP_STATE"])
+    assert project.is_file() and garment.is_file() and directory.is_dir()
+
+    async def read(session):
+        scene = await json_result(session, "scene_info")
+        fabrics = await json_result(session, "fabric_list")
+        seams = await json_result(session, "seams_list")
+        total = await json_result(session, "clo_api_call", {
+            "name": "fabric_api.GetFabricCount", "args": [False],
+        })
+        return {"patterns": scene["patterns"], "colorways": scene["colorways"],
+                "current_colorway": scene["current_colorway"], "materials": total["value"],
+                "fabrics": fabrics, "seams": seams}
+
+    cases = (("empty", None, garment, [1, 1], [0, 0], 1, 0),
+             ("empty_project", None, project, [1, 1], [0, 0], 1, 0),
+             ("nonempty", project, garment, [0, 0, 1, 1], [0, 0, 1, 1], 2, 1))
+    if selected := os.environ.get("CLO_COMPOSED_ZPAC_CASE"):
+        cases = tuple(case for case in cases if case[0] == selected)
+        assert cases, "CLO_COMPOSED_ZPAC_CASE must be empty, empty_project or nonempty"
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        status = await json_result(clo, "clo_status")
+        assert status["bridge"] == "up"
+        try:
+            for label, initial, source, before, after, count, active in cases:
+                archives = {backend: directory / f"composition-{label}-{backend}.zpac"
+                            for backend in ("official", "rust")}
+                assert not any(path.exists() for path in archives.values()), "use a fresh test directory"
+                expected = None
+                expected_meshes = None
+                report = {"case": label, "checked": {}, "export_errors": {}}
+                for backend, session in (("official", clo), ("rust", rust)):
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    if initial:
+                        await json_result(session, "scene_open", {"path": str(initial)})
+                    await json_result(session, "scene_open", {"path": str(source), "mode": "append"})
+                    composed = await read(session)
+                    assert [piece["fabric_index"] for piece in composed["patterns"]] == before
+                    response = await session.call_tool("scene_export", {"path": str(archives[backend])})
+                    assert await read(session) == composed, (label, backend, "export changed the scene")
+                    if response.isError:
+                        assert not archives[backend].exists()
+                        report["export_errors"][backend] = response.content[0].text
+                        continue
+                    reply = response.structuredContent or json.loads(response.content[0].text)
+                    assert reply["path"] == str(archives[backend]) and archives[backend].is_file()
+                    for reader, target in (("official", clo), ("rust", rust)):
+                        await json_result(target, "scene_open", {"path": str(archives[backend])})
+                        reopened = await read(target)
+                        assert [piece["fabric_index"] for piece in reopened["patterns"]] == after
+                        assert reopened["materials"] == count and reopened["current_colorway"] == active
+                        assert reopened["colorways"] == composed["colorways"]
+                        if expected is None:
+                            expected = reopened
+                        assert reopened == expected, (label, backend, reader, reopened, expected)
+                        report["checked"][f"{backend}_written_{reader}_read"] = True
+                        if reader == "rust":
+                            snapshot = archives[backend].with_suffix(".clorust")
+                            await json_result(target, "scene_save", {"path": str(snapshot)})
+                            simulation = json.loads(snapshot.read_text())["scene"]["simulation"]
+                            assert simulation["source"] == "native_saved_pose"
+                            meshes = [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
+                                      for mesh in simulation["meshes"]]
+                            assert len(meshes) == len(after)
+                            if expected_meshes is None:
+                                expected_meshes = meshes
+                            assert meshes == expected_meshes, (label, backend, "stored meshes differ")
+                report["stored_meshes_compared"] = not report["export_errors"]
+                reports.append(report)
+        finally:
+            if original not in ("NULL", "", None):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    success = all(len(report["checked"]) == 4 for report in reports)
+    print(json.dumps({"tool": "scene_export", "format": "ZPAC", "cases": reports,
+                      "result": "pass" if success else "fail"}, ensure_ascii=False))
+    if not success:
+        raise SystemExit(1)
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -6665,6 +6751,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-scene-open", action="store_const", dest="comparison",
                              const=compare_live_scene_open,
                              help="compare native append and replacement with scene and fabric readback")
+    comparisons.add_argument("--compare-live-composed-zpac", action="store_const", dest="comparison",
+                             const=compare_live_composed_zpac,
+                             help="compare exported composed ZPACs and reopen them with both backends")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")

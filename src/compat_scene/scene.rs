@@ -553,7 +553,21 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             }
             let mut loaded = formats::clo_native::read(path, is_project)?;
             let prior_count = array(state, "patterns").len();
-            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
+            let empty_receiver = append
+                && prior_count == 0
+                && array(state, "imported_meshes").is_empty()
+                && state["fabrics"] == json!([default_fabric()])
+                && state["colorways"] == json!([DEFAULT_COLORWAY])
+                && array(&loaded, "fabrics").len() == 1;
+            let mut fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
+            if empty_receiver {
+                let fabric = &mut fabrics[0];
+                if let Some(first) = fabric["native_colorway_materials"]["values"].get(0) {
+                    let mut first = first.clone();
+                    first["index"] = fabric["index"].clone();
+                    *fabric = first;
+                }
+            }
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if append {
@@ -601,6 +615,8 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             }
             if load_avatar && !append {
                 formats::native_save::remember(state, path, is_project);
+            } else if empty_receiver && !array(state, "patterns").is_empty() {
+                formats::native_save::remember_empty_append(state, path, is_project);
             }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
