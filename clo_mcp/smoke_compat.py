@@ -11,6 +11,7 @@ import re
 import shutil
 import struct
 import sys
+import zipfile
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -6233,31 +6234,47 @@ async def compare_live_scene_open():
                       "result": "pass"}, ensure_ascii=False))
 
 
+async def composed_archive_api(session, name, *args):
+    return (await json_result(session, "clo_api_call", {"name": name, "args": list(args)}))["value"]
+
+
+async def read_composed_archive(session):
+    scene = await json_result(session, "scene_info")
+    fabrics = await json_result(session, "fabric_list")
+    seams = await json_result(session, "seams_list")
+    total = await composed_archive_api(session, "fabric_api.GetFabricCount", False)
+    colors = []
+    for colorway in range(len(scene["colorways"])):
+        row = []
+        for fabric in range(total):
+            rgba = await composed_archive_api(session, "fabric_api.GetFabricPBRMaterialBaseColor", colorway, fabric, 0)
+            row.append(struct.pack("<4f", *rgba).hex())
+        colors.append(row)
+    return {"patterns": scene["patterns"], "colorways": scene["colorways"],
+            "current_colorway": scene["current_colorway"], "materials": total,
+            "fabric_rgba_f32": colors, "fabrics": fabrics, "seams": seams,
+            "catalog_names": [await composed_archive_api(session, "fabric_api.GetFabricName", slot)
+                              for slot in range(total)]}
+
+
+async def snapshot_composed_archive(session, path):
+    await json_result(session, "scene_save", {"path": str(path)})
+    saved = json.loads(path.read_text())["scene"]
+    simulation = saved["simulation"]
+    assert simulation["source"] == "native_saved_pose"
+    meshes = [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
+              for mesh in simulation["meshes"]]
+    return (meshes, saved["native_seam_groups"])
+
+
 async def compare_live_composed_zpac():
     project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
     garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     directory = Path(os.environ["CLO_MCP_STATE"])
     assert project.is_file() and garment.is_file() and directory.is_dir()
 
-    async def api(session, name, *args):
-        return (await json_result(session, "clo_api_call", {"name": name, "args": list(args)}))["value"]
-
-    async def read(session):
-        scene = await json_result(session, "scene_info")
-        fabrics = await json_result(session, "fabric_list")
-        seams = await json_result(session, "seams_list")
-        total = await api(session, "fabric_api.GetFabricCount", False)
-        colors = []
-        for colorway in range(len(scene["colorways"])):
-            row = []
-            for fabric in range(total):
-                rgba = await api(session, "fabric_api.GetFabricPBRMaterialBaseColor", colorway, fabric, 0)
-                row.append(struct.pack("<4f", *rgba).hex())
-            colors.append(row)
-        return {"patterns": scene["patterns"], "colorways": scene["colorways"],
-                "current_colorway": scene["current_colorway"], "materials": total,
-                "fabric_rgba_f32": colors, "fabrics": fabrics, "seams": seams,
-                "catalog_names": [await api(session, "fabric_api.GetFabricName", slot) for slot in range(total)]}
+    api = composed_archive_api
+    read = read_composed_archive
 
     cases = (("empty", None, garment, [1, 1], [0, 0], 1, 0),
              ("empty_project", None, project, [1, 1], [0, 0], 1, 0),
@@ -6361,14 +6378,8 @@ async def compare_live_composed_zpac():
                         report["checked"][f"{backend}_written_{reader}_read"] = True
                         if reader == "rust":
                             snapshot = archives[backend].with_suffix(".clorust")
-                            await json_result(target, "scene_save", {"path": str(snapshot)})
-                            saved = json.loads(snapshot.read_text())["scene"]
-                            simulation = saved["simulation"]
-                            assert simulation["source"] == "native_saved_pose"
-                            meshes = [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
-                                      for mesh in simulation["meshes"]]
-                            assert len(meshes) == len(after)
-                            archive = (meshes, saved["native_seam_groups"])
+                            archive = await snapshot_composed_archive(target, snapshot)
+                            assert len(archive[0]) == len(after)
                             if expected_archive is None:
                                 expected_archive = archive
                             assert archive == expected_archive, (label, backend, "stored meshes or seam endpoints differ")
@@ -6388,6 +6399,105 @@ async def compare_live_composed_zpac():
                       "result": "pass" if success else "fail"}, ensure_ascii=False))
     if not success:
         raise SystemExit(1)
+
+
+async def compare_live_composed_zprj():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    unused = os.environ["CLO_COMPOSED_UNUSED_FABRIC"]
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    avatar_project = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    assert all(path.is_file() for path in (garment, project, avatar_project, Path(unused)))
+    assert root.is_dir()
+    cases = (("sparse", project, [0, 0, 2, 2], [0, 0, 1, 1]),
+             ("avatar", avatar_project, [1, 0, 2, 2], [1, 0, 2, 2]))
+    if selected := os.environ.get("CLO_COMPOSED_ZPRJ_CASE"):
+        cases = tuple(case for case in cases if case[0] == selected)
+        assert cases, f"unknown composed ZPRJ case {selected}"
+
+    async def identity(session, path, avatars):
+        scene = await json_result(session, "scene_info")
+        assert (scene["project_path"], scene["avatars"]) == (str(path), avatars)
+
+    def embedded_avatars(path):
+        with zipfile.ZipFile(path) as archive:
+            return [hashlib.sha256(archive.read(name)).hexdigest()
+                    for name in archive.namelist() if name.lower().endswith(".avt")]
+
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for label, initial, live_indices, saved_indices in cases:
+                outputs = {}
+                for backend, session in backends:
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    await json_result(session, "scene_open", {"path": str(initial)})
+                    avatars = (await json_result(session, "scene_info"))["avatars"]
+                    assert bool(avatars) == (label == "avatar")
+                    if label == "sparse":
+                        assert await composed_archive_api(session, "fabric_api.AddFabric", unused) == 1
+                    await json_result(session, "scene_open", {"path": str(garment), "mode": "append"})
+                    before = await read_composed_archive(session)
+                    assert [panel["fabric_index"] for panel in before["patterns"]] == live_indices
+                    target = root / f"{label}-{backend}.zprj"
+                    copy = target.with_suffix(".zpac")
+                    assert not target.exists() and not copy.exists()
+                    await json_result(session, "scene_export", {"path": str(copy)})
+                    await identity(session, initial, avatars)
+                    for _ in range(2):
+                        assert await json_result(session, "scene_save", {"path": str(target), "thumbnail": False}) == {"path": str(target)}
+                        await identity(session, target, avatars)
+                        assert await read_composed_archive(session) == before
+                    assert target.is_file()
+                    if backend == "rust":
+                        assert embedded_avatars(target) == embedded_avatars(initial)
+
+                    name = f"{root.name}-{label}-{backend}"
+                    checkpoint = await json_result(session, "checkpoint_save", {"name": name})
+                    checkpoint_file = Path(checkpoint["path"])
+                    assert checkpoint["name"] == name and checkpoint_file.suffix == ".zprj" and checkpoint_file.is_file()
+                    await identity(session, checkpoint_file, avatars)
+                    assert await read_composed_archive(session) == before
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    assert await json_result(session, "checkpoint_restore", {"name": name}) == {
+                        "ok": True, "path": str(checkpoint_file), "pattern_count": 4, "avatars": avatars}
+                    await identity(session, checkpoint_file, avatars)
+                    outputs[backend] = (target, checkpoint_file, avatars)
+
+                expected = None
+                geometry = None
+                cross_opens = 0
+                for backend, (target, checkpoint_file, avatars) in outputs.items():
+                    for file in (target, checkpoint_file):
+                        for reader, session in backends:
+                            await json_result(session, "scene_clear", {"keep_avatar": False})
+                            await json_result(session, "scene_open", {"path": str(file)})
+                            await identity(session, file, avatars)
+                            reopened = await read_composed_archive(session)
+                            assert [panel["fabric_index"] for panel in reopened["patterns"]] == saved_indices
+                            assert reopened["materials"] == len(set(saved_indices))
+                            if expected is None:
+                                expected = reopened
+                            assert reopened == expected, (label, backend, reader, reopened, expected)
+                            cross_opens += 1
+                            if reader == "rust":
+                                pose = await snapshot_composed_archive(session, root / "composed-readback.clorust")
+                                assert len(pose[0]) == len(saved_indices)
+                                if geometry is None:
+                                    geometry = pose
+                                assert pose == geometry, (label, backend, reader, file)
+                reports.append({"case": label, "reads": cross_opens, "avatars": avatars,
+                                "saved_indices": saved_indices, "checkpoints": True,
+                                "geometry_and_seam_endpoints": "exact"})
+        finally:
+            if original not in ("NULL", "", None):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "scene_save", "format": "ZPRJ", "cases": reports, "result": "pass"}))
 
 
 async def verify_native_append():
@@ -6825,6 +6935,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-composed-zpac", action="store_const", dest="comparison",
                              const=compare_live_composed_zpac,
                              help="compare exported composed ZPACs and reopen them with both backends")
+    comparisons.add_argument("--compare-live-composed-zprj", action="store_const", dest="comparison",
+                             const=compare_live_composed_zprj,
+                             help="verify composed project saves and checkpoints with both backends")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")

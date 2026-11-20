@@ -263,13 +263,17 @@ pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Ve
     let path = source["path"].as_str().map(std::path::PathBuf::from);
     let project = source["project"] == true;
     let old_stamp = source["stamp"].clone();
+    let archived_avatars = source["avatars"].clone();
     let empty_append = source["empty_append"] == true;
+    let compacted_fabrics = source["compacted_fabrics"] == true;
     if let Some(path) = path {
         remember(state, &path, project);
         if state[SOURCE].is_object() {
             state[SOURCE]["stamp"] = old_stamp;
+            state[SOURCE]["avatars"] = archived_avatars;
             state[SOURCE]["appended"] = json!(parts);
             state[SOURCE]["empty_append"] = json!(empty_append);
+            state[SOURCE]["compacted_fabrics"] = json!(compacted_fabrics);
         }
     }
 }
@@ -663,18 +667,30 @@ pub(in crate::compat_scene) fn save(
 ) -> Result<(), String> {
     let output = encode(state, project, thumbnail)?;
     write(path, &output)?;
-    if state[SOURCE]["empty_append"] == true {
+    if project {
+        remember_project_save(state, path);
+    } else if state[SOURCE]["empty_append"] == true {
         remember_empty_append(state, path, false);
-    } else if !super::super::array(&state[SOURCE], "appended").is_empty() {
+    } else if state[SOURCE]["project"] != true {
         // The saved garment has compact indices. Keep the original parts
         // when their indices differ from the live fabric catalog.
-        if super::super::assigned_fabric_count(state) == super::super::array(state, "fabrics").len() {
+        let appended = !super::super::array(&state[SOURCE], "appended").is_empty();
+        if !appended || super::super::assigned_fabric_count(state) == super::super::array(state, "fabrics").len() {
             remember(state, path, false);
         }
-    } else if (state[SOURCE]["project"] == true) == project {
-        remember(state, path, project);
     }
     Ok(())
+}
+
+pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &Path) {
+    let source = &state[SOURCE];
+    let compacted = source["compacted_fabrics"] == true
+        || !super::super::array(source, "appended").is_empty()
+            && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
+    remember(state, path, true);
+    if compacted && state[SOURCE].is_object() {
+        state[SOURCE]["compacted_fabrics"] = json!(true);
+    }
 }
 
 pub(in crate::compat_scene) fn encode(
@@ -687,7 +703,7 @@ pub(in crate::compat_scene) fn encode(
     let parts = super::super::array(source, "appended");
     let source_project = source["project"] == true;
     let empty_append = source["empty_append"] == true;
-    if project && (empty_append || !parts.is_empty()) {
+    if project && empty_append {
         return Err("saving this appended scene as .zprj is unsupported; use .zpac or .clorust".into());
     }
     if project && !source_project {
@@ -702,7 +718,7 @@ pub(in crate::compat_scene) fn encode(
     let texture_edits: Vec<ColorwayTextureEdit> = serde_json::from_value(source["colorway_textures"].clone())
         .map_err(|_| "invalid native colorway texture targets")?;
     let write_colorways = switched || !recolors.is_empty() || !texture_edits.is_empty();
-    let can_save_materials = if empty_append || !parts.is_empty() {
+    let can_save_materials = if empty_append || !parts.is_empty() || source["compacted_fabrics"] == true {
         !write_colorways && (!changed_material || only_unused_changed) && !has_material_edits(source)
     } else {
         !write_colorways && (!changed_material || only_unused_changed)

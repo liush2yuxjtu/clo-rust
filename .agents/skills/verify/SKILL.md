@@ -997,6 +997,17 @@ garment groups. Read the selected catalog row after adding a ZFAB and
 after appending. Export twice and check the live state retained its indices.
 Reopen each first output in both backends. Require compact assignments and
 the same two used materials, stored meshes and sewing endpoints.
+Run `python -m clo_mcp.smoke_compat --compare-live-composed-zprj` with these
+same fixtures plus `CLO_SCENE_OPEN_AVATAR_PROJECT`, with
+`CLO_RUST_CHECKPOINT_DIR` unset and a fresh `CLO_MCP_STATE`.
+The two cases start from a loaded native ZPRJ, with a sparse fabric catalog
+or with an embedded avatar. After append, export ZPAC and then save the
+ZPRJ twice at the same path. Require transition to the new active project,
+unchanged in-session assignments, and a native checkpoint which restores
+by name. Reopen both writers' saves and checkpoints in both backends.
+Compare catalog, colorways, sewing endpoints and stored meshes. For the
+avatar case, compare the embedded AVT bytes in the Rust output against
+the receiving ZPRJ and confirm that official CLO can reopen it.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.

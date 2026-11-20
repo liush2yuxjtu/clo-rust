@@ -816,7 +816,7 @@ pub(super) fn checkpoint_save(args: &Value, state: &mut Value) -> Reply {
     let result = save_checkpoint(state, args["name"].as_str().filter(|name| !name.is_empty()), "cp")?;
     let path = Path::new(string(&result, "path")?);
     if extension(path) == "zprj" {
-        formats::native_save::remember(state, path, true);
+        formats::native_save::remember_project_save(state, path);
         state["runtime"]["gltf_export_active_only"] = json!(true);
     }
     set_project(state, path);
