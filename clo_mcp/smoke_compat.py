@@ -1245,6 +1245,66 @@ async def verify_tiered_build_relaxation():
                       "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
 
 
+async def verify_scene_clear_state():
+    with TemporaryDirectory(prefix="clo-clear-scene-") as directory:
+        path = str(Path(directory) / "before-clear.clorust")
+        async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": "", "CLO_RUST_AVATAR_DIR": ""}) as rust:
+            await inspect_contract(rust)
+            await successful(rust, "garment_build", {"spec": {"garment": "top"}, "simulate_steps": 1, "snapshots": False})
+            added = await json_result(rust, "fabric_apply", {"fabric": "denim", "patterns": ["0"]})
+            index = added["fabric"]["index"]
+            assert index > 0
+            await json_result(rust, "scene_save", {"path": path})
+            before = await json_result(rust, "scene_info")
+            history = await json_result(rust, "garment_last_spec")
+            assert before["pattern_count"] > 0 and before["avatars"] and before["seam_groups"] > 0 and history["spec"]
+
+            async def observed_action():
+                snapshot = await json_result(rust, "clo_ui_state")
+                return {"snapshot": snapshot["snapshot"], "action": "press", "element": 2}
+
+            async def stale(action):
+                result = await rust.call_tool("clo_ui_action", action)
+                assert result.isError and any("Stale UI snapshot" in block.text for block in result.content)
+
+            async def current_fabric():
+                reply = await json_result(rust, "clo_api_call", {"name": "fabric_api.GetCurrentFabricIndex"})
+                return reply["value"]
+
+            action = await observed_action()
+            keep = await json_result(rust, "scene_clear", {"keep_avatar": True})
+            assert keep == {"deleted": before["pattern_count"], "pattern_count": 0}
+            await stale(action)
+            kept = await json_result(rust, "scene_info")
+            assert kept["pattern_count"] == kept["seam_groups"] == 0
+            for key in ("project_path", "avatars", "fabrics", "colorways"):
+                assert kept[key] == before[key], key
+            assert await current_fabric() == index
+
+            await json_result(rust, "scene_open", {"path": path})
+            action = await observed_action()
+            assert await json_result(rust, "scene_clear", {"keep_avatar": False}) == {"pattern_count": 0, "avatars": []}
+            await stale(action)
+            empty = await json_result(rust, "scene_info")
+            assert empty["project"] == "Untitled" and empty["project_path"] == ""
+            assert empty["pattern_count"] == empty["seam_groups"] == empty["fabric_count"] == 0
+            assert empty["avatars"] == [] and await current_fabric() == 0
+            assert await json_result(rust, "garment_last_spec") == history
+
+            await json_result(rust, "scene_open", {"path": path})
+            action = await observed_action()
+            fresh = await json_result(rust, "clo_api_call", {"name": "utility_api.NewProject"})
+            assert fresh["value"] is None
+            await stale(action)
+            assert await json_result(rust, "scene_info") == empty and await current_fabric() == 0
+            assert await json_result(rust, "garment_last_spec") == history
+            assert (await json_result(rust, "clo_status"))["bridge"] == "up"
+    print(json.dumps({"tools": ["scene_clear", "scene_info", "clo_ui_action", "clo_api_call", "garment_last_spec"],
+                      "case": "scene clear boundaries", "deleted_patterns": keep["deleted"],
+                      "keep_avatar_preserved_assets": True, "new_project_reset_fabric": True,
+                      "old_snapshots_rejected": 3, "session_history_preserved": True}))
+
+
 async def verify_garment_session_history():
     empty = {"spec": None, "pieces": []}
     options = {"simulate_steps": 0, "snapshots": False}
@@ -3193,6 +3253,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-build-snapshot-workflow", action="store_const", dest="comparison",
                              const=verify_build_snapshot_workflow,
                              help="verify build snapshot order, view aliases, images and error readback")
+    comparisons.add_argument("--verify-scene-clear-state", action="store_const", dest="comparison",
+                             const=verify_scene_clear_state,
+                             help="verify clear and fresh project state, stale UI and session history")
     comparisons.add_argument("--verify-garment-session-history", action="store_const", dest="comparison",
                              const=verify_garment_session_history,
                              help="verify last build history across scene changes and isolated MCP clients")
@@ -3276,7 +3339,7 @@ if __name__ == "__main__":
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
-                                verify_garment_session_history, verify_build_checkpoints,
+                                verify_scene_clear_state, verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_elastic_parameter_updates, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,

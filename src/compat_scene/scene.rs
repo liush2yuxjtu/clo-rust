@@ -66,18 +66,20 @@ fn clear_garment(state: &mut Value) {
 }
 
 pub(super) fn clear(args: &Value, state: &mut Value) -> Reply {
-    let count = array(state, "patterns").len();
-    clear_garment(state);
-    if flag(args, "keep_avatar", true) {
+    let keep_avatar = flag(args, "keep_avatar", true);
+    crate::compat_runtime::clear_scene_ui(state, keep_avatar);
+    if keep_avatar {
+        let count = array(state, "patterns").len();
+        clear_garment(state);
         return Ok(json!({"deleted": count, "pattern_count": 0}));
     }
-    state["avatar"] = Value::Null;
-    state["additional_avatars"] = json!([]);
-    state["fabrics"] = json!([]);
-    state["colorways"] = json!(["Colorway 1"]);
-    state["current_colorway"] = json!(0);
-    state["project_path"] = json!("");
-    state["project"] = json!("Untitled");
+    replace_scene(state, json!({
+        "patterns": [], "seams": [], "native_seam_groups": [],
+        "avatar": null, "additional_avatars": [], "fabrics": [], "imported_meshes": [],
+        "simulation": null, "garment_spec": null, "garment_piece_names": [],
+        "colorways": ["Colorway 1"], "current_colorway": 0,
+        "project": "Untitled", "project_path": ""
+    }));
     Ok(json!({"pattern_count": 0, "avatars": []}))
 }
 

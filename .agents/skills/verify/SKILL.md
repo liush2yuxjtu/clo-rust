@@ -398,6 +398,11 @@ ordering with local timestamps, state restore and malformed, missing or invalid 
 also preserves native re-export. Reopen the exported project and confirm the
 patterns and avatars. Check that changing or removing the source archive
 still allows checkpoint restore and stops native re-export.
+Run `--verify-scene-clear-state` to compare the two Rust clear modes and
+the scripting `NewProject` call. Check that keeping the avatar also keeps
+materials and project identity, a fresh project resets material selection,
+and stale UI observations are rejected in both modes. Read back the last
+garment spec to confirm its session lifetime.
 Run `--verify-build-checkpoints` for the `auto_before_build_` path in build
 and rebuild responses. Empty or appended scenes skip automatic checkpoints.
 Read back the pre-replacement geometry, materials, and saved simulation.

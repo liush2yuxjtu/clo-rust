@@ -13,7 +13,7 @@
 | `clo_api_search` | Rust 搜索和目录交叉验证，纸样查询摘要匹配原生目录留档 | 现场双端名称、文档搜索及限制参数 |
 | `clo_api_doc` | Rust 短名和限定名返回同一记录 | 双端名称歧义、缺失项和重载 |
 | `scene_info` | 历史 Carlita 对照匹配 10 个工程字段 | 新版本相同工程、空场景和切换 |
-| `scene_clear` | Rust 清场与历史保留用例 | 双端 `keep_avatar`、材料和缝组读回 |
+| `scene_clear` | Rust 两种清场、材料索引重置和旧 UI 快照拒绝，最后规格仍可读 | 双端 `keep_avatar`、材料和缝组读回 |
 | `scene_open` | Rust 原生、DXF、JSON 追加及保存姿态；本轮检查点同源读回 | 双端替换、追加、损坏文件和场景读回 |
 | `scene_save` | Rust 工程保存重开 | 双端原生工程回开、缩略图和失败路径 |
 | `scene_export` | Rust 导出实调及 FBX 回开 | 双端格式、单位、材质、色组和人台 |

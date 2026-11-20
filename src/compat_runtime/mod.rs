@@ -94,6 +94,23 @@ pub(crate) fn is_up(state: &Value) -> bool {
     state["runtime"]["bridge"].as_bool().unwrap_or(true)
 }
 
+pub(crate) fn clear_scene_ui(state: &mut Value, keep_view: bool) {
+    let Some(ui) = state
+        .get_mut("runtime")
+        .and_then(|runtime| runtime.get_mut("ui"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if keep_view {
+        for key in ["observed", "selected_keys", "primary_key", "focus", "menu_x", "menu_y"] {
+            ui.remove(key);
+        }
+    } else {
+        ui.retain(|key, _| key == "sequence");
+    }
+}
+
 fn status(state: &Value) -> Value {
     let mut status = json!({
         "backend": "clo-rust",
