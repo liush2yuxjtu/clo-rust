@@ -1,4 +1,4 @@
-//! Sew archived outline intervals without snapping their endpoints to vertices.
+//! Sew archived outline and internal intervals without snapping endpoints to vertices.
 
 use super::{array, distance2, length, Mesh, Point};
 use serde_json::Value;
@@ -14,11 +14,18 @@ struct Span<'a> {
 
 impl<'a> Span<'a> {
     fn new(mesh: &'a Mesh, endpoint: &Value, offset: usize) -> Option<Self> {
-        if endpoint["shape_depth"] != 1 || endpoint["start_line"] != endpoint["end_line"] {
+        if endpoint["start_line"] != endpoint["end_line"] {
             return None;
         }
         let side = usize::try_from(endpoint["start_line"].as_u64()?).ok()?;
-        let vertices = mesh.sides.get(side)?;
+        let vertices = match endpoint["shape_depth"].as_u64()? {
+            1 => mesh.sides.get(side)?,
+            2 => {
+                let shape = usize::try_from(endpoint["shape_index"].as_u64()?).ok()?;
+                mesh.inner_seam_paths.get(shape)?.get(side)?
+            }
+            _ => return None,
+        };
         let start = endpoint["start_ratio"].as_f64()?;
         let end = endpoint["end_ratio"].as_f64()?;
         if !(0.0..=1.0).contains(&start)
@@ -140,6 +147,7 @@ impl Stitch {
 pub(super) struct NativeStitches {
     pub constraints: Vec<Stitch>,
     pub groups: usize,
+    pub inner_groups: usize,
     pub unsupported: usize,
 }
 
@@ -193,6 +201,11 @@ pub(super) fn build(
         }
         if result.constraints.len() > start {
             result.groups += 1;
+            result.inner_groups += usize::from(segments.iter().any(|pair| {
+                array(pair)
+                    .iter()
+                    .any(|endpoint| endpoint["shape_depth"] == 2)
+            }));
         } else {
             result.unsupported += 1;
         }

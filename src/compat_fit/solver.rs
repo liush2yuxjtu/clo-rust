@@ -3,9 +3,10 @@ mod shirring;
 
 use super::{array, assets, boolean, number, string};
 use crate::collision::MeshCollider;
+use crate::compat_scene::InnerSeamPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 type Point = [f64; 3];
 type Point2 = [f64; 2];
@@ -121,6 +122,8 @@ pub struct Mesh {
     shirring_edges: Vec<Edge>,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_shirring_base: Option<NativeShirringBase>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inner_seam_paths: InnerSeamPaths,
 }
 
 fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
@@ -374,6 +377,7 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         frozen: boolean(pattern, "freeze", false),
         shirring_edges,
         native_shirring_base: None,
+        inner_seam_paths: Vec::new(),
     })
 }
 
@@ -549,6 +553,8 @@ fn transfer_shirred_pose(
 struct SavedPoseMesh {
     #[serde(default)]
     native_shirring_base: Option<NativeShirringBase>,
+    #[serde(default)]
+    inner_seam_paths: InnerSeamPaths,
     positions: Vec<Point>,
     triangles: Vec<[usize; 3]>,
     texcoords: Vec<Point2>,
@@ -590,6 +596,22 @@ fn native_mesh(
     let mut points = saved.texcoords[..base_vertices].to_vec();
     let mut triangles = base_triangles.to_vec();
     let mut sides = native_sides(pattern, &points, &triangles)?;
+    let mut inner_seam_paths = saved.inner_seam_paths;
+    if !inner_seam_paths.is_empty() {
+        let edges: HashSet<_> = base_triangles
+            .iter()
+            .flat_map(|&[a, b, c]| [edge(a, b), edge(b, c), edge(c, a)])
+            .collect();
+        for path in inner_seam_paths.iter_mut().flatten() {
+            if path.len() < 2
+                || path
+                    .windows(2)
+                    .any(|pair| !edges.contains(&edge(pair[0], pair[1])))
+            {
+                path.clear();
+            }
+        }
+    }
     let velocities = if saved_pose {
         vec![[0.0; 3]; vertex_count]
     } else {
@@ -634,6 +656,7 @@ fn native_mesh(
         frozen: boolean(pattern, "freeze", false),
         shirring_edges,
         native_shirring_base,
+        inner_seam_paths,
     })
 }
 
@@ -1387,7 +1410,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
-        "elastic_constraint_count":elastic.len(),"shirring_refined_vertices":shirring_vertices,"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
+        "elastic_constraint_count":elastic.len(),"shirring_refined_vertices":shirring_vertices,"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_inner_seam_groups":native_stitches.inner_groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {
@@ -1502,6 +1525,39 @@ mod native_pose_tests {
             "simulation":{"source":NATIVE_SAVED_POSE,"meshes":[mesh(1,147.0),mesh(2,152.0)],"steps":120},
             "native_seam_groups":[{"id":31,"restored":false}]
         })
+    }
+
+    #[test]
+    fn native_inner_seam_uses_saved_mesh_edges() {
+        let mut state = fixture();
+        state["seams"] = json!([]);
+        for mesh in state["simulation"]["meshes"].as_array_mut().unwrap() {
+            mesh["inner_seam_paths"] = json!([[[7, 3]]]);
+        }
+        let endpoint = |id| {
+            json!({
+                "pattern_id":id, "shape_depth":2, "shape_index":0, "start_line":0, "end_line":0,
+                "start_ratio":0, "end_ratio":1, "direction":true
+            })
+        };
+        state["native_seam_groups"] = json!([{
+            "id":31,"active":true,"restored":false,"segments":[[endpoint(1),endpoint(2)]]
+        }]);
+        let first = simulate(&json!({"steps":0}), &mut state).unwrap();
+        assert_eq!(first["native_inner_seam_groups"], 1);
+        assert_eq!(first["max_stitch_gap_mm"], 5.0);
+        assert_eq!(
+            state["simulation"]["meshes"][0]["inner_seam_paths"],
+            json!([[[7, 3]]])
+        );
+
+        let mut invalid = state.clone();
+        invalid["simulation"]["meshes"][0]["inner_seam_paths"] = json!([[[7, 6]]]);
+        let control = simulate(&json!({"steps":1}), &mut invalid).unwrap();
+        assert_eq!(control["native_unsupported_seam_groups"], 1);
+        let solved = simulate(&json!({"steps":1}), &mut state).unwrap();
+        assert_eq!(solved["native_unsupported_seam_groups"], 0);
+        assert!(solved["max_stitch_gap_mm"].as_f64().unwrap() < 5.0);
     }
 
     #[test]

@@ -83,6 +83,14 @@ indices in `pattern_list(detail=True)`. Test with a saved project that contains
 non-panel objects. This case verifies query results. Solver coverage requires
 separate drape and seam-gap evidence.
 
+For saved internal seams, run `cargo test --locked native_inner_seam_uses_saved_mesh_edges`.
+Open a native fixture with internal seams over MCP and use `simulate` without a
+new particle distance. Save and reopen the resulting `.clorust` scene, then
+compare `native_inner_seam_groups` and independently measure corresponding
+points along the recorded mesh paths. For a negative control, remove
+`inner_seam_paths` from the saved meshes in a disposable copy and repeat from
+the same starting pose.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.

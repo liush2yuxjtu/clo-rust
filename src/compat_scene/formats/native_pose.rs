@@ -1,6 +1,7 @@
 //! Read a stored native drape without claiming that it was solved by the Rust engine.
 
 use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
+use crate::compat_scene::InnerSeamPaths;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
@@ -85,6 +86,36 @@ impl<'a> Fields<'a> {
     }
 }
 
+fn inner_seam_paths(record: &Fields<'_>) -> Result<InnerSeamPaths, String> {
+    let shapes = map_list(record.get(b"listInnerShape", LIST_TYPE)?, LIMIT)?;
+    Ok(shapes
+        .iter()
+        .map(|shape| {
+            let lines = shape
+                .get(b"listLine", LIST_TYPE)
+                .and_then(|data| map_list(data, LIMIT));
+            lines
+                .unwrap_or_default()
+                .iter()
+                .map(|line| {
+                    let points = line
+                        .get(b"listMeshPoint", LIST_TYPE)
+                        .and_then(|data| map_list(data, 65_536));
+                    points
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|point| {
+                            let index = point.get(b"uiMeshPointIndex", UINT_TYPE).ok()?;
+                            Some(u32::from_le_bytes(index.try_into().ok()?) as usize)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect())
+}
+
 fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String> {
     let geometry = record.get(b"mapFabricShape2D", MAP_TYPE)?;
     let positions3d = record.get(b"baPosition3D", BYTE_TYPE)?;
@@ -133,9 +164,13 @@ fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String
             })
         })
         .collect();
-    Ok(
-        json!({"id": id, "name": name, "positions": positions, "triangles": indices, "texcoords": texcoords}),
-    )
+    let mut pose = json!({"id": id, "name": name, "positions": positions, "triangles": indices, "texcoords": texcoords});
+    if let Ok(paths) = inner_seam_paths(record) {
+        if paths.iter().flatten().any(|path| path.len() > 1) {
+            pose["inner_seam_paths"] = json!(paths);
+        }
+    }
+    Ok(pose)
 }
 
 pub(super) fn encoded_list(records: &[Cow<'_, [u8]>]) -> Result<Vec<u8>, String> {

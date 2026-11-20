@@ -5,6 +5,7 @@ mod scene;
 
 use serde_json::{json, Value};
 
+pub(crate) type InnerSeamPaths = Vec<Vec<Vec<usize>>>;
 pub(crate) use scene::avatar_names;
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 
