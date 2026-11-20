@@ -10,7 +10,7 @@ pub(crate) type InnerSeamRest = Vec<Vec<Vec<[f64; 2]>>>;
 pub(crate) use patterns::internal_strokes;
 pub(crate) use annotations::seam_group_names;
 pub(crate) use formats::write as write_artifact;
-pub(crate) use scene::{avatar_names, checkpoint_before_build, clear_patterns};
+pub(crate) use scene::{assigned_fabric_count, avatar_names, checkpoint_before_build, clear_patterns, default_fabric, empty_project};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 
 pub(crate) fn fabric_for_colorway<'a>(

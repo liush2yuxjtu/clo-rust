@@ -53,10 +53,7 @@ fn execute(line: &str, state: &mut Value) -> Result<Value, String> {
 }
 
 pub fn run() -> Result<(), String> {
-    let mut state = json!({
-        "patterns": [], "seams": [], "avatar": null, "fabrics": [],
-        "garment_spec": null, "simulation": null
-    });
+    let mut state = crate::compat_scene::empty_project();
     let stdout = io::stdout();
     let mut output = stdout.lock();
     for line in io::stdin().lock().lines() {

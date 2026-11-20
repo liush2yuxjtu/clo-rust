@@ -1,6 +1,6 @@
 use super::{array, flag, formats, invalidate_geometry, patterns, string, use_partial_pose, vec_mut, Reply};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCENE_FORMAT: &str = "clo-rust.scene.v1";
 const PATTERN_FORMAT: &str = "clo-rust.pattern.v1";
+const DEFAULT_COLORWAY: &str = "Default Colorway";
+
+pub(crate) fn default_fabric() -> Value {
+    json!({
+        "index": 0, "name": "FABRIC 1", "stiffness": 0.9,
+        "color": [0.85, 0.85, 0.85], "texture_maps": {},
+        "info": {"source": "rust_default"}
+    })
+}
+
+pub(crate) fn empty_project() -> Value {
+    json!({
+        "patterns": [], "seams": [], "native_seam_groups": [],
+        "avatar": null, "additional_avatars": [], "fabrics": [default_fabric()], "imported_meshes": [],
+        "simulation": null, "garment_spec": null, "garment_piece_names": [],
+        "colorways": [DEFAULT_COLORWAY], "current_colorway": 0
+    })
+}
 
 pub(crate) fn avatar_names(state: &Value) -> Vec<&str> {
     let avatar = &state["avatar"];
@@ -25,24 +43,44 @@ fn open_reply(state: &Value, path: &Path) -> Value {
     json!({"ok": true, "path": path, "pattern_count": array(state, "patterns").len(), "avatars": avatar_names(state)})
 }
 
+pub(crate) fn assigned_fabric_count(state: &Value) -> usize {
+    let assignments = array(state, "patterns")
+        .iter()
+        .map(|pattern| pattern["fabric_index"].as_u64().unwrap_or(0))
+        .collect::<HashSet<_>>();
+    array(state, "fabrics")
+        .iter()
+        .enumerate()
+        .filter(|(position, fabric)| assignments.contains(&fabric["index"].as_u64().unwrap_or(*position as u64)))
+        .count()
+}
+
 pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
     let pieces: Vec<_> = array(state, "patterns")
         .iter()
         .enumerate()
-        .map(|(i, p)| patterns::summary(p, i))
+        .map(|(i, pattern)| {
+            let mut piece = patterns::summary(pattern, i);
+            if piece["arrangement"] == "" {
+                piece["arrangement"] = json!("Arrangement Point");
+            }
+            piece
+        })
         .collect();
+    // The bridge enumerates the first N fabric indices, where N is the used count.
     let fabrics: Vec<_> = array(state, "fabrics")
         .iter()
+        .take(assigned_fabric_count(state))
         .enumerate()
         .map(|(i, f)| json!({"index": f["index"].as_u64().unwrap_or(i as u64), "name": f["name"]}))
         .collect();
     Ok(json!({
-        "project": state["project"].as_str().unwrap_or("Untitled"),
-        "project_path": state["project_path"].as_str().unwrap_or(""),
+        "project": state["project"].as_str().unwrap_or("NULL"),
+        "project_path": state["project_path"].as_str().unwrap_or("NULL"),
         "clo_version": format!("clo-rust/{}", env!("CARGO_PKG_VERSION")),
         "pattern_count": pieces.len(), "patterns": pieces,
         "avatars": avatar_names(state), "fabric_count": fabrics.len(), "fabrics": fabrics,
-        "colorways": state.get("colorways").cloned().unwrap_or_else(|| json!(["Colorway 1"])),
+        "colorways": state.get("colorways").cloned().unwrap_or_else(|| json!([DEFAULT_COLORWAY])),
         "current_colorway": state["current_colorway"].as_u64().unwrap_or(0),
         "seam_groups": super::annotations::count(state),
         "temp_folder": env::temp_dir(),
@@ -73,13 +111,7 @@ pub(super) fn clear(args: &Value, state: &mut Value) -> Reply {
         clear_garment(state);
         return Ok(json!({"deleted": count, "pattern_count": 0}));
     }
-    replace_scene(state, json!({
-        "patterns": [], "seams": [], "native_seam_groups": [],
-        "avatar": null, "additional_avatars": [], "fabrics": [], "imported_meshes": [],
-        "simulation": null, "garment_spec": null, "garment_piece_names": [],
-        "colorways": ["Colorway 1"], "current_colorway": 0,
-        "project": "Untitled", "project_path": ""
-    }));
+    replace_scene(state, empty_project());
     Ok(json!({"pattern_count": 0, "avatars": []}))
 }
 
@@ -504,16 +536,23 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
             let mut loaded = formats::clo_native::read(path, is_project)?;
-            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             let prior_count = array(state, "patterns").len();
             let fresh_append = append
                 && prior_count == 0
                 && state["avatar"].is_null()
                 && state["garment_spec"].is_null()
-                && ["additional_avatars", "fabrics", "imported_meshes", "seams", "native_seam_groups"]
+                && ["additional_avatars", "imported_meshes", "seams", "native_seam_groups"]
                     .iter()
                     .all(|key| array(state, key).is_empty())
-                && state["colorways"].as_array().is_none_or(|names| names == &[json!("Colorway 1")]);
+                && match array(state, "fabrics") {
+                    [] => true,
+                    [fabric] => fabric == &default_fabric(),
+                    _ => false,
+                }
+                && state["colorways"].as_array().is_none_or(|names| {
+                    names == &[json!(DEFAULT_COLORWAY)] || names == &[json!("Colorway 1")]
+                });
+            let fabrics = prepare_archived_fabrics(state, &mut loaded, append && !fresh_append)?;
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if append && !fresh_append {
@@ -522,7 +561,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 state["fabrics"] = json!(fabrics);
                 state["colorways"] = loaded["colorways"]
                     .as_array()
-                    .map_or_else(|| json!(["Colorway 1"]), |names| json!(names));
+                    .map_or_else(|| json!([DEFAULT_COLORWAY]), |names| json!(names));
                 state["current_colorway"] = json!(loaded["current_colorway"].as_u64().unwrap_or(0));
             }
             let mut avatar_error = None;

@@ -1545,6 +1545,97 @@ async def verify_scene_open_ui_state():
                       "failed_load_preserves_snapshot": True, "native_restore_clears_selection": native}))
 
 
+async def compare_native_scene_clear():
+    fixture = Path(os.environ["CLO_SCENE_CLEAR_FIXTURE"]).resolve(strict=True)
+    args = {"mode": "replace"}
+    reports = {}
+    asset_fields = {"asset_folder", "temp_folder", "clo_version"}
+
+    def normalized(scene):
+        assert scene["clo_version"] and scene["temp_folder"]
+        result = {key: value for key, value in scene.items() if key not in asset_fields}
+        if result["project_path"] != "NULL":
+            assert Path(result["project_path"]).resolve() == fixture
+            result["project_path"] = fixture.name
+        return result
+
+    async def count(session, used):
+        request = {"name": "fabric_api.GetFabricCount", "args": [used]}
+        return (await json_result(session, "clo_api_call", request))["value"]
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        status = await json_result(clo, "clo_status")
+        assert status["bridge"] == "up", status
+        opened = await json_result(clo, "scene_info")
+        native_path = opened["project_path"]
+        assert Path(native_path).resolve() == fixture, "open the saved fixture in the official session first"
+        sessions = ((clo, native_path), (rust, str(fixture)))
+        sparse = None
+        try:
+            for case, options in (("default", {}), ("keep", {"keep_avatar": True}), ("new", {"keep_avatar": False})):
+                outcomes = []
+                for session, path in sessions:
+                    await json_result(session, "scene_open", {**args, "path": path})
+                    before = await json_result(session, "scene_info")
+                    raw = await count(session, False)
+                    assert before["pattern_count"] > 0 and raw > 0
+                    invalid = await session.call_tool("scene_clear", {"keep_avatar": []})
+                    assert invalid.isError and await json_result(session, "scene_info") == before
+                    result = await json_result(session, "scene_clear", options)
+                    after = await json_result(session, "scene_info")
+                    assert all(after[key] == before[key] for key in asset_fields)
+                    assert after["pattern_count"] == after["seam_groups"] == after["fabric_count"] == 0
+                    assert after["patterns"] == after["fabrics"] == [] and await count(session, True) == 0
+                    raw_after = await count(session, False)
+                    if case == "new":
+                        assert result == {"pattern_count": 0, "avatars": []}
+                        assert after["project"] == after["project_path"] == "NULL"
+                        assert after["colorways"] == ["Default Colorway"] and after["current_colorway"] == 0
+                        assert after["avatars"] == [] and raw_after == 1
+                    else:
+                        assert result == {"deleted": before["pattern_count"], "pattern_count": 0}
+                        stable = ("project", "project_path", "avatars", "colorways", "current_colorway")
+                        assert all(after[key] == before[key] for key in stable)
+                        assert raw_after == raw
+                        assert await json_result(session, "scene_clear", options) == {"deleted": 0, "pattern_count": 0}
+                        assert await json_result(session, "scene_info") == after
+                    recreated = None
+                    if case != "default":
+                        await json_result(session, "pattern_create", {
+                            "name": "After Clear", "points": [[0, 0], [25, 0], [0, 25]],
+                        })
+                        recreated = normalized(await json_result(session, "scene_info"))
+                        assert recreated["fabric_count"] == 1 and recreated["patterns"][0]["fabric_index"] == 0
+                        assert await count(session, False) == raw_after
+                    outcomes.append((normalized(before), result, normalized(after), raw_after, recreated))
+                assert outcomes[0] == outcomes[1], (case, outcomes)
+                before, result, after, raw_after, recreated = outcomes[1]
+                reports[case] = {
+                    "before": before, "clear": result, "after": after,
+                    "stored_fabrics_after": raw_after, "invalid_input_preserved_scene": True,
+                    "next_pattern": recreated,
+                }
+            if (len(opened["patterns"]) == 2
+                    and [piece["fabric_index"] for piece in opened["patterns"]] == [1, 0]):
+                readback = []
+                for session, path in sessions:
+                    await json_result(session, "scene_open", {**args, "path": path})
+                    await json_result(session, "pattern_delete", {"patterns": [opened["patterns"][1]["name"]]})
+                    after = normalized(await json_result(session, "scene_info"))
+                    assert after["patterns"][0]["fabric_index"] == 1 and after["fabric_count"] == 1
+                    assert after["fabrics"] == opened["fabrics"][:1] and await count(session, False) == 2
+                    readback.append(after)
+                assert readback[0] == readback[1]
+                sparse = readback[1]
+        finally:
+            await json_result(clo, "scene_open", {**args, "path": native_path})
+    with fixture.open("rb") as file:
+        digest = hashlib.file_digest(file, "sha256").hexdigest()
+    print(json.dumps({"fixture": fixture.name, "sha256": digest,
+                      "clo_version": opened["clo_version"], "cases": reports, "sparse_fabric": sparse},
+                     ensure_ascii=False))
+
+
 async def verify_scene_clear_state():
     with TemporaryDirectory(prefix="clo-clear-scene-") as directory:
         path = str(Path(directory) / "before-clear.clorust")
@@ -1556,6 +1647,8 @@ async def verify_scene_clear_state():
             assert index > 0
             await json_result(rust, "scene_save", {"path": path})
             before = await json_result(rust, "scene_info")
+            total_fabrics = {"name": "fabric_api.GetFabricCount", "args": [False]}
+            stored_count = (await json_result(rust, "clo_api_call", total_fabrics))["value"]
             history = await json_result(rust, "garment_last_spec")
             assert before["pattern_count"] > 0 and before["avatars"] and before["seam_groups"] > 0 and history["spec"]
 
@@ -1577,8 +1670,10 @@ async def verify_scene_clear_state():
             await stale(action)
             kept = await json_result(rust, "scene_info")
             assert kept["pattern_count"] == kept["seam_groups"] == 0
-            for key in ("project_path", "avatars", "fabrics", "colorways"):
+            for key in ("project_path", "avatars", "colorways"):
                 assert kept[key] == before[key], key
+            assert kept["fabrics"] == []
+            assert (await json_result(rust, "clo_api_call", total_fabrics))["value"] == stored_count
             assert await current_fabric() == index
 
             await json_result(rust, "scene_open", {"path": path})
@@ -1586,7 +1681,8 @@ async def verify_scene_clear_state():
             assert await json_result(rust, "scene_clear", {"keep_avatar": False}) == {"pattern_count": 0, "avatars": []}
             await stale(action)
             empty = await json_result(rust, "scene_info")
-            assert empty["project"] == "Untitled" and empty["project_path"] == ""
+            assert empty["project"] == empty["project_path"] == "NULL"
+            assert empty["colorways"] == ["Default Colorway"] and empty["current_colorway"] == 0
             assert empty["pattern_count"] == empty["seam_groups"] == empty["fabric_count"] == 0
             assert empty["avatars"] == [] and await current_fabric() == 0
             assert await json_result(rust, "garment_last_spec") == history
@@ -2462,7 +2558,9 @@ async def verify_portable_append_keeps_drape():
             original, destination = await make_scene("first", "mia", "red", 3, 50)
             imported, source = await make_scene("second", "luka", "navy", 2, 80)
             left, right = destination["scene"], source["scene"]
-            right["fabrics"][0]["index"] = 12
+            source_index = right["patterns"][0]["fabric_index"]
+            source_material = next(fabric for fabric in right["fabrics"] if fabric["index"] == source_index)
+            source_material["index"] = 12
             for record in right["patterns"] + right["simulation"]["meshes"]:
                 record["fabric_index"] = 12
             imported.write_text(json.dumps(source))
@@ -2476,9 +2574,11 @@ async def verify_portable_append_keeps_drape():
             assert len(set(panel_ids)) == 4
             assert combined["seams"][0] == left["seams"][0]
             assert [combined["seams"][1][key] for key in ("pattern_a", "pattern_b")] == panel_ids[2:]
-            assert combined["fabrics"][0] == left["fabrics"][0]
-            new_fabric = combined["fabrics"][1]
-            assert new_fabric["color"] == [0.1, 0.16, 0.42] and new_fabric["index"] != left["fabrics"][0]["index"]
+            assert combined["fabrics"][:len(left["fabrics"])] == left["fabrics"]
+            remapped_index = combined["patterns"][2]["fabric_index"]
+            new_fabric = next(fabric for fabric in combined["fabrics"] if fabric["index"] == remapped_index)
+            assert new_fabric["color"] == [0.1, 0.16, 0.42]
+            assert remapped_index not in {fabric["index"] for fabric in left["fabrics"]}
             assert all(p["fabric_index"] == new_fabric["index"] for p in combined["patterns"][2:])
             expected = left["simulation"]["meshes"] + [
                 mesh | {"id": panel, "fabric_index": new_fabric["index"]}
@@ -2571,7 +2671,7 @@ async def verify_new_panels_keep_drape():
             _, partial = await save("arrangement-failed")
             assert partial["patterns"][:-1] == continued["patterns"]
             assert partial["patterns"][-1]["name"] == "Unarranged"
-            assert partial["patterns"][-1]["arrangement"] == ""
+            assert partial["patterns"][-1]["arrangement"] == "Arrangement Point"
             assert partial["simulation"] == continued["simulation"] | {"source": "mixed_saved_pose"}
 
             native_count = None
@@ -4774,6 +4874,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-scene-open-ui-state", action="store_const", dest="comparison",
                              const=verify_scene_open_ui_state,
                              help="verify UI token and selection readback across scene changes")
+    comparisons.add_argument("--compare-native-scene-clear", action="store_const", dest="comparison",
+                             const=compare_native_scene_clear,
+                             help="compare cleared garment and empty project state on both backends")
     comparisons.add_argument("--verify-scene-clear-state", action="store_const", dest="comparison",
                              const=verify_scene_clear_state,
                              help="verify clear and fresh project state, stale UI and session history")

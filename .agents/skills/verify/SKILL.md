@@ -775,6 +775,17 @@ avatars and fabrics, seam group count, colorway names, active colorway index
 and the shared asset path. It checks that each backend reports its own version
 and temp path. Use additional fixtures to verify multiple avatars and colorways.
 
+For a disposable saved ZPRJ with fabric and seams, open it on the dedicated
+official bridge and run `CLO_SCENE_CLEAR_FIXTURE=/path/to/fixture.zprj python -m
+clo_mcp.smoke_compat --compare-native-scene-clear`. Repeat with a project
+containing an avatar. The test restores the saved starting scene after the
+checks. On separate hosts, map the official path to the byte-identical
+local fixture as seen by the verifier. Record its SHA-256. Compare scene
+fields, the clear reply, rejection without mutation, and a repeated clear.
+Compare the stored fabric count via `GetFabricCount(False)` separately from
+the count used by the scene summary. Confirm the default fabric on the
+first new pattern after clearing.
+
 Use `--compare-saved-arrangements` with the same saved project and a loaded
 avatar. Compare the scene's avatar names, the arrangement count and every name
 in order. Compare the full `GetArrangementList` records, including offsets,

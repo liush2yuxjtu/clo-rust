@@ -1292,11 +1292,7 @@ pub(super) fn apply_material(
 fn register_material(state: &mut Value, mut material: Value, preserve_default: bool) -> Result<u64, String> {
     let fabrics = array_mut(state, "fabrics");
     if fabrics.is_empty() && preserve_default {
-        fabrics.push(json!({
-            "index": 0, "name": "Fabric 1", "stiffness": 0.9,
-            "color": [0.85, 0.85, 0.85], "texture_maps": {},
-            "info": {"source": "rust_default"}
-        }));
+        fabrics.push(crate::compat_scene::default_fabric());
     }
     let index = fabrics
         .iter()

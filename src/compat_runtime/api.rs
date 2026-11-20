@@ -137,7 +137,7 @@ const FUNCTIONS: &[Entry] = functions![
     ),
     (
         "fabric_api.GetFabricCount",
-        "(colorway=False)",
+        "(colorway=True)",
         "Get the number of fabrics."
     ),
     (
@@ -1273,7 +1273,11 @@ pub(super) fn invoke(
             domain("__clo_fabric_add", &json!({"fabric":arg[0]}), state)
         }
         "fabric_api.GetCurrentFabricIndex" => Ok(json!(current_fabric(state))),
-        "fabric_api.GetFabricCount" => Ok(json!(fabrics.len())),
+        "fabric_api.GetFabricCount" => Ok(json!(if arg[0] == false {
+            fabrics.len()
+        } else {
+            crate::compat_scene::assigned_fabric_count(state)
+        })),
         "fabric_api.GetFabricInformation" | "fabric_api.GetFabricName" => {
             let fabric = &fabrics[index(&arg[0], fabrics.len(), "fabric")?];
             let key = if name == "fabric_api.GetFabricName" { "name" } else { "info" };
