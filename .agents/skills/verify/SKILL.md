@@ -27,7 +27,9 @@ For MCP changes, install `clo_mcp/requirements.txt` in a Python 3.11+ virtual en
 
 Run `--verify-fabric-texture-clear` to clear a single map with an empty image
 path. Check that the other maps persist through a portable save, the cleared base
-is absent in GLB, and invalid fabric and map identifiers leave the scene intact.
+is absent in GLB, and errors leave existing maps intact. With two fabrics, verify
+that an unknown map or unreadable image leaves the valid target selected.
+An invalid fabric index keeps the previously selected fabric.
 Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
 base and normal maps to also check native archive reopen and preservation of the
 other maps. A live CLO reopen is a separate comparison.

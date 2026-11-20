@@ -412,10 +412,26 @@ async def verify_fabric_texture_clear():
             for _ in range(2):
                 await texture(index, "base")
                 assert await maps(index) == {"normal": str(image)}
-            for patch in ({"map": "unknown"}, {"fabric_index": 9001}):
+            other = (await json_result(rust, "clo_api_call", {
+                "name": "fabric_api.AddFabric", "args": ["denim"],
+            }))["value"]
+            assert other != index
+            for patch, expected_current in (
+                ({"map": "unknown"}, index),
+                ({"image_path": str(root / "missing.png")}, index),
+                ({"fabric_index": 9001}, other),
+            ):
+                await json_result(rust, "clo_api_call", {
+                    "name": "fabric_api.SetCurrentFabricIndex", "args": [other],
+                })
                 assert (await rust.call_tool("fabric_set_texture", {
                     "fabric_index": index, "image_path": "", "map": "normal", **patch,
                 })).isError
+                listing = await json_result(rust, "fabric_list")
+                assert listing["current"] == expected_current, patch
+                assert await maps(index) == {"normal": str(image)}
+                assert await maps(other) == {}
+            await texture(index, "base")
             assert await maps(index) == {"normal": str(image)}
             portable = root / "cleared.clorust"
             await json_result(rust, "scene_save", {"path": str(portable)})
@@ -447,7 +463,8 @@ async def verify_fabric_texture_clear():
                 native = {"suffix": path.suffix, "unchanged_maps": sorted(remaining)}
     print(json.dumps({"tool": "fabric_set_texture", "case": "clear only the selected map",
                       "portable_reopen": True, "glb_without_base_texture": True,
-                      "native_reopen": native, "api_clear": True, "invalid_clear_preserves_maps": True}))
+                      "native_reopen": native, "api_clear": True, "invalid_clear_preserves_maps": True,
+                      "valid_target_selected_before_error": True, "invalid_index_kept_selection": True}))
 
 
 async def smoke_rust():

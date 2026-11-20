@@ -1331,6 +1331,8 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
     let index = args["fabric_index"]
         .as_u64()
         .ok_or("fabric_index must be a nonnegative integer")?;
+    find_fabric_mut(state, index)?;
+    state["current_fabric"] = json!(index);
     let kind = string(args, "map", "base");
     let input = string(args, "image_path", "");
     if input.is_empty() {
@@ -1349,7 +1351,6 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
         update_material_texture(find_fabric_mut(state, index)?, kind, &path);
     }
     crate::compat_scene::mark_native_fabric_texture(state, index, kind, input.is_empty());
-    state["current_fabric"] = json!(index);
     Ok(json!({"ok":true}))
 }
 
