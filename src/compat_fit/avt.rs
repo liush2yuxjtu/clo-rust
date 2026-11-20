@@ -1,6 +1,7 @@
-//! Read static Y-up geometry and arrangement names from a native avatar archive.
+//! Read static Y-up geometry and arrangement points from a native avatar archive.
 
 use super::mesh_measure::{Region, RegionFace};
+use serde_json::{json, Value};
 use std::{ops::Range, path::Path};
 
 const HEADER: &[u8; 16] = b" AVT        CLO ";
@@ -20,7 +21,7 @@ pub(super) struct RestMesh {
     pub points: Vec<Point>,
     pub triangles: Vec<Triangle>,
     pub part_count: usize,
-    pub arrangements: Vec<String>,
+    pub arrangements: Vec<Value>,
     pub body_faces: Option<Range<usize>>,
     pub regions: Vec<RegionFace>,
     scene_name: Option<String>,
@@ -165,21 +166,30 @@ fn list(mut data: &[u8], max_items: usize) -> Result<Vec<&[u8]>, String> {
     Ok(entries)
 }
 
-fn arr_names(root: &[Field<'_>]) -> Result<Vec<String>, String> {
+fn arrangement_records(root: &[Field<'_>]) -> Result<Vec<Value>, String> {
     let Some(properties) = find(root, "listArr", LIST) else {
         return Ok(Vec::new());
     };
-    let mut names = Vec::new();
-    for record in list(properties, MAX_ARRANGEMENTS)? {
+    let mut arrangements = Vec::new();
+    for (index, record) in list(properties, MAX_ARRANGEMENTS)?.into_iter().enumerate() {
         let record = fields(record)?;
         let name = find(&record, "qsNameUTF8", BYTES).or_else(|| find(&record, "qsName", BYTES));
         if let Some(text) = name.and_then(|value| std::str::from_utf8(value).ok()) {
             if !text.is_empty() && text.len() <= 256 && !text.contains(char::is_control) {
-                names.push(text.to_owned());
+                let mut arrangement = json!({"ArrangementIndex":index.to_string(),"ArrangementName":text});
+                if find(&record, "enType", 4) == Some(&1i32.to_le_bytes()) {
+                    let values = ["fNormalizedArcLength", "fNormalizedHeight", "fOffset", "fAngle"].map(|key| {
+                        let raw = find(&record, key, 6)?.try_into().ok()?;
+                        let value = f32::from_le_bytes(raw);
+                        value.is_finite().then_some(value)
+                    });
+                    crate::compat_scene::append_curved_arrangement_fields(&mut arrangement, values);
+                }
+                arrangements.push(arrangement);
             }
         }
     }
-    Ok(names)
+    Ok(arrangements)
 }
 
 fn xyz(floats: &[u8]) -> Result<Point, String> {
@@ -252,7 +262,7 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         points: Vec::new(),
         triangles: Vec::new(),
         part_count: 0,
-        arrangements: arr_names(&root).unwrap_or_default(),
+        arrangements: arrangement_records(&root).unwrap_or_default(),
         body_faces: None,
         regions: Vec::new(),
         scene_name: find(&root, "qsNameUTF8", BYTES)

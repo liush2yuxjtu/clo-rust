@@ -13,6 +13,23 @@ pub(crate) use formats::write as write_artifact;
 pub(crate) use scene::{avatar_names, checkpoint_before_build, clear_patterns};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 
+pub(crate) fn append_curved_arrangement_fields(record: &mut Value, values: [Option<f32>; 4]) {
+    record["ArrangementType"] = json!("Curved");
+    for ((field, scale, origin), value) in [
+        ("ArrangementOffsetX", 100.0, 50.0),
+        ("ArrangementOffsetY", 100.0, 50.0),
+        ("ArrangementOffsetZ", 0.5, 50.0),
+        ("ArrangementOrientation", 1.0, 180.0),
+    ].into_iter().zip(values) {
+        if let Some(value) = value {
+            let converted = value * scale + origin;
+            // CLO's arrangement strings round away archive float noise.
+            let rounded = format!("{converted:.5e}").parse::<f32>().unwrap_or(converted);
+            record[field] = json!(rounded.to_string());
+        }
+    }
+}
+
 pub(crate) fn read_native_archive_member(
     path: &std::path::Path,
     header: &[u8; 16],

@@ -286,6 +286,15 @@ fn arrangement<'a>(state: &'a Value, name: &str) -> Result<(usize, &'a Value), S
 }
 
 fn arrangement_details(state: &Value, name: &str) -> Value {
+    if let Some(record) = array(&state["avatar"], "arrangement_records").iter()
+        .find(|record| record["ArrangementName"] == name)
+    {
+        let mut details = record.clone();
+        if let Some(fields) = details.as_object_mut() {
+            fields.remove("ArrangementIndex");
+        }
+        return details;
+    }
     match arrangement(state, name) {
         Ok((_, choice)) if choice.is_object() => choice.clone(),
         Ok((_, _)) => json!({"ArrangementName": name}),
@@ -514,6 +523,7 @@ pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
         .remove("saved_arrangement");
     let id = state["patterns"][i]["id"].clone();
     discard_panel_pose(state, &id);
+    crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     Ok(json!({"index": i, "arrangement": details}))
 }
 

@@ -364,7 +364,7 @@ fn fabric_root() -> Option<PathBuf> {
 
 struct NativeAvatar {
     parts: usize,
-    arrangements: Vec<String>,
+    arrangements: Vec<Value>,
     body_faces: Option<Range<usize>>,
     regions: Vec<super::mesh_measure::RegionFace>,
 }
@@ -524,7 +524,11 @@ fn avatar_from_mesh(
         if arrangements.is_empty() {
             warnings.push("Native arrangement names are unavailable. Using built-in names.");
         } else {
-            avatar["arrangement_points"] = json!(arrangements);
+            avatar["arrangement_points"] = json!(arrangements
+                .iter()
+                .filter_map(|entry| entry["ArrangementName"].as_str())
+                .collect::<Vec<_>>());
+            avatar["arrangement_records"] = json!(arrangements);
         }
         avatar["warnings"] = json!(warnings);
     }

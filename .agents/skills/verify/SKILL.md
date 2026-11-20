@@ -541,7 +541,11 @@ and temp path. Use additional fixtures to verify multiple avatars and colorways.
 
 Use `--compare-saved-arrangements` with the same saved project and a loaded
 avatar. Compare the scene's avatar names, the arrangement count and every name
-in order. This case checks the names exposed by `arrangement_points`.
+in order. Compare the full `GetArrangementList` records, including offsets,
+orientation, and type. In Rust, set a point by name and by native index and
+verify the per-panel readback excludes the list index. To use captured
+reference rows, set `CLO_ARRANGEMENT_REFERENCE` to a JSON capture containing
+`scene.project_path` and `arrangements.points`.
 
 For mesh-based avatar girth estimates, run
 `cargo test --locked avatar_tape_excludes_disconnected_arms`. Compare the

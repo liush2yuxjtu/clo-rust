@@ -479,27 +479,9 @@ fn arrangement_settings(record: &Fields<'_>) -> Option<Value> {
     }
     let mut settings = json!({"ArrangementName": name});
     if record.get(b"enType", 4).ok() == Some(&1i32.to_le_bytes()) {
-        settings["ArrangementType"] = json!("Curved");
-        for (key, field, scale, origin) in [
-            (
-                b"fNormalizedArcLength".as_slice(),
-                "ArrangementOffsetX",
-                100.0,
-                50.0,
-            ),
-            (
-                b"fNormalizedHeight".as_slice(),
-                "ArrangementOffsetY",
-                100.0,
-                50.0,
-            ),
-            (b"fOffset".as_slice(), "ArrangementOffsetZ", 0.5, 50.0),
-            (b"fAngle".as_slice(), "ArrangementOrientation", 1.0, 180.0),
-        ] {
-            if let Some(value) = float(record, key) {
-                settings[field] = json!((value * scale + origin).to_string());
-            }
-        }
+        let values = [b"fNormalizedArcLength".as_slice(), b"fNormalizedHeight", b"fOffset", b"fAngle"]
+            .map(|key| float(record, key));
+        crate::compat_scene::append_curved_arrangement_fields(&mut settings, values);
     }
     Some(settings)
 }

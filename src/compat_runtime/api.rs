@@ -1334,6 +1334,9 @@ pub(super) fn invoke(
             serde_json::to_string(&data).map(Value::String).map_err(|error| error.to_string())
         }
         "pattern_api.GetArrangementList" => {
+            if let Some(records) = state["avatar"].get("arrangement_records") {
+                return Ok(records.clone());
+            }
             let result = domain("arrangement_points", &json!({}),state)?;
             Ok(json!(array(&result["names"]).iter().enumerate().map(|(index,name)| json!({"ArrangementIndex":index.to_string(),"ArrangementName":name})).collect::<Vec<_>>()))
         }
@@ -1350,9 +1353,17 @@ pub(super) fn invoke(
         }
         "pattern_api.MovePatternPoint" => domain("pattern_edit_points", &json!({"pattern":pattern_ref(&arg[0])?,"moves":[{"point":arg[1],"x":arg[2],"y":arg[3]}]}),state).map(|_| Value::Null),
         "pattern_api.SetArrangement" => {
-            let result = domain("arrangement_points", &json!({}),state)?;
-            let names = array(&result["names"]);
-            let point = if arg[1].is_string() {arg[1].clone()} else {names[index(&arg[1],names.len(),"arrangement point")?].clone()};
+            let point = if arg[1].is_string() {
+                arg[1].clone()
+            } else if let Some(records) = state["avatar"]["arrangement_records"].as_array() {
+                let id = arg[1].to_string();
+                records.iter().find(|row| row["ArrangementIndex"] == id)
+                    .ok_or_else(|| format!("Invalid arrangement point index: {}", arg[1]))?["ArrangementName"].clone()
+            } else {
+                let result = domain("arrangement_points", &json!({}),state)?;
+                let names = array(&result["names"]);
+                names[index(&arg[1],names.len(),"arrangement point")?].clone()
+            };
             domain("pattern_set_arrangement", &json!({"pattern":pattern_ref(&arg[0])?,"point":point}),state).map(|_| json!(true))
         }
         "pattern_api.CopyPatternPieceMove" => pattern_op(state,"copy",json!({"dx":arg[1],"dy":arg[2]})).map(|result| property(&result,"new_index")),

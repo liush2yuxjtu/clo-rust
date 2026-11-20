@@ -984,10 +984,18 @@ async def compare_saved_scene_info():
 
 
 async def compare_saved_arrangements():
-    async with open_backend("official") as session:
-        await inspect_contract(session)
-        scene = await json_result(session, "scene_info")
-        official = await json_result(session, "arrangement_points")
+    capture = os.environ.get("CLO_ARRANGEMENT_REFERENCE")
+    if capture:
+        reference = json.loads(Path(capture).read_text())
+        scene = reference["scene"]
+        reference_rows = reference["arrangements"]["points"]
+        official = {"count": len(reference_rows), "names": [point["ArrangementName"] for point in reference_rows]}
+    else:
+        async with open_backend("official") as session:
+            await inspect_contract(session)
+            scene = await json_result(session, "scene_info")
+            official = await json_result(session, "arrangement_points")
+            reference_rows = (await json_result(session, "clo_api_call", {"name": "pattern_api.GetArrangementList"}))["value"]
     assert scene["avatars"], "open a saved CLO project with an avatar"
     project = Path(scene["project_path"])
     assert project.is_file() and project.suffix.lower() == ".zprj", project
@@ -996,12 +1004,25 @@ async def compare_saved_arrangements():
         await json_result(session, "scene_open", {"path": str(project)})
         rust_scene = await json_result(session, "scene_info")
         rust = await json_result(session, "arrangement_points")
+        rust_rows = (await json_result(session, "clo_api_call", {"name": "pattern_api.GetArrangementList"}))["value"]
+        assert rust_rows == reference_rows, [(a, b) for a, b in zip(rust_rows, reference_rows) if a != b][:5]
+        point = reference_rows[0]
+        edit = await json_result(session, "pattern_set_arrangement", {"pattern": "0", "point": point["ArrangementName"]})
+        expected = {key: value for key, value in point.items() if key != "ArrangementIndex"}
+        assert edit == {"index": 0, "arrangement": expected}
+        await json_result(session, "clo_api_call", {"name": "pattern_api.SetArrangement",
+                                                   "args": [0, int(reference_rows[-1]["ArrangementIndex"])]})
+        info = await json_result(session, "pattern_info", {"pattern": "0"})
+        assert info["arrangement"] == {key: value for key, value in reference_rows[-1].items()
+                                        if key != "ArrangementIndex"}
     assert rust_scene["avatars"] == scene["avatars"]
     assert official["count"] == len(official["names"]) > 0
     assert rust == official, (official, rust)
     print(json.dumps({
         "tool": "arrangement_points", "project": scene["project"],
         "avatars": scene["avatars"], "ordered_names_matched": rust["count"],
+        "full_records_matched": len(rust_rows), "rust_name_and_index_readback": "pass",
+        "reference": "saved capture" if capture else "live CLO",
     }, ensure_ascii=False))
 
 
@@ -3961,6 +3982,7 @@ if __name__ == "__main__":
                                 verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape,
                                 verify_avatar_changes_keep_drape, verify_simulation_reset_quality,
                                 verify_simulation_remesh_keeps_pose)
-            and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
+            and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")
+            and not (args.comparison == compare_saved_arrangements and os.environ.get("CLO_ARRANGEMENT_REFERENCE"))):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
