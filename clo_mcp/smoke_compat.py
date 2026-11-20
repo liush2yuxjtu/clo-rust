@@ -323,8 +323,11 @@ async def compare_desktop_observation():
                 assert node["id"] not in depths and isinstance(node["actions"], list)
                 depths[node["id"]] = 0 if parent is None else depths[parent] + 1
             assert max(depths.values()) <= 2
-            assert any(window["bounds"]["Width"] > 0 and window["bounds"]["Height"] > 0
-                       for window in second["windows"])
+            assert isinstance(second["windows"], list)
+            windows = second["windows"]
+            if windows or backend == "rust":
+                assert any(window["bounds"]["Width"] > 0 and window["bounds"]["Height"] > 0
+                           for window in windows)
 
             stale = await session.call_tool("clo_ui_action", {
                 "snapshot": first["snapshot"], "action": "press", "element": root["id"],
@@ -333,17 +336,26 @@ async def compare_desktop_observation():
             for args in invalid_limits:
                 result = await session.call_tool("clo_ui_state", args)
                 assert result.isError, (backend, args, "invalid UI limits accepted")
-            png, = (await successful(session, "clo_ui_screenshot")).content
-            assert png.type == "image" and png.mimeType == "image/png"
-            payload = base64.b64decode(png.data, validate=True)
-            assert payload[:8] == b"\x89PNG\r\n\x1a\n" and payload[12:16] == b"IHDR"
-            width, height = struct.unpack_from(">II", payload, 16)
-            assert width > 0 and height > 0
-            summary[backend] = {"nodes": len(second["nodes"]), "width": width, "height": height,
-                                "invalid_limits_rejected": len(invalid_limits), "stale_token_rejected": True}
+            result = await session.call_tool("clo_ui_screenshot", {})
+            observation = {"nodes": len(second["nodes"]), "invalid_limits_rejected": len(invalid_limits),
+                           "stale_token_rejected": True}
+            if backend == "official" and not windows and result.isError:
+                observation["screenshot"] = {"status": "BLOCKED", "reason": "no on-screen CLO window"}
+            else:
+                assert not result.isError, (backend, result.content)
+                png, = result.content
+                assert png.type == "image" and png.mimeType == "image/png"
+                payload = base64.b64decode(png.data, validate=True)
+                assert payload[:8] == b"\x89PNG\r\n\x1a\n" and payload[12:16] == b"IHDR"
+                width, height = struct.unpack_from(">II", payload, 16)
+                assert width > 0 and height > 0
+                observation["screenshot"] = {"status": "PASS", "width": width, "height": height}
+            summary[backend] = observation
     print(json.dumps({"case": "desktop observation", "native_contract_count": len(expected),
                       "tools": ["clo_control_guide", "clo_ui_state", "clo_ui_action", "clo_ui_screenshot"],
                       "results": summary}))
+    if summary["official"]["screenshot"]["status"] == "BLOCKED":
+        raise SystemExit(2)
 
 
 async def compare_fabric_library():

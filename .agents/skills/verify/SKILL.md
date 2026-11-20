@@ -85,7 +85,7 @@ garment spec in both sessions.
 
 For the acceptance tally, create one row per pinned tool, with separate fields
 for contract, Rust call, and dual-backend behavior. Fill in these fields with
-the relevant evidence for each revision:
+the relevant evidence for each revision. See the [48-tool evidence record](../../../docs/verification/clo-mcp-acceptance.md) for the latest case inventory:
 
 | Tool | Contract | Rust call | Dual-backend behavior | Evidence |
 | --- | --- | --- | --- | --- |
@@ -111,6 +111,9 @@ exercises read-only queries and a rejected action, so it needs no live CLO Pytho
 bridge and does not activate the CLO window. Window titles, node counts, snapshot
 IDs, and image dimensions can differ by backend. Use a separate disposable scene
 case to verify effects of successful actions.
+If native state lists no on-screen CLO window and capture returns an MCP error,
+the script records the screenshot as `BLOCKED` and exits 2. It still records
+the other observations and Rust screenshot dimensions.
 
 For behavior verification, use the comparison recipes below and record one verdict
 per tool after reviewing all applicable cases. Use a disposable CLO scene for tests
