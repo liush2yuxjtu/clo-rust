@@ -405,8 +405,15 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
         mode => return Err(format!("unknown scene open mode {mode:?}")),
     };
     let ext = extension(path);
-    let reply = open_path(path, &ext, append, state)?;
-    if append || ext == "avt" {
+    let (reply, appended) = if matches!(ext.as_str(), "json" | "clorust") {
+        let appended = open_json(path, append, state)?;
+        (open_reply(state, path), appended)
+    } else {
+        // CLO's generic mesh and avatar importers do not receive a replace option.
+        let append = append || matches!(ext.as_str(), "obj" | "fbx" | "avt");
+        (open_path(path, &ext, append, state)?, append)
+    };
+    if appended {
         crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     } else {
         crate::compat_runtime::clear_scene_ui(state, true);
@@ -414,35 +421,35 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
     Ok(reply)
 }
 
+fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, String> {
+    let content = formats::read_json(path)?;
+    match content["format"].as_str() {
+        Some(SCENE_FORMAT) => {
+            let loaded = recognized_state(content)?;
+            if append {
+                append_portable(state, loaded)?;
+            } else {
+                replace_scene(state, loaded);
+                set_project(state, path);
+            }
+            return Ok(append);
+        }
+        Some(PATTERN_FORMAT) => merge(state, &content, true)?,
+        _ if content.get("pieces").is_some() => {
+            let converted = formats::pattern_native(&content)?;
+            merge(state, &converted, true)?;
+        }
+        _ => return Err("unknown JSON scene or pattern format".into()),
+    }
+    Ok(true)
+}
+
 fn open_path(path: &Path, ext: &str, append: bool, state: &mut Value) -> Reply {
     match ext {
-        "json" | "clorust" => {
-            let content = formats::read_json(path)?;
-            match content["format"].as_str() {
-                Some(SCENE_FORMAT) => {
-                    let loaded = recognized_state(content)?;
-                    if append {
-                        append_portable(state, loaded)?;
-                    } else {
-                        replace_scene(state, loaded);
-                        set_project(state, path);
-                    }
-                }
-                Some(PATTERN_FORMAT) => merge(state, &content, append)?,
-                _ if content.get("pieces").is_some() => {
-                    let converted = formats::pattern_native(&content)?;
-                    merge(state, &converted, append)?;
-                }
-                _ => return Err("unknown JSON scene or pattern format".into()),
-            }
-        }
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
         ext @ ("obj" | "fbx") => {
             let mut imported = formats::read_mesh_scene(path, ext)?;
             let fabrics = prepare_archived_fabrics(state, &mut imported, true)?;
-            if !append {
-                clear_garment(state);
-            }
             vec_mut(state, "fabrics").extend(fabrics);
             vec_mut(state, "imported_meshes").append(vec_mut(&mut imported, "imported_meshes"));
             let mut reply = open_reply(state, path);

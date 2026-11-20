@@ -365,7 +365,10 @@ zero steps preserve both sets of positions and velocities. The receiving
 scene's step count continues. An unknown saved mesh ID rejects the append.
 
 Run `--verify-interchange-append-keeps-drape` to export and append both a
-DXF layout and pattern JSON into simulated cloth. Reopen and initialize the
+DXF layout and pattern JSON into simulated cloth. Use explicit append for DXF
+and the default mode for pattern JSON. Open OBJ and FBX with the default mode
+and verify the imported triangles coexist with the original simulated garment.
+Reopen and initialize the
 new panels at zero steps while the original mesh and velocities stay
 identical. The JSON seam follows its remapped panels, and a malformed
 seam reference leaves the receiving scene intact.

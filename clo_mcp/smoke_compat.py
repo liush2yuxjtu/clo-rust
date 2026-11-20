@@ -1430,6 +1430,12 @@ async def verify_scene_open_ui_state():
             await json_result(rust, "scene_open", {"path": second, "mode": "append"})
             await stale(action)
             assert await selected() == ["First"]
+            interchange = root / "patterns.json"
+            await json_result(rust, "scene_export", {"path": str(interchange)})
+            action = await select("First")
+            await json_result(rust, "scene_open", {"path": str(interchange)})
+            await stale(action)
+            assert await selected() == ["First"]
             action = await select("First")
             await json_result(rust, "checkpoint_restore", {"name": "second-only"})
             await stale(action)
@@ -1456,6 +1462,7 @@ async def verify_scene_open_ui_state():
                 native = True
     print(json.dumps({"tools": ["scene_open", "checkpoint_restore", "clo_ui_action"],
                       "case": "scene changes invalidate old UI snapshots", "replace_clears_selection": True,
+                      "pattern_json_keeps_selection": True,
                       "append_keeps_selection": True, "portable_restore_clears_selection": True,
                       "failed_load_preserves_snapshot": True, "native_restore_clears_selection": native}))
 
@@ -2091,7 +2098,8 @@ async def verify_interchange_append_keeps_drape():
             await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
                                             "pattern_b": "Back", "line_b": 0})
             fixtures = [root / "panels.json", root / "panels.dxf"]
-            for path in fixtures:
+            mesh_fixtures = [root / "panels.obj", root / "panels.fbx"]
+            for path in fixtures + mesh_fixtures:
                 await json_result(rust, "scene_export", {"path": str(path)})
             await json_result(rust, "scene_clear", {"keep_avatar": False})
             await create("Existing", 320)
@@ -2100,7 +2108,10 @@ async def verify_interchange_append_keeps_drape():
             results = []
             for path in fixtures:
                 await json_result(rust, "scene_open", {"path": str(original_path)})
-                opened = await json_result(rust, "scene_open", {"path": str(path), "mode": "append"})
+                request = {"path": str(path)}
+                if path.suffix == ".dxf":
+                    request["mode"] = "append"
+                opened = await json_result(rust, "scene_open", request)
                 assert opened["pattern_count"] == 3
                 saved_path, combined = await save(f"combined-{path.suffix[1:]}")
                 assert combined["simulation"] == original["simulation"] | {"source": "mixed_saved_pose"}
@@ -2119,6 +2130,17 @@ async def verify_interchange_append_keeps_drape():
                 assert continued["simulation"]["steps"] == 3
                 results.append({"format": path.suffix, "appended_panels": 2, "seams": seams})
 
+            mesh_counts = {}
+            for path in mesh_fixtures:
+                await json_result(rust, "scene_open", {"path": str(original_path)})
+                opened = await json_result(rust, "scene_open", {"path": str(path)})
+                assert opened["pattern_count"] == 1
+                _, combined = await save(f"default-{path.suffix[1:]}")
+                assert combined["patterns"] == original["patterns"]
+                assert combined["simulation"] == original["simulation"]
+                assert sum(len(mesh["triangles"]) for mesh in combined["imported_meshes"]) == 2
+                mesh_counts[path.suffix] = len(combined["imported_meshes"])
+
             invalid = root / "invalid.json"
             broken = json.loads(fixtures[0].read_text())
             broken["seams"][0]["line_a"] = 99
@@ -2130,7 +2152,8 @@ async def verify_interchange_append_keeps_drape():
             assert after_error["simulation"] == original["simulation"]
             assert after_error["patterns"] == original["patterns"]
     print(json.dumps({"tools": ["scene_open", "scene_export", "simulate"],
-                      "case": "append 2D interchange patterns", "formats": results,
+                      "case": "append interchange patterns and meshes", "formats": results,
+                      "default_mesh_import_kept_drape": mesh_counts,
                       "original_mesh_and_velocities": "unchanged", "continued_step": 3,
                       "invalid_seam_is_atomic": True}))
 
