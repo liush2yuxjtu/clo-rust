@@ -5417,8 +5417,8 @@ async def compare_live_damaged_projects():
     header = original_bytes[:16]
     assert header == b" ZPRJ       CLO "
 
-    def project_envelope(member, data):
-        output = BytesIO(header)
+    def archive_member(signature, member, data):
+        output = BytesIO(signature)
         with zipfile.ZipFile(output, "a") as archive:
             archive.writestr(member, data)
         return output.getvalue()
@@ -5428,19 +5428,24 @@ async def compare_live_damaged_projects():
         "wrong-header": b" ZPRJ garbage data",
         "header-only": header,
         "no-zip-footer": original_bytes[:-22],
-        "no-garment": project_envelope("notes.txt", "no garment"),
-        "truncated-garment": project_envelope("garment.zpac", b" ZPAC       CLO "),
+        "no-garment": archive_member(header, "notes.txt", "no garment"),
+        "truncated-garment": archive_member(header, "garment.zpac", b" ZPAC       CLO "),
     }
-    avatar_cases = {"avatar-no-garment": False, "avatar-truncated-garment": True}
+    zpac_header = b" ZPAC       CLO "
+    avatar_cases = {
+        "avatar-no-garment": None,
+        "avatar-truncated-garment": zpac_header,
+        "avatar-unreadable-pac": archive_member(zpac_header, "garment.pac", b"invalid PAC"),
+    }
     with zipfile.ZipFile(avatar_project) as original:
-        for name, keep_garment in avatar_cases.items():
+        for name, garment in avatar_cases.items():
             output = BytesIO(header)
             with zipfile.ZipFile(output, "a") as archive:
                 for member in original.namelist():
                     if not member.lower().endswith(".zpac"):
                         archive.writestr(member, original.read(member))
-                    elif keep_garment:
-                        archive.writestr(member, b" ZPAC       CLO ")
+                    elif garment is not None:
+                        archive.writestr(member, garment)
             cases[name] = output.getvalue()
     for name, data in cases.items():
         with (directory / f"{name}.zprj").open("xb") as handle:
@@ -5510,6 +5515,114 @@ async def compare_live_damaged_projects():
                       "damaged_fixtures": list(cases), "append_preserved": True,
                       "replace_and_restore_cleared_garment": True, "missing_preserved": True,
                       "embedded_avatars_recovered": True,
+                      "fixture_sha256": hashlib.sha256(original_bytes).hexdigest()}))
+
+
+async def compare_live_damaged_garments():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    project = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    original_bytes = garment.read_bytes()
+    header = original_bytes[:16]
+    assert root.is_dir() and project.is_file() and header == b" ZPAC       CLO "
+
+    def envelope(member, content):
+        data = BytesIO(header)
+        with zipfile.ZipFile(data, "a") as archive:
+            archive.writestr(member, content)
+        return data.getvalue()
+
+    fixtures = {
+        "unsigned": b"not a garment",
+        "header-only": header,
+        "no-zip-footer": original_bytes[:-22],
+        "missing-pac": envelope("notes.txt", "no PAC"),
+        "unreadable-pac": envelope("garment.pac", b"invalid PAC"),
+    }
+    empty_payload = {"missing-pac", "unreadable-pac"}
+    for name, data in fixtures.items():
+        with (root / f"{name}.zpac").open("xb") as target:
+            target.write(data)
+
+    keys = ("project", "project_path", "pattern_count", "patterns", "seam_groups",
+            "avatars", "fabric_count", "fabrics", "colorways", "current_colorway")
+
+    async def readback(session):
+        scene = await json_result(session, "scene_info")
+        return ({key: scene[key] for key in keys},
+                await json_result(session, "pattern_list", {"detail": True}),
+                await json_result(session, "seams_list"))
+
+    async def saved_meshes(session, label):
+        path = root / f"{label}.clorust"
+        await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+        meshes = json.loads(path.read_text())["scene"]["simulation"]["meshes"]
+        assert meshes
+        return meshes
+
+    results = {}
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        try:
+            for backend, session in (("official", clo), ("rust", rust)):
+                rows = []
+                for name in (*fixtures, "missing"):
+                    path = str(root / f"{name}.zpac")
+                    for mode in ("append", "replace"):
+                        footerless = name == "no-zip-footer"
+                        if footerless:
+                            await json_result(session, "scene_open", {"path": str(project)})
+                            await json_result(session, "scene_open", {"path": str(garment), "mode": mode})
+                            intact = await readback(session)
+                            if backend == "rust":
+                                intact_meshes = await saved_meshes(session, f"intact-{mode}")
+                        await json_result(session, "scene_open", {"path": str(project)})
+                        before = await readback(session)
+                        assert before[0]["pattern_count"] == 2 and before[0]["avatars"]
+                        if backend == "official" and name in ("unsigned", "header-only"):
+                            print(f"Native ZPAC open {name} {mode}; acknowledge damaged-file dialog if shown.",
+                                  file=sys.stderr, flush=True)
+                        reply = await session.call_tool("scene_open", {"path": path, "mode": mode})
+                        after = await readback(session)
+                        result = None
+                        if name == "missing":
+                            assert reply.isError, (backend, name, mode)
+                        else:
+                            assert not reply.isError, (backend, name, mode, reply.content)
+                            result = reply.structuredContent or json.loads(reply.content[0].text)
+                            result = {key: result[key] for key in ("ok", "path", "pattern_count", "avatars")}
+                            assert result == {
+                                "ok": True, "path": path, "pattern_count": after[0]["pattern_count"],
+                                "avatars": before[0]["avatars"],
+                            }, (backend, name, mode, result)
+                        if name in empty_payload and mode == "replace":
+                            assert after[0] == {
+                                "project": "NULL", "project_path": "NULL", "pattern_count": 0,
+                                "patterns": [], "seam_groups": 0, "avatars": before[0]["avatars"],
+                                "fabric_count": 0, "fabrics": [], "colorways": ["Default Colorway"],
+                                "current_colorway": 0,
+                            }, (backend, name, after)
+                        elif footerless:
+                            assert after == intact, (backend, name, mode, after)
+                            if backend == "rust":
+                                assert await saved_meshes(session, f"footerless-{mode}") == intact_meshes
+                        else:
+                            assert after == before, (backend, name, mode, after)
+                        rows.append({"case": name, "mode": mode, "error": reply.isError,
+                                     "response": result, "scene": after})
+                results[backend] = rows
+        finally:
+            if original and Path(original).is_file():
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert results["official"] == results["rust"]
+    assert garment.read_bytes() == original_bytes
+    assert all((root / f"{name}.zpac").read_bytes() == data for name, data in fixtures.items())
+    print(json.dumps({"result": "pass", "comparisons": len(results["rust"]),
+                      "damaged_fixtures": list(fixtures), "avatar_preserved": True,
+                      "footerless_meshes_preserved": True,
                       "fixture_sha256": hashlib.sha256(original_bytes).hexdigest()}))
 
 
@@ -7910,6 +8023,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-checkpoint-roundtrip", action="store_const", dest="comparison",
                              const=compare_live_checkpoint_roundtrip,
                              help="save, overwrite, list and restore native checkpoints across both live backends")
+    comparisons.add_argument("--compare-live-damaged-garments", action="store_const", dest="comparison",
+                             const=compare_live_damaged_garments,
+                             help="compare damaged standalone ZPAC append and replacement")
     comparisons.add_argument("--compare-live-damaged-projects", action="store_const", dest="comparison",
                              const=compare_live_damaged_projects,
                              help="compare damaged ZPRJ append, replace and checkpoint restore")

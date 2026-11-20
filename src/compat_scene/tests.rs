@@ -125,12 +125,12 @@ fn seams_survive_pattern_index_changes_and_round_trip() {
     );
     assert_eq!(state, current);
 
-    let unsupported = root.0.join("native.zpac");
-    fs::write(&unsupported, b" ZPAC").unwrap();
-    let error = dispatch("scene_open", &json!({"path":unsupported}), &mut state)
-        .unwrap()
-        .unwrap_err();
-    assert!(error.contains("native file header"));
+    let unreadable = root.0.join("native.zpac");
+    fs::write(&unreadable, b" ZPAC").unwrap();
+    assert_eq!(
+        tool(&mut state, "scene_open", json!({"path":unreadable})),
+        json!({"ok":true,"path":unreadable,"pattern_count":2,"avatars":["Sample Avatar"]}),
+    );
     assert_eq!(state, current);
 
     assert_eq!(

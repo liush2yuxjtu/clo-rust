@@ -1,4 +1,5 @@
 use super::{array, flag, formats, invalidate_geometry, patterns, string, use_partial_pose, vec_mut, Reply};
+use formats::clo_native::SceneGarment;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -468,7 +469,10 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
     } else {
         // Standalone avatar and generic mesh imports keep the rest of the scene.
         let append = append || matches!(ext.as_str(), "obj" | "fbx" | "avt");
-        (open_path(path, &ext, append, load_avatar, state)?, append)
+        let Some(reply) = open_path(path, &ext, append, load_avatar, state)? else {
+            return Ok(open_reply(state, path));
+        };
+        (reply, append)
     };
     super::refresh_colorway_exports(state);
     if appended {
@@ -516,7 +520,7 @@ fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, Strin
     Ok(true)
 }
 
-fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mut Value) -> Reply {
+fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mut Value) -> Result<Option<Value>, String> {
     match ext {
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
         ext @ ("obj" | "fbx") => {
@@ -528,7 +532,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             if !array(&imported, "warnings").is_empty() {
                 reply["warnings"] = imported["warnings"].clone();
             }
-            return Ok(reply);
+            return Ok(Some(reply));
         }
         "glb" | "gltf" => {
             let meshes = formats::read_mesh(path)?;
@@ -539,10 +543,31 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
         }
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
-            let loaded = if is_project && load_avatar {
-                formats::clo_native::read_scene_project(path)?
+            let mut intact = true;
+            let loaded = if is_project {
+                if load_avatar {
+                    formats::clo_native::read_scene_project(path)?
+                } else {
+                    Some(formats::clo_native::read_project_garment(path)?)
+                }
             } else {
-                Some(formats::clo_native::read(path, is_project)?)
+                match formats::clo_native::read_scene_garment(path)? {
+                    SceneGarment::UnreadableArchive => return Ok(None),
+                    SceneGarment::Empty if append => return Ok(None),
+                    SceneGarment::Empty => {
+                        let mut empty = empty_project();
+                        empty["avatar"] = state["avatar"].take();
+                        empty["additional_avatars"] = state["additional_avatars"].take();
+                        empty["project"] = json!("NULL");
+                        empty["project_path"] = json!("NULL");
+                        replace_scene(state, empty);
+                        return Ok(Some(open_reply(state, path)));
+                    }
+                    SceneGarment::Loaded { garment, intact: source_intact } => {
+                        intact = source_intact;
+                        Some(garment)
+                    }
+                }
             };
             let Some(mut loaded) = loaded else {
                 // CLO can still import independently stored avatars when the
@@ -553,17 +578,17 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                     set_project(state, path);
                 }
                 import_project_avatar(state, avatars, append);
-                return Ok(open_reply(state, path));
+                return Ok(Some(open_reply(state, path)));
             };
             let prior_count = array(state, "patterns").len();
-            let composition = if append && prior_count != 0 {
+            let composition = if intact && append && prior_count != 0 {
                 formats::native_save::append_sources(state, path, is_project)
             } else {
                 None
             };
             let composition = composition.filter(|_| !array(state, "colorways").is_empty()
                 && !array(&loaded, "colorways").is_empty());
-            let empty_receiver = append
+            let empty_receiver = intact && append
                 && prior_count == 0
                 && array(state, "imported_meshes").is_empty()
                 && state["colorways"] == json!([DEFAULT_COLORWAY])
@@ -615,7 +640,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if load_avatar && !append {
+            if intact && load_avatar && !append {
                 formats::native_save::remember(state, path, is_project);
             } else if empty_receiver && !array(state, "patterns").is_empty() {
                 formats::native_save::remember_empty_append(state, path, is_project);
@@ -648,7 +673,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             }
             warnings.extend(array(&loaded, "native_texture_warnings").iter().filter_map(Value::as_str).map(str::to_owned));
             reply["warnings"] = json!(warnings);
-            return Ok(reply);
+            return Ok(Some(reply));
         }
         "avt" => {
             crate::compat_fit::dispatch(
@@ -661,11 +686,11 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             reply["partial"] = json!(true);
             reply["rest_geometry"] = state["avatar"]["rest_geometry"].clone();
             reply["warnings"] = state["avatar"]["warnings"].clone();
-            return Ok(reply);
+            return Ok(Some(reply));
         }
         ext => return Err(format!("unsupported import extension {ext:?}")),
     }
-    Ok(open_reply(state, path))
+    Ok(Some(open_reply(state, path)))
 }
 
 fn scene_document(state: &Value) -> Result<Value, String> {

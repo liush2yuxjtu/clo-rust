@@ -1009,7 +1009,7 @@ Run `--compare-live-damaged-projects` with a live bridge and a fresh
 `CLO_MCP_STATE` directory visible to both adapters. Set
 `CLO_SCENE_OPEN_PROJECT` to the shared two-panel ZPRJ and
 `CLO_SCENE_OPEN_AVATAR_PROJECT` to the shared project with an embedded avatar.
-Unset `CLO_RUST_CHECKPOINT_DIR`. Compare eight damaged ZPRJ fixtures and one
+Unset `CLO_RUST_CHECKPOINT_DIR`. Compare nine damaged ZPRJ fixtures and one
 missing file through append, replace, and checkpoint restore. For damaged
 files, append reports success and preserves the existing garment and path.
 Replace and restore report success, adopt the bad file's path, and clear
@@ -1017,6 +1017,21 @@ the garment. In both modes, independently stored avatars are imported.
 All three calls against the missing file return an error and preserve the
 scene. Check detailed panels and seams after every call, and verify that
 the input fixtures remain byte-identical.
+
+Run `--compare-live-damaged-garments` with a live official bridge, a fresh
+`CLO_MCP_STATE`, the shared `CLO_SCENE_OPEN_GARMENT` and
+`CLO_SCENE_OPEN_AVATAR_PROJECT` fixtures, and the CLO window visible on the test
+host. Acknowledge the native damaged-file dialog when the comparison prints its
+prompt. Compare append and replace for an unsigned file, a header-only archive,
+a missing ZIP footer, a missing PAC, a PAC with no readable garment records,
+and a missing file. An unreadable archive preserves the scene in both modes.
+An open ZIP with a missing or wholly unreadable PAC preserves the scene on
+append. On replace it clears the garment, resets the project path and colorway,
+and retains the avatar. A complete central directory with only the end record
+missing should recover the same garment as the intact ZPAC. Compare saved
+mesh positions, topology and UV after reopening it in Rust. Missing files
+return an MCP error and preserve the scene. Compare the response and the
+scene, panel and seam readback on both backends.
 
 Run `--compare-live-scene-open` with a live bridge and a fresh disposable
 `CLO_MCP_STATE`. Set `CLO_SCENE_OPEN_PROJECT` to `multi-colorway-colored.zprj`,

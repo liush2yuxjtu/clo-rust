@@ -456,7 +456,7 @@ fn outline_boundary(
     Ok((points, positions.len() / 8))
 }
 
-fn parse(pac: &[u8]) -> Result<Value, String> {
+fn parse(pac: &[u8]) -> Result<Option<Value>, String> {
     let mut patterns = Vec::new();
     let mut edge_counts = Vec::new();
     let (mut rest_vertices, mut triangles) = (0usize, 0usize);
@@ -482,6 +482,9 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
     } else {
         // Older partially decoded payloads can still contain ordered panel and mesh records.
         let tags = panel_tags(pac)?;
+        if tags.is_empty() {
+            return Ok(None);
+        }
         for (i, panel) in tags.iter().enumerate() {
             let end = tags.get(i + 1).map_or(pac.len(), |record| record.start);
             append_outline(panel.name, outline(&pac[panel.body..end]))?;
@@ -523,22 +526,142 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         "panel_settings_unavailable": panel_settings_error,
         "colorway_count": colorways.as_ref().map(|(names, _)| names.len())
     });
-    Ok(json!({
+    Ok(Some(json!({
         "patterns": patterns, "seams": sewing.constraints,
         "native_seam_groups": sewing.annotations, "native_import": native_import,
         "saved_pose": pose, "fabrics": fabrics,
         "colorways": colorways.as_ref().map(|(names, _)| names),
         "current_colorway": colorways.map(|(_, current)| current)
-    }))
+    })))
 }
 
-fn read_garment<R: Read + Seek>(mut archive: ZipArchive<R>) -> Result<Value, String> {
-    let pac = member(&mut archive, "pac")?;
-    let mut state = parse(&pac)?;
-    if let Err(error) = super::native_textures::hydrate(&pac, &mut archive, &mut state) {
+fn load_garment<R: Read + Seek>(mut archive: ZipArchive<R>, pac: &[u8]) -> Result<Option<Value>, String> {
+    let Some(mut state) = parse(pac)? else {
+        return Ok(None);
+    };
+    if let Err(error) = super::native_textures::hydrate(pac, &mut archive, &mut state) {
         state["native_texture_warnings"] = json!([error]);
     }
-    Ok(state)
+    Ok(Some(state))
+}
+
+fn scene_garment<R: Read + Seek>(mut archive: ZipArchive<R>) -> Result<Option<Value>, String> {
+    let Some((_, pac)) = optional_member(&mut archive, "pac")? else {
+        return Ok(None);
+    };
+    load_garment(archive, &pac)
+}
+
+pub(in crate::compat_scene) enum SceneGarment {
+    UnreadableArchive,
+    Empty,
+    Loaded { garment: Value, intact: bool },
+}
+
+fn locate_footerless_directory(data: &[u8]) -> Option<(usize, usize, usize)> {
+    const CENTRAL: &[u8] = b"PK\x01\x02";
+    const LOCAL: &[u8] = b"PK\x03\x04";
+    let u16_at = |bytes: &[u8], offset| {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize
+    };
+    let mut search = ZPAC.len();
+    while let Some(relative) = find(data.get(search..)?, CENTRAL) {
+        let central = search + relative;
+        let mut cursor = central;
+        let mut entries = Vec::new();
+        while entries.len() < MAX_MEMBERS {
+            let Some(header) = data.get(cursor..cursor + 46).filter(|header| header.starts_with(CENTRAL)) else {
+                break;
+            };
+            let name_end = cursor + 46 + u16_at(header, 28);
+            let end = name_end + u16_at(header, 30) + u16_at(header, 32);
+            let local_offset = u32::from_le_bytes(header[42..46].try_into().ok()?) as usize;
+            if end > data.len() || local_offset >= central || u16_at(header, 34) != 0 {
+                break;
+            }
+            entries.push((local_offset, &data[cursor + 46..name_end]));
+            cursor = end;
+        }
+        if cursor == data.len() && !entries.is_empty() {
+            let matches_base = |base: usize| {
+                entries.iter().all(|(relative, name)| {
+                    let start = base + relative;
+                    if start < ZPAC.len() {
+                        return false;
+                    }
+                    let Some(header) = data[..central].get(start..start + 30) else {
+                        return false;
+                    };
+                    header.starts_with(LOCAL)
+                        && u16_at(header, 26) == name.len()
+                        && data[..central].get(start + 30..start + 30 + name.len()) == Some(*name)
+                })
+            };
+            if matches_base(0) {
+                return Some((central, 0, entries.len()));
+            }
+            if entries.iter().any(|entry| entry.0 == 0) {
+                let base = data[ZPAC.len()..central].windows(LOCAL.len()).enumerate()
+                    .map(|(offset, bytes)| (offset + ZPAC.len(), bytes))
+                    .find_map(|(base, bytes)| (bytes == LOCAL && matches_base(base)).then_some(base));
+                if let Some(base) = base {
+                    return Some((central, base, entries.len()));
+                }
+            }
+        }
+        search = cursor.max(central + CENTRAL.len());
+    }
+    None
+}
+
+fn read_footerless_garment(path: &Path) -> Result<SceneGarment, String> {
+    let mut file = bounded_file(path)?;
+    let mut prefix = [0; 16];
+    match file.read_exact(&mut prefix) {
+        Ok(()) if &prefix == ZPAC => {}
+        Ok(()) => return Ok(SceneGarment::UnreadableArchive),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Ok(SceneGarment::UnreadableArchive);
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let mut data = prefix.to_vec();
+    file.take(ARCHIVE_LIMIT + 1 - prefix.len() as u64)
+        .read_to_end(&mut data)
+        .map_err(|error| error.to_string())?;
+    if data.len() as u64 > ARCHIVE_LIMIT {
+        return Err("native CLO file exceeds 512 MiB".into());
+    }
+    let Some((central, base, count)) = locate_footerless_directory(&data) else {
+        return Ok(SceneGarment::UnreadableArchive);
+    };
+    let size = (data.len() - central) as u32;
+    let offset = (central - base) as u32;
+    // The directory and its local file records are intact. Recreate the
+    // missing ZIP end record in memory and let the ZIP reader validate it.
+    data.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    data.extend_from_slice(&(count as u16).to_le_bytes());
+    data.extend_from_slice(&(count as u16).to_le_bytes());
+    data.extend_from_slice(&size.to_le_bytes());
+    data.extend_from_slice(&offset.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let Some(archive) = scene_archive(Cursor::new(data), ZPAC)? else {
+        return Ok(SceneGarment::UnreadableArchive);
+    };
+    Ok(match scene_garment(archive)? {
+        Some(garment) => SceneGarment::Loaded { garment, intact: false },
+        None => SceneGarment::Empty,
+    })
+}
+
+pub(in crate::compat_scene) fn read_scene_garment(path: &Path) -> Result<SceneGarment, String> {
+    let Some(archive) = scene_archive(bounded_file(path)?, ZPAC)? else {
+        return read_footerless_garment(path);
+    };
+    Ok(match scene_garment(archive)? {
+        Some(garment) => SceneGarment::Loaded { garment, intact: true },
+        None => SceneGarment::Empty,
+    })
 }
 
 pub(in crate::compat_scene) fn read_scene_project(path: &Path) -> Result<Option<Value>, String> {
@@ -548,17 +671,19 @@ pub(in crate::compat_scene) fn read_scene_project(path: &Path) -> Result<Option<
     let Some((_, garment)) = optional_member(&mut outer, "zpac")? else {
         return Ok(None);
     };
-    scene_archive(Cursor::new(garment), ZPAC)?.map(read_garment).transpose()
+    let Some(inner) = scene_archive(Cursor::new(garment), ZPAC)? else {
+        return Ok(None);
+    };
+    scene_garment(inner)
 }
 
-pub(in crate::compat_scene) fn read(path: &Path, project: bool) -> Result<Value, String> {
-    if project {
-        let mut outer = open_archive(bounded_file(path)?, ZPRJ)?;
-        let garment = member(&mut outer, "zpac")?;
-        read_garment(open_archive(Cursor::new(garment), ZPAC)?)
-    } else {
-        read_garment(open_archive(bounded_file(path)?, ZPAC)?)
-    }
+pub(in crate::compat_scene) fn read_project_garment(path: &Path) -> Result<Value, String> {
+    let mut outer = open_archive(bounded_file(path)?, ZPRJ)?;
+    let garment = member(&mut outer, "zpac")?;
+    let mut inner = open_archive(Cursor::new(garment), ZPAC)?;
+    let pac = member(&mut inner, "pac")?;
+    load_garment(inner, &pac)?
+        .ok_or_else(|| "native PAC has no recognized editable panel records".into())
 }
 
 #[cfg(test)]
@@ -638,12 +763,15 @@ mod tests {
     #[test]
     fn native_nested_archive_panel_geometry_and_bad_topology() {
         let garment = zip_member(ZPAC, "synthetic.pac", &sample());
+        let footer = garment.len() - 22;
+        assert_eq!(&garment[footer..footer + 4], b"PK\x05\x06");
+        assert_eq!(locate_footerless_directory(&garment[..footer]).unwrap().2, 1);
         let project = zip_member(ZPRJ, "synthetic.zpac", &garment);
         let mut outer = open_archive(Cursor::new(project), ZPRJ).unwrap();
         let mut inner =
             open_archive(Cursor::new(member(&mut outer, "zpac").unwrap()), ZPAC).unwrap();
         let payload = member(&mut inner, "pac").unwrap();
-        let extracted = parse(&payload).unwrap();
+        let extracted = parse(&payload).unwrap().unwrap();
         assert_eq!(extracted["patterns"][0]["name"], "Synthetic front");
         assert_eq!(
             extracted["patterns"][0]["points"],
