@@ -450,6 +450,13 @@ within 1e-6. Check CLO's linear glTF color factors for native materials.
 Repeat an export, then block the second GLB path with a directory and
 verify the earlier file and original scene are preserved.
 
+Run `--verify-native-colorway-textures` with Pillow installed in the verifier
+environment and `CLO_NATIVE_TEXTURE_EXPORTS` set to the Boat capture directory.
+It contains the textured ZPAC, both swatch PNGs, and each official export
+folder. After saving and reopening, compare both RGBA pixel grids and
+effective UV bounds for OBJ, FBX, GLB and glTF. Inspect external PNG naming
+for OBJ, FBX and glTF and verify that GLB embeds the images.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.

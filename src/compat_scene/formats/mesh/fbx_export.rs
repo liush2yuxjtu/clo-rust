@@ -411,6 +411,7 @@ fn write_scene<'a>(
     path: &Path,
     groups: impl IntoIterator<Item = &'a [Mesh]>,
     fabrics: &[Value],
+    named_sidecars: bool,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let fabrics: HashMap<_, _> = fabrics
@@ -452,7 +453,12 @@ fn write_scene<'a>(
                             .filter(|path| !path.is_empty())
                         {
                             let desaturated = map == "base" && fabric["base_texture_desaturated"] == true;
-                            let filename = write_texture(path, source, desaturated, files)?;
+                            let filename = if named_sidecars && map == "base" {
+                                let png = crate::compat_fit::png_for_export(Path::new(source), desaturated)?;
+                                super::write_colorway_image(path, fabric, &png)?
+                            } else {
+                                write_texture(path, source, desaturated, files)?
+                            };
                             let texture_id = id();
                             let video_id = id();
                             texture(texture_id, video_id, &filename, &mut objects);
@@ -493,6 +499,7 @@ pub(super) fn export(
     meshes: &[Mesh],
     garment_mesh_count: usize,
     fabrics: &[Value],
+    named_sidecars: bool,
 ) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
@@ -506,7 +513,7 @@ pub(super) fn export(
         .into_iter()
         .chain(avatars.chunks_exact(1));
     let mut files = Vec::new();
-    if let Err(error) = write_scene(path, groups, fabrics, &mut files) {
+    if let Err(error) = write_scene(path, groups, fabrics, named_sidecars, &mut files) {
         for file in files {
             let _ = fs::remove_file(file);
         }

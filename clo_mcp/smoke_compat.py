@@ -3878,6 +3878,85 @@ async def verify_native_colorway_exports():
                       "official_mesh_files_compared": bool(reference), "triangles_per_file": 68}))
 
 
+async def verify_native_colorway_textures():
+    from io import BytesIO
+    from PIL import Image
+
+    reference = Path(os.environ["CLO_NATIVE_TEXTURE_EXPORTS"]).resolve(strict=True)
+    fixture = reference / "multi-colorway-textured.zpac"
+    names = ("Original", "Alternate")
+
+    def gltf_texture(path):
+        model, binary = read_gltf_export(path)
+        primitive = model["meshes"][0]["primitives"][0]
+        material = model["materials"][primitive["material"]]["pbrMetallicRoughness"]["baseColorTexture"]
+        image = model["images"][model["textures"][material["index"]]["source"]]
+        if "uri" in image:
+            data = path.with_name(image["uri"]).read_bytes()
+        else:
+            view = model["bufferViews"][image["bufferView"]]
+            start = view.get("byteOffset", 0)
+            data = binary[start:start + view["byteLength"]]
+        accessor = model["accessors"][primitive["attributes"]["TEXCOORD_0"]]
+        view = model["bufferViews"][accessor["bufferView"]]
+        start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        coordinates = [struct.unpack_from("<2f", binary, start + i * view.get("byteStride", 8))
+                       for i in range(accessor["count"])]
+        scale = material["extensions"]["KHR_texture_transform"]["scale"]
+        return data, [[u * scale[0], v * scale[1]] for u, v in coordinates]
+
+    with TemporaryDirectory(prefix="clo-colorway-textures-") as directory:
+        root = Path(directory)
+
+        async def read_texture(path):
+            if path.suffix in (".glb", ".gltf"):
+                return gltf_texture(path)
+            if path.suffix == ".obj":
+                material = path.with_suffix(".mtl").read_text().splitlines()
+                name = next(line.split(maxsplit=1)[1] for line in material if line.startswith("map_Kd "))
+                data = path.with_name(Path(name).name).read_bytes()
+                uv = [[float(value) for value in line.split()[1:3]]
+                      for line in path.read_text().splitlines() if line.startswith("vt ")]
+                return data, uv
+            async with open_backend("rust") as reader:
+                await json_result(reader, "scene_open", {"path": str(path)})
+                saved = root / "fbx-readback.clorust"
+                await json_result(reader, "scene_save", {"path": str(saved), "thumbnail": False})
+                scene = json.loads(saved.read_text())["scene"]
+                data = Path(scene["fabrics"][0]["texture_maps"]["base"]).read_bytes()
+                return data, [uv for mesh in scene["imported_meshes"] for uv in mesh["texcoords"]]
+
+        def pixels(data):
+            with Image.open(BytesIO(data)) as image:
+                return image.size, image.convert("RGBA").tobytes()
+
+        def bounds(uv):
+            return tuple(pair(axis) for axis in zip(*uv) for pair in (min, max))
+
+        async with open_backend("rust") as session:
+            await json_result(session, "scene_open", {"path": str(fixture)})
+            saved = root / "swatches.clorust"
+            await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+            await json_result(session, "scene_open", {"path": str(saved)})
+            expected = [pixels((reference / f"colorway-base-{i}.png").read_bytes()) for i in range(2)]
+            assert expected[0] != expected[1]
+            checked = {}
+            for ext in ("obj", "fbx", "glb", "gltf"):
+                output = root / ext / f"swatches.{ext}"
+                await json_result(session, "scene_export", {"path": str(output), "colorways": True})
+                if ext != "glb":
+                    assert {p.name for p in output.parent.glob("*.png")} == {"colorway-base-0.png", "colorway-base-1.png"}
+                for index, name in enumerate(names):
+                    file = f"swatches_{name}.{ext}"
+                    actual, actual_uv = await read_texture(output.with_name(file))
+                    native, native_uv = await read_texture(reference / f"textured-{ext}" / file)
+                    assert pixels(actual) == pixels(native) == expected[index], (ext, name)
+                    assert all(abs(a - b) < 1e-5
+                               for a, b in zip(bounds(actual_uv), bounds(native_uv), strict=True)), (ext, name)
+                checked[ext] = {"colorway_textures": 2, "pixel_exact": True, "uv_bounds_tolerance": 1e-5}
+    print(json.dumps({"case": "native multi-colorway base textures", "formats": checked}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -4230,6 +4309,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-colorway-exports", action="store_const", dest="comparison",
                              const=verify_native_colorway_exports,
                              help="reopen all mesh formats exported from a native two-colorway archive")
+    comparisons.add_argument("--verify-native-colorway-textures", action="store_const", dest="comparison",
+                             const=verify_native_colorway_textures,
+                             help="verify textured native exports against a Boat reference capture")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
@@ -4240,7 +4322,7 @@ if __name__ == "__main__":
     if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_recolor_opacity, verify_fabric_texture_clear,
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
-                                verify_native_colorway_exports,
+                                verify_native_colorway_exports, verify_native_colorway_textures,
                                 verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,

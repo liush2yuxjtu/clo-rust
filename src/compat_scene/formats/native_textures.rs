@@ -66,6 +66,26 @@ pub(super) fn base_texture_label<'a>(face: &Fields<'a>) -> Option<&'a str> {
         .to_str()
 }
 
+fn base_texture_size_mm(material: &Fields<'_>) -> Option<[f64; 2]> {
+    let (faces, legacy) = face_records(material).ok()?;
+    let (_, face) = faces.iter().enumerate()
+        .find(|(index, face)| face_type(face, *index, legacy) == Ok(0))?;
+    let texture = textures(face).ok()?.into_iter().find(|texture| integer(texture, b"enType") == Ok(0))?;
+    // The recorded straight, untranslated mapping uses a physical repeat size in millimetres.
+    if integer(&texture, b"enMappingType") != Ok(0)
+        || texture.get(b"fSignedAngle", 6).ok()? != 0f32.to_le_bytes()
+        || texture.get(b"v2Translation", 10).ok()? != [0; 8]
+    {
+        return None;
+    }
+    let bytes = texture.get(b"v2PhysicalSize", 10).ok()?;
+    let size = [
+        f64::from(f32::from_le_bytes(bytes.get(..4)?.try_into().ok()?)),
+        f64::from(f32::from_le_bytes(bytes.get(4..)?.try_into().ok()?)),
+    ];
+    size.iter().all(|value| value.is_finite() && *value > 0.0).then_some(size)
+}
+
 pub(super) fn front_desaturated(material: &Fields<'_>) -> Result<bool, String> {
     let (faces, legacy_front) = face_records(material)?;
     for (index, face) in faces.iter().enumerate() {
@@ -189,6 +209,9 @@ pub(super) fn hydrate<R: Read + Seek>(
     let mut totals = 0u64;
     let mut warnings = Vec::new();
     let mut hydrate = |entry: &mut Value, material: &Fields<'_>| -> Result<(), String> {
+        if let Some(size) = base_texture_size_mm(material) {
+            entry["native_base_texture_size_mm"] = json!(size);
+        }
         if front_desaturated(material)? {
             entry["base_texture_desaturated"] = json!(true);
         }

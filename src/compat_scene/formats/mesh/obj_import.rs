@@ -262,6 +262,7 @@ pub(super) fn read(
             Value::Null
         };
         let mut mesh = Mesh {
+            rest_mm_uv: false,
             id: Value::Null,
             name: part.name,
             fabric_index,

@@ -10,13 +10,14 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Mesh {
     #[serde(default)]
     id: Value,
@@ -26,6 +27,8 @@ struct Mesh {
     fabric_index: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     texcoords: Vec<[f64; 2]>,
+    #[serde(skip)]
+    rest_mm_uv: bool,
     positions: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
 }
@@ -205,6 +208,7 @@ fn gltf_meshes(
                 .map(|p| [p[0], p[1], p[2]])
                 .collect();
             meshes.push(Mesh {
+                rest_mm_uv: false,
                 id: Value::Null,
                 name: name.into(),
                 fabric_index: Value::Null,
@@ -352,6 +356,7 @@ fn layout_mesh(pattern: &Value) -> Result<Mesh, String> {
     let points = patterns::outline(pattern)?;
     let positions = points.iter().map(|p| [p.x, p.y, 0.]).collect();
     Ok(Mesh {
+        rest_mm_uv: false,
         id: pattern["id"].clone(),
         name: pattern["name"].as_str().unwrap_or("Pattern").into(),
         fabric_index: pattern["fabric_index"].clone(),
@@ -376,7 +381,32 @@ fn fabric_base_color(fabric: &Value) -> [f64; 4] {
     [rgb[0], rgb[1], rgb[2], alpha].map(|value| value.clamp(0.0, 1.0))
 }
 
-fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), String> {
+fn write_colorway_image(path: &Path, fabric: &Value, png: &[u8]) -> Result<String, String> {
+    let label = fabric["info"]["catalog"]["Texture"].as_str()
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '#'])
+            && !name.chars().any(char::is_control))
+        .unwrap_or("base-color");
+    for index in 0.. {
+        let name = if index == 0 { format!("{label}.png") } else { format!("{label}-{index}.png") };
+        let target = path.with_file_name(&name);
+        match fs::read(&target) {
+            Ok(existing) if existing == png => return Ok(name),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                write(&target, png)?;
+                return Ok(name);
+            }
+            Err(error) => return Err(format!("{}: {error}", target.display())),
+        }
+    }
+    unreachable!("sidecar suffix counter exhausted")
+}
+
+fn gltf_export(
+    meshes: &[Mesh],
+    fabrics: &[Value],
+    external_images: Option<&Path>,
+) -> Result<(Value, Vec<u8>), String> {
     let mut bin = Vec::new();
     let mut views = Vec::new();
     let mut accessors = Vec::new();
@@ -384,6 +414,7 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
     let mut nodes = Vec::new();
     let mut images = Vec::new();
     let mut textures = Vec::new();
+    let mut texture_transform = false;
     let mut materials = Vec::new();
     let mut material_indices = HashMap::new();
     let fabric_by_index: HashMap<_, _> = fabrics
@@ -439,7 +470,7 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
             let texture_path = fabric["texture_maps"]["base"]
                 .as_str()
                 .filter(|path| !path.is_empty() && !mesh.texcoords.is_empty());
-            let key = (id, texture_path.is_some());
+            let key = (id, texture_path.is_some(), mesh.rest_mm_uv);
             let material_index = if let Some(index) = material_indices.get(&key) {
                 *index
             } else {
@@ -459,12 +490,23 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
                     let png = crate::compat_fit::png_for_export(
                         Path::new(path), fabric["base_texture_desaturated"] == true,
                     )?;
-                    let start = bin.len();
-                    bin.extend_from_slice(&png);
-                    images.push(json!({"bufferView": views.len(), "mimeType": "image/png"}));
-                    views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": png.len()}));
-                    bin.resize(bin.len().next_multiple_of(4), 0);
+                    let image = if let Some(output) = external_images {
+                        json!({"uri": write_colorway_image(output, fabric, &png)?})
+                    } else {
+                        let start = bin.len();
+                        bin.extend_from_slice(&png);
+                        let view = views.len();
+                        views.push(json!({"buffer": 0, "byteOffset": start, "byteLength": png.len()}));
+                        bin.resize(bin.len().next_multiple_of(4), 0);
+                        json!({"bufferView": view, "mimeType": "image/png"})
+                    };
+                    images.push(image);
                     pbr["baseColorTexture"] = json!({"index": textures.len()});
+                    if let Some(scale) = base_texture_scale(fabric).filter(|_| mesh.rest_mm_uv) {
+                        pbr["baseColorTexture"]["extensions"] =
+                            json!({"KHR_texture_transform": {"scale": scale}});
+                        texture_transform = true;
+                    }
                     textures.push(json!({"source": images.len() - 1}));
                 }
                 material["pbrMetallicRoughness"] = pbr;
@@ -490,6 +532,9 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
         root["images"] = json!(images);
         root["textures"] = json!(textures);
     }
+    if texture_transform {
+        root["extensionsUsed"] = json!(["KHR_texture_transform"]);
+    }
     Ok((root, bin))
 }
 
@@ -512,6 +557,7 @@ fn glb_encode(root: &Value, bin: Vec<u8>) -> Result<Vec<u8>, String> {
 
 fn procedural_avatar_mesh(avatar: &Value) -> Result<Mesh, String> {
     let mut mesh = Mesh {
+        rest_mm_uv: false,
         id: avatar["id"].clone(),
         name: avatar["name"].as_str().unwrap_or("Avatar").to_owned(),
         fabric_index: Value::Null,
@@ -571,10 +617,7 @@ fn export_geometry(state: &Value, include_avatar: bool) -> Result<(Vec<Mesh>, us
                 {
                     export_mesh.fabric_index = pattern["fabric_index"].clone();
                 }
-                if crate::compat_fit::mesh_uses_rest_mm(state, mesh) {
-                    export_mesh.texcoords =
-                        crate::compat_fit::uv_coordinates(&export_mesh.texcoords);
-                }
+                export_mesh.rest_mm_uv = crate::compat_fit::mesh_uses_rest_mm(state, mesh);
                 meshes.push(export_mesh);
             }
         }
@@ -628,6 +671,39 @@ fn export_geometry(state: &Value, include_avatar: bool) -> Result<(Vec<Mesh>, us
     Ok((meshes, garment_mesh_count))
 }
 
+fn base_texture_scale(fabric: &Value) -> Option<[f64; 2]> {
+    fabric["texture_maps"]["base"].as_str().filter(|path| !path.is_empty())?;
+    let scale: [f64; 2] = serde_json::from_value(fabric["native_base_texture_size_mm"].clone()).ok()?;
+    scale.iter().all(|n| n.is_finite() && *n > 0.0).then(|| scale.map(f64::recip))
+}
+
+fn export_uvs<'a>(meshes: &'a [Mesh], fabrics: &[Value], use_gltf: bool) -> Cow<'a, [Mesh]> {
+    if !meshes.iter().any(|mesh| mesh.rest_mm_uv) {
+        return Cow::Borrowed(meshes);
+    }
+    let mut prepared = meshes.to_vec();
+    for mesh in prepared.iter_mut().filter(|mesh| mesh.rest_mm_uv) {
+        let scale = fabrics.iter().find(|fabric| fabric["index"] == mesh.fabric_index)
+            .and_then(base_texture_scale);
+        if let Some([su, sv]) = scale.filter(|_| !mesh.texcoords.is_empty()) {
+            let center = std::array::from_fn::<_, 2, _>(|axis| {
+                let values = mesh.texcoords.iter().map(|point| point[axis]);
+                let (lo, hi) = values.fold((f64::INFINITY, f64::NEG_INFINITY),
+                    |(lo, hi), n| (lo.min(n), hi.max(n)));
+                (lo + hi) / 2.0
+            });
+            for point in &mut mesh.texcoords {
+                let (u, v) = (point[0] - center[0], center[1] - point[1]);
+                *point = if use_gltf { [u, v] } else { [u * su, 1.0 + v * sv] };
+            }
+        } else {
+            mesh.rest_mm_uv = false;
+            mesh.texcoords = crate::compat_fit::uv_coordinates(&mesh.texcoords);
+        }
+    }
+    Cow::Owned(prepared)
+}
+
 fn write_mesh_files(
     path: &Path,
     format: &str,
@@ -636,12 +712,14 @@ fn write_mesh_files(
     fabrics: &[Value],
     named_sidecars: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    let meshes = export_uvs(meshes, fabrics, matches!(format, "glb" | "gltf"));
     let mut files = vec![path.to_owned()];
     match format {
-        "fbx" => fbx_export::export(path, meshes, garment_count, fabrics)?,
-        "obj" => files.push(obj_export::export(path, meshes, fabrics, named_sidecars)?),
+        "fbx" => fbx_export::export(path, &meshes, garment_count, fabrics, named_sidecars)?,
+        "obj" => files.push(obj_export::export(path, &meshes, fabrics, named_sidecars)?),
         _ => {
-            let (mut root, bin) = gltf_export(meshes, fabrics)?;
+            let external_images = (named_sidecars && format == "gltf").then_some(path);
+            let (mut root, bin) = gltf_export(&meshes, fabrics, external_images)?;
             if format == "glb" {
                 write(path, &glb_encode(&root, bin)?)?;
             } else {

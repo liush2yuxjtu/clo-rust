@@ -26,6 +26,7 @@ fn write_bundle(
     fabrics: &[Value],
     mtl_path: &Path,
     mut mtl_file: File,
+    named_sidecar: bool,
     created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let stem = mtl_path
@@ -49,7 +50,7 @@ fn write_bundle(
             .and_then(|id| fabric_by_index.get(&id));
         let texture = fabric.and_then(|fabric| {
             let path = fabric["texture_maps"]["base"].as_str()?;
-            (has_uv && !path.is_empty()).then_some((path, fabric["base_texture_desaturated"] == true))
+            (has_uv && !path.is_empty()).then_some((fabric, path))
         });
         let key = (
             fabric.and_then(|fabric| fabric["index"].as_u64()),
@@ -64,16 +65,23 @@ fn write_bundle(
                 mtl,
                 "newmtl material_{id}\nKd {r} {g} {b}\nd {alpha}\nillum 1"
             );
-            if let Some((source, desaturated)) = texture {
-                let png = crate::compat_fit::png_for_export(Path::new(source), desaturated)?;
-                let name = format!("{stem}-{id}.png");
-                let target = mtl_path.with_file_name(&name);
-                let mut file = File::create_new(&target)
-                    .map_err(|error| format!("{}: {error}", target.display()))?;
-                created.push(target);
-                file.write_all(&png)
-                    .and_then(|_| file.sync_all())
-                    .map_err(|error| format!("write OBJ texture {name}: {error}"))?;
+            if let Some((fabric, source)) = texture {
+                let png = crate::compat_fit::png_for_export(
+                    Path::new(source), fabric["base_texture_desaturated"] == true,
+                )?;
+                let name = if named_sidecar {
+                    super::write_colorway_image(path, fabric, &png)?
+                } else {
+                    let name = format!("{stem}-{id}.png");
+                    let target = mtl_path.with_file_name(&name);
+                    let mut file = File::create_new(&target)
+                        .map_err(|error| format!("{}: {error}", target.display()))?;
+                    created.push(target);
+                    file.write_all(&png)
+                        .and_then(|_| file.sync_all())
+                        .map_err(|error| format!("write OBJ texture {name}: {error}"))?;
+                    name
+                };
                 let _ = writeln!(mtl, "map_Kd {name}");
             }
             mtl.push('\n');
@@ -135,7 +143,7 @@ pub(super) fn export(
     // Keep a relative request relative, including the returned companion path.
     let mtl_path = path.with_file_name(mtl_path.file_name().expect("generated MTL basename"));
     let mut created = vec![mtl_path.clone()];
-    if let Err(error) = write_bundle(path, meshes, fabrics, &mtl_path, file, &mut created) {
+    if let Err(error) = write_bundle(path, meshes, fabrics, &mtl_path, file, named_sidecar, &mut created) {
         for sidecar in created {
             let _ = fs::remove_file(sidecar);
         }

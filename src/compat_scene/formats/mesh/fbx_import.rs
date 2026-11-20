@@ -13,6 +13,7 @@ impl Part {
     fn new(name: &str, fabric_index: Option<usize>) -> Self {
         Self {
             mesh: Mesh {
+                rest_mm_uv: false,
                 id: Value::Null,
                 name: name.into(),
                 fabric_index: json!(fabric_index),
