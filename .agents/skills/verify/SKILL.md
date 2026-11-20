@@ -211,6 +211,13 @@ internal sewing and self-sewing reference the expected panel IDs.
 Check reflected internal rest coordinates and confirm that both
 internal seam groups reach the Rust solver after reopening.
 
+Run `--verify-display-edits-keep-drape` to verify that 2D movement,
+3D visibility and strengthening preserve an existing pose and velocities.
+Compare the 2D and 3D snapshots, visible OBJ objects, saved state, and
+step count after reopening. Use a geometric flip as the reset control.
+Set `CLO_DISPLAY_FIXTURE` to a native project with saved drape to also
+verify absolute placement and visibility changes on archived meshes.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

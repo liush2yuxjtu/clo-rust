@@ -838,7 +838,10 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 mesh["name"] = pattern["name"].clone();
             }
         }
-    } else if !matches!(op, "elastic" | "shirring" | "freeze" | "layer") {
+    } else if !matches!(
+        op,
+        "elastic" | "shirring" | "freeze" | "layer" | "move_2d" | "hide" | "strengthen"
+    ) {
         invalidate_geometry(state);
     }
     state["patterns"][i] = pattern;

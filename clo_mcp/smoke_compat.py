@@ -1355,6 +1355,83 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_display_edits_keep_drape():
+    with TemporaryDirectory(prefix="clo-display-edits-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "", "CLO_RUST_OUTPUT_DIR": directory}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            for name, x in (("Front", 0), ("Back", 240)):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 50, 100]],
+                })
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            async def capture(tool):
+                args = {"views": ["front"]} if tool == "snapshot" else {}
+                result = await successful(rust, tool, args)
+                image, = [block for block in result.content if block.type == "image"]
+                return base64.b64decode(image.data, validate=True)
+
+            async def operate(panel, op, args):
+                await json_result(rust, "pattern_ops", {"pattern": panel, "op": op, "args": args})
+
+            before = (await json_result(rust, "pattern_info", {"pattern": "Front"}))["pos_2d"]
+            assert isinstance(before, list)
+            _, scene = await save("before")
+            original_3d, original_2d = await capture("snapshot"), await capture("snapshot_2d")
+            await operate("Front", "move_2d", {"dx": 80, "dy": 55})
+            moved = (await json_result(rust, "pattern_info", {"pattern": "Front"}))["pos_2d"]
+            assert moved == [before[0] + 80, before[1] + 55]
+            moved_2d = await capture("snapshot_2d")
+            assert moved_2d != original_2d and await capture("snapshot") == original_3d
+            await operate("Front", "hide", {"on": True})
+            assert await capture("snapshot") != original_3d and await capture("snapshot_2d") == moved_2d
+            mesh_path = root / "visible.obj"
+            await json_result(rust, "scene_export", {"path": str(mesh_path)})
+            assert [line for line in mesh_path.read_text().splitlines() if line.startswith("o ")] == ["o Back"]
+            await operate("Front", "hide", {"on": False})
+            await operate("Front", "strengthen", {"on": True})
+            assert await capture("snapshot") == original_3d
+
+            path, edited = await save("edited")
+            assert edited["simulation"] == scene["simulation"]
+            assert edited["patterns"][0]["strengthen"] is True
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 1})
+            _, continued = await save("continued")
+            assert continued["simulation"]["steps"] == 4
+            await operate("Front", "flip", {"horizontal": True})
+            _, flipped = await save("flipped")
+            assert flipped["simulation"] is None
+
+            native_meshes = None
+            if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                _, original = await save("native")
+                native_meshes = len(original["simulation"]["meshes"])
+                assert native_meshes > 0 and original["simulation"]["source"] == "native_saved_pose"
+                await operate("0", "move_2d", {"x": 500, "y": 250})
+                front = await json_result(rust, "pattern_info", {"pattern": "0"})
+                assert front["pos_2d"] == [500, 250]
+                await operate("0", "hide", {"on": True})
+                path, changed = await save("native-edited")
+                assert changed["simulation"] == original["simulation"]
+                await json_result(rust, "scene_open", {"path": str(path)})
+                await operate("0", "hide", {"on": False})
+                _, restored = await save("native-restored")
+                assert restored["simulation"] == original["simulation"]
+    print(json.dumps({"tools": ["pattern_ops", "snapshot", "snapshot_2d", "scene_export", "simulate"],
+                      "case": "layout and display edits preserve drape",
+                      "pose_and_velocities": "unchanged", "continue_and_flip_control": "pass",
+                      "native_pose_meshes_preserved": native_meshes}))
+
+
 async def verify_symmetry_sewing():
     with TemporaryDirectory(prefix="clo-symmetry-sewing-") as directory:
         root = Path(directory)
@@ -1960,6 +2037,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-symmetry-sewing", action="store_const", dest="comparison",
                              const=verify_symmetry_sewing,
                              help="verify symmetry duplicates native sewing and mirrored rest geometry")
+    comparisons.add_argument("--verify-display-edits-keep-drape", action="store_const", dest="comparison",
+                             const=verify_display_edits_keep_drape,
+                             help="verify layout, visibility and strength edits preserve saved drape")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1975,7 +2055,8 @@ if __name__ == "__main__":
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
-                                verify_outline_edit_remaps, verify_symmetry_sewing)
+                                verify_outline_edit_remaps, verify_symmetry_sewing,
+                                verify_display_edits_keep_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
