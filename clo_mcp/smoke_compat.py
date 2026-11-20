@@ -3566,11 +3566,60 @@ async def verify_native_append():
             assert garment_append["pattern_count"] == count * 2
             assert garment_append["avatars"] == first["avatars"]
             assert garment_append["native_import"]["saved_pose_loaded"]
+
+            async def import_project(fields, source=project):
+                return await json_result(session, "clo_api_call", {
+                    "name": "import_api.ImportZprj", "args": [
+                        source, {"$type": "ApiTypes.ImportZPRJOption", "fields": fields},
+                    ],
+                })
+
+            await json_result(session, "scene_open", {"path": str(path)})
+            _, before_selective = await save("before-selective")
+            no_components = await import_project({"bLoadGarment": False, "bLoadAvatar": False})
+            assert no_components["value"] is True
+            _, unchanged = await save("no-components")
+            for field in ("patterns", "fabrics", "native_seam_groups", "simulation", "avatar", "additional_avatars"):
+                assert unchanged[field] == before_selective[field], field
+
+            code = f"opt = ApiTypes.ImportZPRJOption(); opt.bLoadGarment = False; result = import_api.ImportZprj({project!r}, opt)"
+            assert (await json_result(session, "clo_run_python", {"code": code}))["value"] is True
+            assert (await json_result(session, "scene_info"))["avatars"] == first["avatars"]
+            _, avatar_only = await save("only-avatar")
+            for field in ("patterns", "fabrics", "native_seam_groups", "simulation"):
+                assert avatar_only[field] == before_selective[field], field
+
+            await json_result(session, "scene_open", {"path": str(path)})
+            assert (await import_project({"bLoadAvatar": False}))["value"] is True
+            state = await json_result(session, "scene_info")
+            assert state["pattern_count"] == count and state["avatars"] == first["avatars"] * 2
+            _, garment_only = await save("only-garment")
+            for field in ("avatar", "additional_avatars"):
+                assert garment_only[field] == before_selective[field], field
+            assert garment_only["simulation"]["meshes"] == before["simulation"]["meshes"]
+            before_error = await json_result(session, "scene_info")
+            rejected = await session.call_tool("clo_api_call", {
+                "name": "import_api.ImportZprj", "args": [
+                    str(corrupt_path), {"$type": "ApiTypes.ImportZPRJOption", "fields": {"bLoadGarment": False}},
+                ],
+            })
+            assert rejected.isError
+            assert await json_result(session, "scene_info") == before_error
+
+            assert (await import_project({"bAppend": True, "bLoadGarment": False}))["value"] is True
+            after_avatars = await json_result(session, "scene_info")
+            assert after_avatars["pattern_count"] == count and after_avatars["avatars"] == first["avatars"] * 3
+            assert (await import_project({"bAppend": True, "bLoadAvatar": False}))["value"] is True
+            after_garment = await json_result(session, "scene_info")
+            assert after_garment["pattern_count"] == count * 2 and after_garment["avatars"] == after_avatars["avatars"]
     print(json.dumps({"tool": "scene_open", "case": "append two saved native poses",
                       "patterns": appended["pattern_count"], "fabrics": appended["fabric_count"],
                       "seam_groups": appended["seam_groups"], "avatars": len(appended["avatars"]),
                       "pose_meshes_matched": len(meshes), "corrupt_input_preserves_scene": True,
-                      "empty_append_reexports_native": True, "garment_append_keeps_avatar": True}))
+                      "empty_append_reexports_native": True, "garment_append_keeps_avatar": True,
+                      "selective_avatar_only_kept_garment": True,
+                      "selective_garment_only_kept_avatars": True, "select_neither_kept_scene": True,
+                      "selective_append_and_corrupt_input": "pass"}))
 
 
 async def verify_mixed_native_append():

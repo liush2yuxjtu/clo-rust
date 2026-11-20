@@ -488,7 +488,10 @@ restores preserve the scene. A live CLO restore requires the bridge.
 
 Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an
-avatar and a complete saved pose. Check that append preserves original project
+avatar and a complete saved pose. Exercise typed `ImportZprj` and Python
+with `bLoadGarment` or `bLoadAvatar` disabled. Check that partial replacement
+and append affect the requested component, and that a corrupt avatar-only
+import preserves the receiving scene. Check that full append preserves original project
 identity, shifts new panel and fabric indices, and restores both saved meshes
 and embedded avatars. Save and reopen the combined project. Test invalid input
 in both modes. Append to an empty scene, re-export as ZPAC, then append the

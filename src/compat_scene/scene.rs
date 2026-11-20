@@ -395,6 +395,16 @@ fn portable_pose_meshes(source: &Value, mapped: &[Value]) -> Result<Vec<Value>, 
 }
 
 pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
+    open_with_components(args, state, true, true)
+}
+
+pub(super) fn import_project(args: &Value, state: &mut Value) -> Reply {
+    open_with_components(
+        args, state, flag(args, "load_garment", true), flag(args, "load_avatar", true),
+    )
+}
+
+fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, load_avatar: bool) -> Reply {
     let path = Path::new(string(args, "path")?);
     if !path.is_file() {
         return Err(format!("file not found: {}", path.display()));
@@ -405,13 +415,24 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
         mode => return Err(format!("unknown scene open mode {mode:?}")),
     };
     let ext = extension(path);
+    if (!load_garment || !load_avatar) && ext != "zprj" {
+        return Err("selective project import requires a .zprj file".into());
+    }
+    if !load_garment {
+        let avatar = crate::compat_fit::project_avatar(path)?;
+        if load_avatar {
+            import_project_avatar(state, avatar, append);
+            crate::compat_runtime::invalidate_scene_ui_snapshot(state);
+        }
+        return Ok(open_reply(state, path));
+    }
     let (reply, appended) = if matches!(ext.as_str(), "json" | "clorust") {
         let appended = open_json(path, append, state)?;
         (open_reply(state, path), appended)
     } else {
         // CLO's generic mesh and avatar importers do not receive a replace option.
         let append = append || matches!(ext.as_str(), "obj" | "fbx" | "avt");
-        (open_path(path, &ext, append, state)?, append)
+        (open_path(path, &ext, append, load_avatar, state)?, append)
     };
     if appended {
         crate::compat_runtime::invalidate_scene_ui_snapshot(state);
@@ -419,6 +440,20 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
         crate::compat_runtime::clear_scene_ui(state, true);
     }
     Ok(reply)
+}
+
+fn import_project_avatar(state: &mut Value, avatar: Option<Value>, append: bool) {
+    if !append {
+        state["additional_avatars"] = json!([]);
+        state["avatar"] = Value::Null;
+    }
+    if let Some(avatar) = avatar {
+        if state["avatar"].is_null() {
+            state["avatar"] = avatar;
+        } else {
+            vec_mut(state, "additional_avatars").push(avatar);
+        }
+    }
 }
 
 fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, String> {
@@ -444,7 +479,7 @@ fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, Strin
     Ok(true)
 }
 
-fn open_path(path: &Path, ext: &str, append: bool, state: &mut Value) -> Reply {
+fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mut Value) -> Reply {
     match ext {
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
         ext @ ("obj" | "fbx") => {
@@ -491,22 +526,16 @@ fn open_path(path: &Path, ext: &str, append: bool, state: &mut Value) -> Reply {
             }
             let mut avatar_error = None;
             let mut embedded_avatar = false;
-            if is_project {
-                if !append {
-                    state["additional_avatars"] = json!([]);
-                    state["avatar"] = Value::Null;
-                }
+            if is_project && load_avatar {
                 match crate::compat_fit::project_avatar(path) {
-                    Ok(Some(avatar)) => {
-                        embedded_avatar = true;
-                        if state["avatar"].is_null() {
-                            state["avatar"] = avatar;
-                        } else {
-                            vec_mut(state, "additional_avatars").push(avatar);
-                        }
+                    Ok(avatar) => {
+                        embedded_avatar = avatar.is_some();
+                        import_project_avatar(state, avatar, append);
                     }
-                    Ok(None) => (),
-                    Err(error) => avatar_error = Some(error),
+                    Err(error) => {
+                        import_project_avatar(state, None, append);
+                        avatar_error = Some(error);
+                    }
                 }
                 if !append {
                     set_project(state, path);
@@ -522,7 +551,7 @@ fn open_path(path: &Path, ext: &str, append: bool, state: &mut Value) -> Reply {
             } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if !append || fresh_append {
+            if load_avatar && (!append || fresh_append) {
                 formats::native_save::remember(state, path, is_project);
             }
             let mut reply = open_reply(state, path);

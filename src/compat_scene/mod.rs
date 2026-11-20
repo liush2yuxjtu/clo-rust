@@ -41,6 +41,7 @@ pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Reply> {
     let handler: fn(&Value, &mut Value) -> Reply = match name {
         "scene_info" => scene::info,
         "scene_open" => scene::open,
+        "__clo_import_project" => scene::import_project,
         "scene_save" => scene::save,
         "scene_export" => scene::export,
         "scene_clear" => scene::clear,

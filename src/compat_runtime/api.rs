@@ -1169,10 +1169,18 @@ pub(super) fn invoke(
         "import_api.ImportDXF" | "import_api.ImportZpac" | "import_api.ImportZprj" => {
             let option = &arg[1];
             let append = ["bAdd","bAppend","m_bAppend"].iter().any(|key| option[*key] == json!(true));
+            let mode = if append { "append" } else { "replace" };
             if option["bLoadGarment"] == json!(false) || option["bLoadAvatar"] == json!(false) {
-                return Err("Selective native project loading is not implemented by the Rust backend".into());
+                if name != "import_api.ImportZprj" {
+                    return Err("Selective loading requires import_api.ImportZprj".into());
+                }
+                return domain("__clo_import_project", &json!({
+                    "path":arg[0], "mode":mode,
+                    "load_garment":option["bLoadGarment"].as_bool().unwrap_or(true),
+                    "load_avatar":option["bLoadAvatar"].as_bool().unwrap_or(true),
+                }), state).map(|result| success(&result));
             }
-            domain("scene_open", &json!({"path":arg[0],"mode":if append {"append"} else {"replace"}}),state).map(|result| success(&result))
+            domain("scene_open", &json!({"path":arg[0],"mode":mode}),state).map(|result| success(&result))
         }
         "import_api.ImportFile" | "pattern_api.ImportPatternJSON" => domain("scene_open", &json!({"path":arg[0],"mode":"append"}),state).map(|result| success(&result)),
         "export_api.ExportDXF" | "export_api.ExportFBX" | "export_api.ExportGLB" | "export_api.ExportGLTF" | "export_api.ExportOBJ" | "pattern_api.ExportPatternJSON" => {
