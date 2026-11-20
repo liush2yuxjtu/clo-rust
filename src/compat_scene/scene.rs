@@ -801,17 +801,23 @@ pub(super) fn checkpoint_list(_: &Value, _: &mut Value) -> Reply {
         if !native && extension(&path) != "clorust" {
             continue;
         }
-        if !entry.file_type().map_err(|err| err.to_string())?.is_file()
-            || (native && path.with_extension("clorust").is_file()) {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if !metadata.is_file() || (native && path.with_extension("clorust").is_file()) {
             continue;
         }
-        let time = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .map_err(|err| err.to_string())?;
+        let time = metadata.modified().map_err(|err| err.to_string())?;
         files.push((path, time));
     }
-    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    // The reference sorts by floating-point mtime and retains the directory order for ties.
+    let seconds = |time: SystemTime| match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64(),
+        Err(error) => -error.duration().as_secs_f64(),
+    };
+    files.sort_by(|a, b| seconds(b.1).total_cmp(&seconds(a.1)));
     let rows: Vec<_> = files.into_iter().map(|(path, time)| {
         let [year, month, day, hour, min, _] = calendar(time);
         json!({"name": path.file_stem().and_then(|name| name.to_str()), "path": path, "mtime": format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")})

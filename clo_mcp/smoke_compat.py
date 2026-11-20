@@ -3310,7 +3310,30 @@ async def compare_checkpoint_listing():
             assert all(Path(row["path"]).parent == folder for row in rows)
             listings[backend] = [(row["name"], row["mtime"]) for row in rows]
         assert listings["official"] == listings["rust"], listings
-    print(json.dumps({"tool": "checkpoint_list", "same_order_and_local_timestamps": listings["rust"]}))
+        shared = root / "checkpoints"
+        stamp = 1_764_900_000_000_000_000
+        tied = ("zeta", "alpha", "middle", "测试", "Zebra", "Apple", "b", "a")
+        for offset, name in enumerate(tied):
+            path = shared / f"{name}.zprj"
+            path.touch()
+            os.utime(path, ns=(stamp, stamp + offset))
+        linked = os.name == "posix"
+        if linked:
+            # The reference lists links to accessible checkpoint files using the target's mtime.
+            target = root / "archived.zprj"
+            target.touch()
+            os.utime(target, ns=(stamp, stamp))
+            (shared / "from-archive.zprj").symlink_to(target)
+        async with open_backend("official", {"CLO_MCP_STATE": scratch}) as official:
+            reference = await json_result(official, "checkpoint_list")
+        async with open_backend("rust", {"CLO_RUST_CHECKPOINT_DIR": str(shared)}) as rust:
+            observed = await json_result(rust, "checkpoint_list")
+        assert observed == reference, (observed, reference)
+        tie_order = [row["name"] for row in observed["checkpoints"] if row["name"] in tied]
+        assert set(tie_order) == set(tied)
+        assert any(row["name"] == "from-archive" for row in observed["checkpoints"]) == linked
+    print(json.dumps({"tool": "checkpoint_list", "same_order_and_local_timestamps": listings["rust"],
+                      "shared_tie_order": tie_order, "linked_checkpoint_listed": linked}, ensure_ascii=False))
 
 
 async def compare_shared_checkpoint_folder():

@@ -466,7 +466,8 @@ recovers them and enables a new native save. Also check that an unavailable
 checkpoint directory leaves a successful build with a null checkpoint path.
 With the official stdio command configured, run `--compare-checkpoint-listing`
 to compare order and local timestamps using disposable directories without
-starting CLO.
+starting CLO. Compare full rows on a shared fixture with tied or nearly equal
+modification times, and include a linked native checkpoint on POSIX.
 Run `--compare-shared-checkpoint-folder` with the same official command and a
 native `CLO_CHECKPOINT_FIXTURE` containing saved drape. Unset
 `CLO_RUST_CHECKPOINT_DIR` for this case. Both adapters list the fixture from the
