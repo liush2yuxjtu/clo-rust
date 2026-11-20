@@ -434,6 +434,7 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
         let append = append || matches!(ext.as_str(), "obj" | "fbx" | "avt");
         (open_path(path, &ext, append, load_avatar, state)?, append)
     };
+    super::refresh_colorway_exports(state);
     if appended {
         crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     } else {
@@ -620,6 +621,7 @@ pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
         "json" | "clorust" => saved(path, state)?,
         ext @ ("zprj" | "zpac") => {
             formats::native_save::save(path, state, ext == "zprj", flag(args, "thumbnail", true))?;
+            state["runtime"]["gltf_export_active_only"] = json!(true);
             if ext == "zpac" {
                 return Ok(json!({"path": path}));
             }

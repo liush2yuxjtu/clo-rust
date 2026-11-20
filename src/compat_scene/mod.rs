@@ -30,6 +30,37 @@ pub(crate) fn fabric_for_colorway<'a>(
     Err(format!("fabric has no archived material for colorway {colorway}"))
 }
 
+pub(crate) fn refresh_colorway_exports(state: &mut Value) {
+    if let Some(runtime) = state.get_mut("runtime").and_then(Value::as_object_mut) {
+        runtime.remove("gltf_export_active_only");
+    }
+}
+
+pub(crate) fn set_current_colorway(state: &mut Value, index: usize) -> Result<(), String> {
+    if index >= array(state, "colorways").len().max(1) {
+        return Ok(());
+    }
+    let previous = state["current_colorway"].as_u64().unwrap_or(0) as usize;
+    if index != previous {
+        let materials = array(state, "fabrics").iter().map(|fabric| {
+            let mut material = fabric_for_colorway(state, fabric, index)?.clone();
+            let mut active = fabric.clone();
+            let mut variants = active.as_object_mut()
+                .and_then(|record| record.remove("native_colorway_materials"))
+                .ok_or("fabric has no archived colorway materials")?;
+            *variants["values"].get_mut(previous)
+                .ok_or("archived material for current colorway is missing")? = active;
+            material["index"] = fabric["index"].clone();
+            material["native_colorway_materials"] = variants;
+            Ok(material)
+        }).collect::<Result<Vec<_>, String>>()?;
+        state["fabrics"] = json!(materials);
+        state["current_colorway"] = json!(index);
+    }
+    refresh_colorway_exports(state);
+    Ok(())
+}
+
 pub(crate) fn append_curved_arrangement_fields(record: &mut Value, values: [Option<f32>; 4]) {
     record["ArrangementType"] = json!("Curved");
     for ((field, scale, origin), value) in [

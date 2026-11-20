@@ -1285,6 +1285,7 @@ pub(super) fn apply_material(
         update_material_texture(find_fabric_mut(state, index)?, "base", &path);
         result["texture"] = json!({"ok":true});
     }
+    crate::compat_scene::refresh_colorway_exports(state);
     Ok(result)
 }
 
@@ -1342,6 +1343,7 @@ pub fn fabric_set_color(args: &Value, state: &mut Value) -> Result<Value, String
         state["current_fabric"] = json!(index);
     }
     crate::compat_scene::mark_native_fabric_color(state, index, clear_opacity);
+    crate::compat_scene::refresh_colorway_exports(state);
     Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}))
 }
 
@@ -1370,6 +1372,7 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
         update_material_texture(find_fabric_mut(state, index)?, kind, &path);
     }
     crate::compat_scene::mark_native_fabric_texture(state, index, kind, input.is_empty());
+    crate::compat_scene::refresh_colorway_exports(state);
     Ok(json!({"ok":true}))
 }
 

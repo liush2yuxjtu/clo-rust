@@ -594,10 +594,20 @@ pub(in crate::compat_scene) fn write_mesh(
 ) -> Result<Vec<PathBuf>, String> {
     let (meshes, garment_count) = export_geometry(state, include_avatar)?;
     let names = array(state, "colorways");
+    let fabrics = array(state, "fabrics");
     if colorways && names.len() > 1 {
+        // A native save leaves the glTF exporter on the current colorway until refreshed.
+        if state["runtime"]["gltf_export_active_only"] == true {
+            if format == "gltf" {
+                return write_active_gltf(path, &meshes, garment_count, fabrics);
+            }
+            if format == "glb" {
+                return write_mesh_files(path, format, &meshes, garment_count, fabrics, false);
+            }
+        }
         return write_colorway_bundle(path, format, state, names, &meshes, garment_count);
     }
-    write_mesh_files(path, format, &meshes, garment_count, array(state, "fabrics"), false)
+    write_mesh_files(path, format, &meshes, garment_count, fabrics, false)
 }
 
 fn export_geometry(state: &Value, include_avatar: bool) -> Result<(Vec<Mesh>, usize), String> {
@@ -776,6 +786,20 @@ impl Drop for StagedExport {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn write_active_gltf(
+    path: &Path,
+    meshes: &[Mesh],
+    garment_count: usize,
+    fabrics: &[Value],
+) -> Result<Vec<PathBuf>, String> {
+    let filename = path.file_name().ok_or("export path has no filename")?;
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let stage = StagedExport::new(parent)?;
+    let files = write_mesh_files(&stage.0.join(filename), "gltf", meshes, garment_count, fabrics, true)?;
+    publish_colorway_files(&stage.0, parent, &[filename.to_owned()])?;
+    Ok(files.iter().map(|file| path.with_file_name(file.file_name().unwrap())).collect())
 }
 
 fn write_colorway_bundle(

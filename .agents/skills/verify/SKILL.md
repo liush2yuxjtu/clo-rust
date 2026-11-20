@@ -462,8 +462,17 @@ to the Boat normal-map capture. Check the two normal maps in OBJ's MTL,
 FBX material bindings, and glTF/GLB's `normalTexture`, including strength and
 repeat scale. Set `CLO_NATIVE_PBR_EXPORTS` to the capture with roughness and
 opacity as well to compare OBJ sidecar names and pixels, and FBX opacity
-texture binding. Record the official glTF file list separately because
-the tested CLO session returned both single-file and per-colorway results.
+texture binding.
+
+Run `--verify-native-colorway-refresh` with the paired ZPRJ and ZPAC fixtures.
+A native save makes subsequent GLB and glTF exports use the active colorway,
+even when the call requests all colorways. Verify the unsuffixed primary file
+and glTF BIN. Check that OBJ still exports both colorways. Reselect the active
+colorway, call `UpdateColorways(true)`, or edit a fabric to restore grouped
+exports. An out-of-range positive selection and `UpdateColorways(false)` leave
+the export mode intact. Switch between both colorways and verify the live
+material edit remains attached to its original colorway. Reopen the saved
+archive and verify grouped exports on the reopened scene.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

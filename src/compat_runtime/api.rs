@@ -561,6 +561,16 @@ const FUNCTIONS: &[Entry] = functions![
         "Set the workbench camera direction."
     ),
     (
+        "utility_api.SetCurrentColorwayIndex",
+        "(index)",
+        "Select the active colorway and refresh colorway export materials."
+    ),
+    (
+        "utility_api.UpdateColorways",
+        "(bUpdateSnapshot=True)",
+        "Refresh colorway export materials when requested."
+    ),
+    (
         "utility_api.SetSimulationQuality",
         "(quality, substeps=0)",
         "Set the subsequent simulation quality."
@@ -646,6 +656,8 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.GetCLOAssetFolderPathW" => Some("GetCLOAssetFolderPathW(bLinuxTypePathDelimeter: bool = True) -> str"),
         "utility_api.GetCLOTemporaryFolderPath" => Some("GetCLOTemporaryFolderPath() -> str"),
         "utility_api.GetCLOTemporaryFolderPathW" => Some("GetCLOTemporaryFolderPathW() -> str"),
+        "utility_api.SetCurrentColorwayIndex" => Some("SetCurrentColorwayIndex(arg0: int) -> None"),
+        "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
 }
@@ -1490,6 +1502,19 @@ pub(super) fn invoke(
         "utility_api.SetCamViewPoint" => {
             state["runtime"]["ui"]["view"] = arg[0].clone();
             Ok(json!(true))
+        }
+        "utility_api.SetCurrentColorwayIndex" => {
+            let index = arg[0].as_u64().and_then(|index| usize::try_from(index).ok())
+                .ok_or("colorway index must be a nonnegative integer")?;
+            crate::compat_scene::set_current_colorway(state, index)?;
+            Ok(Value::Null)
+        }
+        "utility_api.UpdateColorways" => {
+            let refresh = arg[0].as_bool().ok_or("bUpdateSnapshot must be a boolean")?;
+            if refresh {
+                crate::compat_scene::refresh_colorway_exports(state);
+            }
+            Ok(Value::Null)
         }
         "utility_api.SetSimulationQuality" => {
             let quality = arg[0].as_u64().filter(|value| *value <= 3).ok_or("Quality must be 0..3")?;

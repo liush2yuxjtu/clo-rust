@@ -4047,6 +4047,69 @@ async def verify_native_colorway_normals():
                       "scene_unchanged": True, "obj_and_fbx_pbr_sidecars": bool(pbr_capture)}))
 
 
+async def verify_native_colorway_refresh():
+    fixtures = [Path(os.environ[key]).resolve(strict=True)
+                for key in ("CLO_REORDERED_ZPRJ", "CLO_REORDERED_ZPAC")]
+    names = ("Original", "Alternate")
+    with TemporaryDirectory(prefix="clo-colorway-refresh-") as directory:
+        root = Path(directory)
+        for fixture in fixtures:
+            async with open_backend("rust") as session:
+                async def api(name, *args):
+                    return (await json_result(session, "clo_api_call", {"name": name, "args": list(args)}))["value"]
+
+                async def export(stem, ext, grouped):
+                    path = root / fixture.suffix[1:] / f"{stem}.{ext}"
+                    result = await json_result(session, "scene_export", {"path": str(path), "colorways": True})
+                    files = [path.with_stem(f"{stem}_{colorway}") for colorway in names] if grouped else [path]
+                    companions = {"obj": "mtl", "gltf": "bin"}.get(ext)
+                    if companions:
+                        files += [file.with_suffix(f".{companions}") for file in files]
+                    assert result == {"path": str(path), "result": [str(file) for file in files]}
+                    assert all(file.is_file() for file in files)
+                    return files[0]
+
+                select = "utility_api.SetCurrentColorwayIndex"
+                refresh = "utility_api.UpdateColorways"
+                color = "fabric_api.GetFabricPBRMaterialBaseColor"
+                await json_result(session, "scene_open", {"path": str(fixture)})
+                expected = [await api(color, i, 0, 0) for i in range(2)]
+                await export("opened", "glb", True)
+                saved = root / f"copy{fixture.suffix}"
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                glb = await export("after-save", "glb", False)
+                await export("after-save", "gltf", False)
+                await export("after-save", "obj", True)
+                model, _ = read_gltf_export(glb)
+                active_color = model["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+                assert all(abs(a - b ** 2.2) < 1e-6 for a, b in zip(active_color[:3], expected[1][:3], strict=True))
+                assert await api(select, 2) is None
+                failed = await session.call_tool("clo_api_call", {"name": select, "args": [-1]})
+                assert failed.isError
+                assert await api(refresh, False) is None
+                await export("no-refresh", "glb", False)
+                assert await api(select, 1) is None
+                await export("after-reselect", "glb", True)
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                assert await api(refresh, True) is None
+                await export("after-refresh", "gltf", True)
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#2244aa"})
+                await export("after-color-edit", "glb", True)
+                edited = await api(color, 0, 0)
+                await json_result(session, "clo_run_python", {"code": f"{select}(0)"})
+                assert await api(color, 0, 0) == expected[0]
+                assert await api(color, 1, 0, 0) == edited
+                assert (await json_result(session, "scene_info"))["current_colorway"] == 0
+                await api(select, 1)
+                assert await api(color, 0, 0) == edited
+                await json_result(session, "scene_open", {"path": str(saved)})
+                await export("reopened", "glb", True)
+    print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
+                      "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
+                      "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -4405,6 +4468,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-colorway-normals", action="store_const", dest="comparison",
                              const=verify_native_colorway_normals,
                              help="compare exported normal maps with the Boat reference")
+    comparisons.add_argument("--verify-native-colorway-refresh", action="store_const", dest="comparison",
+                             const=verify_native_colorway_refresh,
+                             help="verify colorway exports after native save and refresh")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
@@ -4416,7 +4482,7 @@ if __name__ == "__main__":
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
                                 verify_native_colorway_exports, verify_native_colorway_textures,
-                                verify_native_colorway_normals,
+                                verify_native_colorway_normals, verify_native_colorway_refresh,
                                 verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,
