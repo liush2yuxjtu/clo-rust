@@ -6830,6 +6830,161 @@ async def compare_live_authored_seams():
     print(json.dumps({"cases": reports, "result": "pass"}))
 
 
+async def compare_live_authored_poses():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert root.is_dir() and not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    names = ["Front", "后片"]
+    outlines = ([[0, 0], [120, 0], [120, 100], [0, 100]],
+                [[220, 0], [280, -60, 2], [340, 100]])
+
+    async def pose(session, label):
+        path = root / f"{label}.clorust"
+        await json_result(session, "scene_save", {"path": str(path)})
+        state = json.loads(path.read_text())["scene"]
+        meshes = state["simulation"]["meshes"]
+        assert [mesh["name"] for mesh in meshes] == names
+        assert all(mesh["positions"] and mesh["triangles"] for mesh in meshes)
+        return meshes
+
+    def delta(reference, observed):
+        errors = []
+        for a, b in zip(reference, observed, strict=True):
+            assert a["triangles"] == b["triangles"]
+            for p, q in zip(a["positions"], b["positions"], strict=True):
+                errors.extend(abs(x - y) for x, y in zip(p, q, strict=True))
+        return max(errors)
+
+    def compare_surface(reference, observed):
+        """Compare world positions at the other mesh's rest coordinates."""
+        errors, outside, projected = [], [], []
+        for incoming, captured in zip(reference, observed, strict=True):
+            triangles = []
+            for triangle in incoming["triangles"]:
+                uv = [incoming["texcoords"][i] for i in triangle]
+                xyz = [incoming["positions"][i] for i in triangle]
+                (ax, ay), (bx, by), (cx, cy) = uv
+                det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+                if abs(det) > 1e-9:
+                    triangles.append((uv, xyz, det))
+            assert triangles
+            for (x, y), actual in zip(captured["texcoords"], captured["positions"], strict=True):
+                candidates = []
+                for ((ax, ay), (bx, by), (cx, cy)), (a, b, c), det in triangles:
+                    p = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / det
+                    q = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / det
+                    r = 1 - p - q
+                    if min(p, q, r) >= -1e-3:
+                        at = [p*v + q*w + r*z for v, w, z in zip(a, b, c, strict=True)]
+                        candidates.append(math.dist(at, actual))
+                if candidates:
+                    errors.append(min(candidates))
+                    continue
+                # A remesh may put a vertex just outside the discretized curve.
+                # Measure both the rest-space offset and its world-space projection.
+                best = (math.inf, math.inf)
+                for uv, xyz, _ in triangles:
+                    for i, j in ((0, 1), (1, 2), (2, 0)):
+                        ax, ay = uv[i]
+                        bx, by = uv[j]
+                        dx, dy = bx - ax, by - ay
+                        if dx == dy == 0:
+                            continue
+                        t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx*dx + dy*dy)))
+                        rest_distance = math.hypot(x - ax - t * dx, y - ay - t * dy)
+                        world = [a + t * (b - a) for a, b in zip(xyz[i], xyz[j], strict=True)]
+                        best = min(best, (rest_distance, math.dist(world, actual)))
+                outside.append(best[0])
+                projected.append(best[1])
+        return {"inside_vertices": len(errors), "projected_vertices": len(outside),
+                "outside_rest_error_mm": max(outside, default=0), "inside_position_error_mm": max(errors),
+                "projected_position_error_mm": max(projected, default=0)}
+
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as inspector:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            outputs = {}
+            original_rust_pose = None
+            for writer, session in backends:
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                for name, points in zip(names, outlines, strict=True):
+                    await json_result(session, "pattern_create", {"name": name, "points": points})
+                assert (await json_result(session, "sew", {
+                    "pattern_a": "Front", "line_a": 0, "pattern_b": "后片", "line_b": 0,
+                    "dir_a": True, "dir_b": False,
+                }))["ok"]
+                assert (await json_result(session, "simulate", {"steps": 15, "particle_distance": 20}))["ok"]
+                if writer == "rust":
+                    original_rust_pose = await pose(rust, "source-rust-pose")
+                for suffix in ("zprj", "zpac"):
+                    path = root / f"pose-{writer}.{suffix}"
+                    assert await json_result(session, "scene_save", {"path": str(path), "thumbnail": False}) == {
+                        "path": str(path)}
+                    outputs[writer, suffix] = path
+                checkpoint = await json_result(session, "checkpoint_save", {"name": f"pose-{writer}"})
+                path = Path(checkpoint["path"])
+                assert path.suffix == ".zprj" and path.is_file()
+                outputs[writer, "checkpoint"] = path
+
+            for (writer, kind), path in outputs.items():
+                await json_result(inspector, "scene_open", {"path": str(path)})
+                expected = await pose(inspector, f"{writer}-{kind}-packed")
+                if writer == "rust":
+                    assert delta(original_rust_pose, expected) < 0.0001
+                for reader, session in backends:
+                    label = f"{writer}-{kind}-{reader}"
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    if kind == "checkpoint":
+                        opened = await json_result(session, "checkpoint_restore", {"name": f"pose-{writer}"})
+                    else:
+                        opened = await json_result(session, "scene_open", {"path": str(path)})
+                    assert opened["pattern_count"] == 2
+                    assert (await json_result(session, "seams_list"))["count"] == 1
+                    if reader == "official":
+                        native_capture = root / f"{label}-captured.zpac"
+                        await json_result(clo, "scene_save", {"path": str(native_capture)})
+                        await json_result(inspector, "scene_open", {"path": str(native_capture)})
+                        observed = await pose(inspector, f"{label}-loaded")
+                    else:
+                        observed = await pose(rust, f"{label}-loaded")
+                    report = {"writer": writer, "format": kind, "reader": reader,
+                              "vertices": sum(len(mesh["positions"]) for mesh in observed)}
+                    same_rest_mesh = all(a["triangles"] == b["triangles"] and a["texcoords"] == b["texcoords"]
+                                         for a, b in zip(expected, observed, strict=True))
+                    if reader == "rust" or same_rest_mesh:
+                        error = delta(expected, observed)
+                        assert error < 0.001, (label, error)
+                        report["position_error_mm"] = error
+                    else:
+                        surface = compare_surface(expected, observed)
+                        assert surface["inside_vertices"] >= 0.95 * report["vertices"], (label, surface)
+                        assert surface["inside_position_error_mm"] < 0.01, (label, surface)
+                        assert surface["outside_rest_error_mm"] < 0.01, (label, surface)
+                        report.update(surface)
+                    if writer == "rust" and kind == "zprj":
+                        result = await json_result(session, "simulate", {"steps": 10})
+                        assert result["ok"], (label, result)
+                        if reader == "official":
+                            resumed_file = root / f"{label}-resumed.zpac"
+                            await json_result(clo, "scene_save", {"path": str(resumed_file)})
+                            await json_result(inspector, "scene_open", {"path": str(resumed_file)})
+                            resumed = await pose(inspector, f"{label}-resumed")
+                        else:
+                            assert result["stitch_count"] > 0
+                            resumed = await pose(rust, f"{label}-resumed")
+                        report["resumed_displacement_mm"] = delta(observed, resumed)
+                        assert report["resumed_displacement_mm"] > 0.001
+                    reports.append(report)
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": reports, "result": "pass"}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -7475,6 +7630,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-authored-seams", action="store_const", dest="comparison",
                              const=compare_live_authored_seams,
                              help="write fresh seams to native archives and verify both readers and stitch constraints")
+    comparisons.add_argument("--compare-live-authored-poses", action="store_const", dest="comparison",
+                             const=compare_live_authored_poses,
+                             help="cross-open solved ZPRJ, ZPAC and checkpoints and resume the saved drape")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

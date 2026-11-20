@@ -882,6 +882,67 @@ fn native_mesh(
     })
 }
 
+pub(crate) struct ArchivePoseMesh {
+    pub rest: Vec<Point2>,
+    pub positions: Vec<Point>,
+    pub triangles: Vec<[u32; 3]>,
+    pub sides: Vec<Vec<u32>>,
+}
+
+pub(crate) fn archive_pose_mesh(
+    pattern: &Value,
+    prior: &Value,
+    state: &Value,
+) -> Result<ArchivePoseMesh, String> {
+    let saved = SavedPoseMesh::deserialize(prior)
+        .map_err(|error| format!("invalid archive pose mesh: {error}"))?;
+    let mesh = if crate::compat_fit::mesh_uses_rest_mm(state, prior) {
+        native_mesh(pattern, prior, state, prior["velocities"].is_null())?
+    } else {
+        let simulation = &state["simulation"];
+        let distance = number(simulation, "particle_distance", 20.0);
+        let target = particle_distance(number(
+            prior,
+            "rest_particle_distance",
+            number(pattern, "particle_distance", distance),
+        ))?;
+        let legacy_uniform = simulation["mesh_refinement"] != "adaptive";
+        let mesh = build_mesh(pattern, target, state, legacy_uniform)?;
+        if target != distance
+            && (mesh.texcoords != saved.texcoords || mesh.triangles != saved.triangles)
+        {
+            build_mesh(pattern, particle_distance(distance)?, state, legacy_uniform)?
+        } else {
+            mesh
+        }
+    };
+    if mesh.triangles != saved.triangles
+        || mesh.texcoords != saved.texcoords
+        || mesh.points.len() != saved.positions.len()
+        || saved
+            .positions
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || value.abs() >= 1e7)
+    {
+        return Err("the saved pose does not match the panel rest mesh".into());
+    }
+    Ok(ArchivePoseMesh {
+        rest: mesh.points,
+        positions: saved.positions,
+        triangles: mesh
+            .triangles
+            .into_iter()
+            .map(|triangle| triangle.map(|index| index as u32))
+            .collect(),
+        sides: mesh
+            .sides
+            .into_iter()
+            .map(|edge| edge.into_iter().map(|index| index as u32).collect())
+            .collect(),
+    })
+}
+
 fn native_meshes(
     patterns: &[Value],
     prior_meshes: &[Value],

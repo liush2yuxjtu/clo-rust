@@ -4,6 +4,7 @@ mod seams;
 
 use super::mesh::triangulate;
 use super::native_pose::{encode_map, encoded_list, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
+use crate::compat_fit::{archive_pose_mesh, ArchivePoseMesh};
 use crate::compat_scene::{array, patterns};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -68,11 +69,42 @@ struct Panel {
     edge_vertices: Vec<Vec<u32>>,
 }
 
+fn flat_mesh(pattern: &Value) -> Result<ArchivePoseMesh, String> {
+    let (rest, corners) = patterns::sampled_perimeter(pattern, 512)?;
+    let perimeter: Vec<_> = rest
+        .iter()
+        .map(|&[x, y]| patterns::Point { x, y, kind: 0 })
+        .collect();
+    let triangles = triangulate(&perimeter)?;
+    if triangles.len() + 2 != rest.len() {
+        return Err("native outline triangulation did not preserve each boundary point".into());
+    }
+    let sides = corners
+        .iter()
+        .enumerate()
+        .map(|(index, &first)| {
+            let last = corners.get(index + 1).copied().unwrap_or(rest.len());
+            (first..=last)
+                .map(|vertex| (vertex % rest.len()) as u32)
+                .collect()
+        })
+        .collect();
+    let positions = rest.iter().map(|&[x, y]| [x, y, 200.]).collect();
+    Ok(ArchivePoseMesh {
+        rest,
+        positions,
+        triangles,
+        sides,
+    })
+}
+
 fn panel(
     value: &Value,
     slot: u32,
     next_id: &mut u32,
     materials: &[Vec<u8>],
+    state: &Value,
+    saved: Option<&Value>,
 ) -> Result<Panel, String> {
     let name = value["name"]
         .as_str()
@@ -85,11 +117,6 @@ fn panel(
         return Err("native authoring requires editable outline points".into());
     }
     let edges = patterns::split_edges(&points);
-    let (perimeter, corners) = patterns::sampled_perimeter(value, 512)?;
-    let perimeter = perimeter
-        .into_iter()
-        .map(|[x, y]| patterns::Point { x, y, kind: 0 })
-        .collect::<Vec<_>>();
     let fabric_index = value["fabric_index"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())
@@ -117,7 +144,14 @@ fn panel(
     };
     let entry = element(name, next())?;
     let [dx, dy] = patterns::offset(value);
-    let [min_x, min_y, max_x, max_y] = patterns::point_bounds(perimeter.iter().copied(), [dx, dy]);
+    let geometry = match saved {
+        Some(prior) => archive_pose_mesh(value, prior, state)?,
+        None => flat_mesh(value)?,
+    };
+    if geometry.sides.len() != edges.len() || geometry.rest.len() > 130_000 {
+        return Err("native pose boundary does not match the panel outline".into());
+    }
+    let [min_x, min_y, max_x, max_y] = patterns::point_bounds(patterns::outline(value)?, [dx, dy]);
     let (cx, cy) = ((min_x + max_x) / 2., (min_y + max_y) / 2.);
     let basis = float_bytes([1., 0., 0., 0., 1., 0., cx, cy, 1.])?;
     let transform = encode_map(&[
@@ -143,18 +177,16 @@ fn panel(
         200.,
         1.,
     ])?;
-    let rest = float_bytes(perimeter.iter().flat_map(|p| [p.x + dx, p.y + dy]))?;
+    let rest = float_bytes(geometry.rest.iter().flat_map(|&[x, y]| [x + dx, y + dy]))?;
     let tex = float_bytes(
-        perimeter
+        geometry
+            .rest
             .iter()
-            .flat_map(|p| [p.x + dx - cx, p.y + dy - cy]),
+            .flat_map(|&[x, y]| [x + dx - cx, y + dy - cy]),
     )?;
-    let world = float_bytes(perimeter.iter().flat_map(|p| [p.x, p.y, 200.]))?;
-    let triangles = triangulate(&perimeter)?;
-    if triangles.len() + 2 != perimeter.len() {
-        return Err("native outline triangulation did not preserve each boundary point".into());
-    }
-    let triangle_indices = triangles
+    let world = float_bytes(geometry.positions.into_iter().flatten())?;
+    let triangle_indices = geometry
+        .triangles
         .iter()
         .flatten()
         .flat_map(|index| index.to_le_bytes())
@@ -162,12 +194,22 @@ fn panel(
     let mut point_records = Vec::with_capacity(edges.len());
     let mut line_records = Vec::with_capacity(edges.len());
     let mut boundaries = Vec::with_capacity(edges.len());
-    let mut edge_vertices = Vec::with_capacity(edges.len());
-    for (index, edge) in edges.iter().enumerate() {
+    for (index, (edge, vertices)) in edges.iter().zip(&geometry.sides).enumerate() {
         let following = (index + 1) % edges.len();
-        let first = corners[index];
-        let last = corners.get(index + 1).copied().unwrap_or(perimeter.len());
-        let coords = &tex[first * 8..][..8];
+        let [first, .., last] = vertices.as_slice() else {
+            return Err("native panel boundary path has fewer than two vertices".into());
+        };
+        let matches = |index: u32, point: patterns::Point| {
+            geometry
+                .rest
+                .get(index as usize)
+                .is_some_and(|&[x, y]| (x - point.x).hypot(y - point.y) < 0.01)
+        };
+        if !matches(*first, edge[0]) || !matches(*last, edge[edge.len() - 1]) {
+            return Err("native pose boundary endpoints do not match the editable outline".into());
+        }
+        let coords = float_bytes([edge[0].x + dx - cx, edge[0].y + dy - cy])?;
+        let coords = coords.as_slice();
         let size_specific = [1u32.to_le_bytes().as_slice(), &[VEC2], coords].concat();
         point_records.push(encode_map(&[
             (b"uiID", UINT, &next().to_le_bytes()),
@@ -177,9 +219,6 @@ fn panel(
             (b"v2Position", VEC2, coords),
             (b"arrSizeSpecificPosition", ARRAY, &size_specific),
         ])?);
-        let vertices: Vec<_> = (first..=last)
-            .map(|vertex| (vertex % perimeter.len()) as u32)
-            .collect();
         let nodes = vertices
             .iter()
             .map(|vertex| {
@@ -189,7 +228,6 @@ fn panel(
                 ])
             })
             .collect::<Result<Vec<_>, _>>()?;
-        edge_vertices.push(vertices);
         let boundary = records(&nodes)?;
         let controls = &edge[1..edge.len() - 1];
         let kind: i32 = match controls {
@@ -242,13 +280,13 @@ fn panel(
         (
             b"uiVertexCount2D",
             UINT,
-            &(perimeter.len() as u32).to_le_bytes(),
+            &(geometry.rest.len() as u32).to_le_bytes(),
         ),
         (b"baRest", BYTE_TYPE, &rest),
         (
             b"uiTriangleCount",
             UINT,
-            &(triangles.len() as u32).to_le_bytes(),
+            &(geometry.triangles.len() as u32).to_le_bytes(),
         ),
         (b"baTex", BYTE_TYPE, &tex),
         (b"baTri", BYTE_TYPE, &triangle_indices),
@@ -315,7 +353,7 @@ fn panel(
         (b"bPatternVisible3D", BOOL, TRUE),
         (b"mapPatternDynamics", MAP_TYPE, &dynamics),
         (b"fEdgeLength", FLOAT, &distance),
-        (b"bDraped", BOOL, FALSE),
+        (b"bDraped", BOOL, &[u8::from(saved.is_some())]),
         (b"uiPatternGID", UINT, &slot.to_le_bytes()),
         (b"listInnerShape", LIST_TYPE, &ZERO),
         (b"mapShape2D", MAP_TYPE, &outline),
@@ -325,7 +363,7 @@ fn panel(
     ])?;
     Ok(Panel {
         record,
-        edge_vertices,
+        edge_vertices: geometry.sides,
     })
 }
 
@@ -471,11 +509,9 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
     if ["native_seam_groups", "imported_meshes"]
         .into_iter()
         .any(|name| !array(state, name).is_empty())
-        || !array(&state["simulation"], "meshes").is_empty()
     {
         return Err(
-            "native authoring cannot yet preserve imported geometry or solved mesh records; save as .clorust"
-                .into(),
+            "native authoring cannot yet preserve imported geometry; save as .clorust".into(),
         );
     }
     let [colorway] = colorways else {
@@ -496,10 +532,27 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
         .map(|(index, (fabric, phys))| material(fabric, index as u32 + 1, phys))
         .collect::<Result<Vec<_>, _>>()?;
     let mut next_id = fabrics.len() as u32 + 1;
+    let meshes = array(&state["simulation"], "meshes");
+    if meshes
+        .iter()
+        .any(|mesh| !panels.iter().any(|panel| panel["id"] == mesh["id"]))
+    {
+        return Err("the saved pose refers to an unknown panel".into());
+    }
     let panel_records = panels
         .iter()
         .enumerate()
-        .map(|(index, value)| panel(value, index as u32, &mut next_id, &properties))
+        .map(|(index, panel_value)| {
+            let saved = meshes.iter().find(|mesh| mesh["id"] == panel_value["id"]);
+            panel(
+                panel_value,
+                index as u32,
+                &mut next_id,
+                &properties,
+                state,
+                saved,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let count = panels.len() as u32;
     let mut symmetric = count.to_le_bytes().to_vec();

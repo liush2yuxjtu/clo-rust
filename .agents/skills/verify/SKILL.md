@@ -1043,6 +1043,19 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-authored-poses` with the native bridge up and a fresh shared
+`CLO_MCP_STATE`. Leave `CLO_RUST_CHECKPOINT_DIR` unset. Solve the newly created
+sewn panels before writing ZPRJ, ZPAC and a named checkpoint. Cross-open each
+writer's files in both readers. Compare matching meshes vertex by vertex.
+If CLO remeshes on load or re-save, compare world positions by interpolating
+in rest-space triangles. Record the maximum interior error and report the
+rest-space offset and world-space error for projected boundary samples.
+Resume the Rust-written ZPRJ in both solvers and verify additional movement.
+For the existing portable-state check, open the Rust pose saved before
+native export and save it as ZPRJ. Change a stored triangle in another
+portable copy and verify native save rejects it while preserving the target
+archive and live scene.
+
 Run `--compare-live-authored-seams` with the native bridge up and
 `CLO_MCP_STATE` set to a fresh shared directory. Leave
 `CLO_RUST_CHECKPOINT_DIR` unset. Create two panels and sew two whole edges
