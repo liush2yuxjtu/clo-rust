@@ -741,7 +741,6 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
         array_mut(state, "additional_avatars").push(avatar);
     }
     result["avatars"] = json!(crate::compat_scene::avatar_names(state));
-    state["simulation"] = Value::Null;
     Ok(result)
 }
 

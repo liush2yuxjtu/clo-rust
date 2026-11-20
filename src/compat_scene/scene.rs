@@ -534,17 +534,12 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             return Ok(reply);
         }
         "avt" => {
-            let saved_pose = (state["simulation"]["source"] == "native_saved_pose")
-                .then(|| state["simulation"].clone());
             let loaded = crate::compat_fit::dispatch(
                 "avatar_load",
                 &json!({"name_or_path": path, "replace": false}),
                 state,
             )
             .ok_or("Rust avatar loader unavailable")??;
-            if let Some(pose) = saved_pose {
-                state["simulation"] = pose;
-            }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
             reply["rest_geometry"] = loaded["rest_geometry"].clone();

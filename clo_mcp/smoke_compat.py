@@ -1778,6 +1778,67 @@ async def verify_display_edits_keep_drape():
                       "native_pose_meshes_preserved": native_meshes}))
 
 
+async def verify_avatar_changes_keep_drape():
+    with TemporaryDirectory(prefix="clo-avatar-drape-") as directory:
+        root = Path(directory)
+        collider = root / "contact.obj"
+        # A closed shell surrounding the settled test panel. The solver
+        # should separate its overlap after a positive step only.
+        collider.write_text(
+            "v -1000 0 -1000\nv 1000 0 -1000\nv 1000 2000 -1000\nv -1000 2000 -1000\n"
+            "v -1000 0 1000\nv 1000 0 1000\nv 1000 2000 1000\nv -1000 2000 1000\n"
+            "f 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 4 8 7 3\nf 1 5 8 4\nf 2 3 7 6\n"
+        )
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            await json_result(rust, "avatar_load", {"name_or_path": "mia"})
+            await json_result(rust, "pattern_create", {"name": "Panel", "arrangement": "Front",
+                                                      "points": [[0, 0], [120, 0], [50, 90]]})
+            control = await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+            assert control["mesh_initial_overlap_corrections"] == 0
+            _, before = await save("before")
+            loaded = await json_result(rust, "avatar_load", {"name_or_path": str(collider), "replace": False})
+            assert len(loaded["avatars"]) == 2 and loaded["avatars"][-1] == "contact"
+            path, appended = await save("appended")
+            assert appended["simulation"] == before["simulation"]
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 0})
+            _, zero = await save("zero")
+            assert zero["simulation"] == before["simulation"]
+            resumed = await json_result(rust, "simulate", {"steps": 1})
+            assert resumed["mesh_initial_overlap_corrections"] > 0
+            _, continued = await save("continued")
+            assert continued["simulation"]["steps"] == 4
+
+            replaced = await json_result(rust, "avatar_load", {"name_or_path": "luka", "replace": True})
+            assert replaced["avatars"] == ["luka"]
+            _, replaced_scene = await save("replaced")
+            assert replaced_scene["simulation"] == continued["simulation"]
+            invalid = await rust.call_tool("avatar_load", {"name_or_path": str(root / "missing.obj")})
+            assert invalid.isError
+            assert (await json_result(rust, "avatar_list"))["in_scene"] == ["luka"]
+            _, rejected = await save("rejected")
+            assert rejected["simulation"] == continued["simulation"]
+            native_append = None
+            if fixture := os.environ.get("CLO_AVATAR_FIXTURE"):
+                opened = await json_result(rust, "scene_open", {"path": fixture, "mode": "append"})
+                assert len(opened["avatars"]) == 2 and opened["avatars"][0] == "luka"
+                _, with_native = await save("native")
+                assert with_native["simulation"] == continued["simulation"]
+                native_append = "pass"
+    print(json.dumps({"tools": ["avatar_load", "avatar_list", "simulate", "scene_open"],
+                      "case": "change avatars while retaining cloth",
+                      "append_and_replace_preserved_drape": True, "continued_step": 4,
+                      "new_mesh_overlap_corrections": resumed["mesh_initial_overlap_corrections"],
+                      "native_avt_append": native_append}))
+
+
 async def verify_geometry_edits_rebuild_one_panel():
     with TemporaryDirectory(prefix="clo-rebuild-edited-panel-") as directory:
         root = Path(directory)
@@ -2526,6 +2587,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
+    comparisons.add_argument("--verify-avatar-changes-keep-drape", action="store_const", dest="comparison",
+                             const=verify_avatar_changes_keep_drape,
+                             help="verify avatar changes preserve cloth, with updated collision on resume")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2545,7 +2609,8 @@ if __name__ == "__main__":
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
-                                verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape)
+                                verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape,
+                                verify_avatar_changes_keep_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -263,6 +263,12 @@ Save and reopen after each edit. At zero steps, rebuild the edited panel
 and verify that the other panel's saved mesh and velocities match exactly.
 Check that a subsequent step continues the original simulation.
 
+Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
+already simulated cloth. Reopen and compare the original positions and
+velocities, then run a positive step to verify overlap correction by the
+new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to also check
+the native avatar path through `scene_open`.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.
