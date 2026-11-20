@@ -489,7 +489,7 @@ fn avatar_from_mesh(
     }
     let mut body = scaled_body(measure_height, measure_height / 1755.0, "rust_mesh_estimate");
     if let Some(measurements) = rest_details.as_ref().and_then(|details| {
-        super::mesh_measure::measure(&points, &details.regions, floor, measure_height)
+        super::mesh_measure::measure(&points, &details.regions)
     }) {
         body = measurements;
     } else {
@@ -762,12 +762,17 @@ pub(super) fn body_measurements(avatar: &Value, refresh: bool) -> (Value, String
             return cached;
         }
     }
-    let source = string(
-        avatar,
-        "measurement_source",
-        string(avatar, "source", "rust_scene"),
-    );
-    (avatar["body"].clone(), source.to_owned())
+    let body = &avatar["body"];
+    let source = if body["source"] == "obj" {
+        "approximate measurements from the avatar mesh (open Avatar > Avatar Editor once in CLO and rerun avatar_measurements to get CLO's exact values)"
+    } else {
+        string(
+            avatar,
+            "measurement_source",
+            string(avatar, "source", "rust_scene"),
+        )
+    };
+    (body.clone(), source.to_owned())
 }
 
 pub fn avatar_measurements(args: &Value, state: &Value) -> Result<Value, String> {

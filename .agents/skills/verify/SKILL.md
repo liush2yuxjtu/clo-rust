@@ -953,6 +953,18 @@ verify the per-panel readback excludes the list index. To use captured
 reference rows, set `CLO_ARRANGEMENT_REFERENCE` to a JSON capture containing
 `scene.project_path` and `arrangements.points`.
 
+Run `--compare-live-avatar-measurements` with a live CLO bridge, the
+official MCP command, the same Avatar library on both backends, and an
+existing disposable shared `CLO_MCP_STATE` directory with no measurement
+records. The Avatar Editor should be unopened for the mesh fallback case.
+Load the six library aliases and compare each complete response for default
+and forced refresh, including all 32 numeric fields, source, and avatar name.
+Verify both backends reject a missing avatar and an invalid refresh argument.
+Seed a measurement record for Mia with three known millimetre values. Both
+backends must return the same cached response, bypass it on forced refresh,
+and return it again without changing the file. The verifier removes that
+record. Verify a real Avatar Editor reading and cache creation separately.
+
 For mesh-based avatar girth estimates, run
 `cargo test --locked avatar_tape_excludes_disconnected_arms`. Compare the
 central torso slice against a known section with detached limb contours. For
@@ -969,8 +981,9 @@ recognized AVT body-region tags, run `--compare-saved-avatar-mesh` for all
 requires a separate case. Check that the Rust avatar
 still retains its complete mesh and arrangement names for collision and display.
 Refresh a loaded avatar after stepping simulation and verify the pose and step
-count remain intact. If the stored region indices disagree with the physical
+count remain intact. If the stored region mapping is incomplete or references vertices outside its
 mesh, check that the avatar opens and uses the unclassified mesh estimate.
+A valid render mapping can use different triangulation from the physical mesh.
 
 For `--compare-saved-avatar-cache`, keep the saved project open in CLO and use
 the same `CLO_MCP_STATE` directory on both backends (default `~/.clo3d-mcp`).

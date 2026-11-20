@@ -86,18 +86,32 @@ fn element_name<'a>(record: &[Field<'a>]) -> Option<&'a [u8]> {
     find(&element, "qsNameUTF8", BYTES).or_else(|| find(&element, "qsName", BYTES))
 }
 
-fn body_regions(root: &[Field<'_>], mesh: &RestMesh) -> Option<Vec<RegionFace>> {
-    let body_faces = &mesh.triangles[mesh.body_faces.clone()?];
-    let root = fields(find(root, "mapTransformer3D", MAP)?).ok()?;
-    let children = list(find(&root, "listChildrenTransformer3D", LIST)?, MAX_PARTS).ok()?;
-    let body = children
-        .into_iter()
-        .filter_map(|raw| fields(raw).ok())
-        .find(|node| element_name(node).is_some_and(|name| name.eq_ignore_ascii_case(b"body")))?;
-    let shapes = list(find(&body, "listMatShape", LIST)?, MAX_PARTS).ok()?;
-    let vertex_start = *body_faces.iter().flatten().min()?;
-    let mut regions = Vec::with_capacity(body_faces.len());
-    for raw_shape in shapes {
+fn material_shapes<'a>(root: &[Field<'a>]) -> Option<Vec<(&'a [u8], &'a [u8])>> {
+    let mut nodes = vec![fields(find(root, "mapTransformer3D", MAP)?).ok()?];
+    let mut shapes = Vec::new();
+    let mut remaining = 4096;
+    while let Some(node) = nodes.pop() {
+        remaining = usize::checked_sub(remaining, 1)?;
+        if let Some((name, records)) = element_name(&node).zip(find(&node, "listMatShape", LIST)) {
+            shapes.push((name, records));
+        }
+        if let Some(children) = find(&node, "listChildrenTransformer3D", LIST) {
+            for child in list(children, MAX_PARTS).ok()?.into_iter().rev() {
+                nodes.push(fields(child).ok()?);
+            }
+        }
+    }
+    Some(shapes)
+}
+
+fn mesh_regions(
+    shapes: &[u8],
+    vertex_range: Range<usize>,
+    face_count: usize,
+) -> Option<Vec<RegionFace>> {
+    let mut regions = Vec::new();
+    let mut remaining = face_count;
+    for raw_shape in list(shapes, MAX_PARTS).ok()? {
         let shape = fields(raw_shape).ok()?;
         let materials = list(find(&shape, "listMatMesh", LIST)?, MAX_PARTS).ok()?;
         let shape = fields(find(&shape, "mapShape", MAP)?).ok()?;
@@ -109,38 +123,34 @@ fn body_regions(root: &[Field<'_>], mesh: &RestMesh) -> Option<Vec<RegionFace>> 
         for (material, indices) in materials.into_iter().zip(indexed) {
             let material = fields(material).ok()?;
             let material = fields(find(&material, "mapMaterial", MAP)?).ok()?;
-            let region =
-                Region::from_material(std::str::from_utf8(element_name(&material)?).ok()?)?;
+            let name = std::str::from_utf8(element_name(&material)?).ok()?;
             let indexed = fields(indices).ok()?;
             let indices = find(&indexed, "baPositionIndex", BYTES)?;
-            if indices.len() % 12 != 0 || indices.len() / 12 > body_faces.len() - regions.len() {
+            if indices.len() % 12 != 0 {
                 return None;
             }
+            remaining = remaining.checked_sub(indices.len() / 12)?;
+            let Some(region) = Region::from_material(name) else {
+                continue;
+            };
             for triangle in indices.chunks_exact(12) {
                 let mut face = [0; 3];
                 for (index, raw) in face.iter_mut().zip(triangle.chunks_exact(4)) {
                     let offset = le_uint(raw).ok()?.checked_mul(4)?;
                     let local =
                         le_uint(render_to_mesh.get(offset..offset.checked_add(4)?)?).ok()?;
-                    *index = vertex_start.checked_add(local)?;
+                    if local >= vertex_range.len() {
+                        return None;
+                    }
+                    *index = vertex_range.start + local;
                 }
                 regions.push((face, region));
             }
         }
     }
-    // Reject partially mapped or mismatched render topology. Measurements
-    // must use the same physical surface as the verified body mesh.
-    let sorted = |faces: &mut Vec<Triangle>| {
-        for face in faces.iter_mut() {
-            face.sort_unstable();
-        }
-        faces.sort_unstable();
-    };
-    let mut expected = body_faces.to_vec();
-    let mut actual = regions.iter().map(|(face, _)| *face).collect();
-    sorted(&mut expected);
-    sorted(&mut actual);
-    (actual == expected).then_some(regions)
+    // The render mesh can triangulate the same vertices differently from the
+    // physical mesh. OBJ export uses the render indices and material order.
+    (remaining == 0).then_some(regions)
 }
 
 fn list(mut data: &[u8], max_items: usize) -> Result<Vec<&[u8]>, String> {
@@ -204,9 +214,8 @@ fn xyz(floats: &[u8]) -> Result<Point, String> {
     Ok(point)
 }
 
-fn append_mesh(controller: &[u8], result: &mut RestMesh) -> Result<(), String> {
-    let ctl = fields(controller)?;
-    let mesh = fields(require(&ctl, "mapMesh", MAP)?)?;
+fn append_mesh(ctl: &[Field<'_>], result: &mut RestMesh) -> Result<(), String> {
+    let mesh = fields(require(ctl, "mapMesh", MAP)?)?;
     let count = |key| le_uint(require(&mesh, key, UINT)?);
     let num_vertices = count("uiVertexCount")?;
     let num_triangles = count("uiTriangleCount")?;
@@ -243,7 +252,7 @@ fn append_mesh(controller: &[u8], result: &mut RestMesh) -> Result<(), String> {
     for position in positions.chunks_exact(12) {
         result.points.push(xyz(position)?);
     }
-    if element_name(&ctl).is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
+    if element_name(ctl).is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
         && result
             .body_faces
             .as_ref()
@@ -268,17 +277,36 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         scene_name: find(&root, "qsNameUTF8", BYTES)
             .or_else(|| find(&root, "qsName", BYTES))
             .and_then(|raw| std::str::from_utf8(raw).ok())
-            .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control))
+            .filter(|name| !name.chars().any(char::is_control))
             .map(str::to_owned),
     };
+    let shapes = material_shapes(&root).unwrap_or_default();
+    let mut body_regions_found = false;
     for (index, controller) in controllers.into_iter().enumerate() {
-        append_mesh(controller, &mut result)
+        let controller = fields(controller)?;
+        let first_vertex = result.points.len();
+        let first_face = result.triangles.len();
+        append_mesh(&controller, &mut result)
             .map_err(|error| format!("native avatar mesh {}: {error}", index + 1))?;
+        if let Some(name) = element_name(&controller).filter(|_| first_face < result.triangles.len()) {
+            let shape = shapes.iter().find(|(candidate, _)| {
+                name.eq_ignore_ascii_case(candidate)
+                    || name.strip_suffix(b"_Shape").is_some_and(|name| name.eq_ignore_ascii_case(candidate))
+            });
+            if let Some(regions) = shape.and_then(|(_, shape)| {
+                mesh_regions(shape, first_vertex..result.points.len(), result.triangles.len() - first_face)
+            }) {
+                body_regions_found |= name.eq_ignore_ascii_case(b"body") && !regions.is_empty();
+                result.regions.extend(regions);
+            }
+        }
     }
     if result.part_count == 0 {
         return Err("native avatar DAN contains no nonempty rest meshes".into());
     }
-    result.regions = body_regions(&root, &result).unwrap_or_default();
+    if !body_regions_found {
+        result.regions.clear();
+    }
     Ok(result)
 }
 

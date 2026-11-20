@@ -1289,7 +1289,7 @@ async def compare_saved_avatar_mesh(height_only=False):
         await json_result(session, "scene_open", {"path": str(project)})
         rust = await json_result(session, "avatar_measurements", {"refresh": True})
     assert official["avatar"] == rust["avatar"]
-    assert rust["source"] == "rust_mesh_estimate"
+    assert rust["source"].startswith("approximate measurements from the avatar mesh")
     assert official["body"].keys() == rust["body"].keys()
     fields = {"height"} if height_only else set(official["body"]) - {"source"}
     tolerance_mm = 0.25
@@ -1299,6 +1299,7 @@ async def compare_saved_avatar_mesh(height_only=False):
     }
     assert all(abs(value) <= tolerance_mm for value in differences.values()), differences
     if not height_only:
+        assert official["source"] == rust["source"]
         assert official["body"]["source"] == rust["body"]["source"]
     print(json.dumps({
         "tool": "avatar_measurements", "case": "geometry fallback",
@@ -1325,7 +1326,7 @@ async def compare_saved_avatar_cache():
         rust = await json_result(session, "avatar_measurements")
         refreshed = await json_result(session, "avatar_measurements", {"refresh": True})
         assert refreshed["avatar"] == rust["avatar"]
-        assert refreshed["source"] == "rust_mesh_estimate"
+        assert not refreshed["source"].startswith("cached CLO measurements (")
         assert await json_result(session, "avatar_measurements") == rust
         preview = await json_result(session, "garment_plan_preview", preview_args)
     assert official == rust, {
@@ -3978,6 +3979,75 @@ async def compare_live_avatar_workflow():
                       "native_scene_open_modes": ["append", "replace"], "empty_scene": True, "result": "pass"}))
 
 
+async def compare_live_avatar_measurements():
+    state = Path(os.environ["CLO_MCP_STATE"])
+    cache_dir = state / "measurements"
+    assert state.is_dir() and not any(cache_dir.glob("*.json")), state
+    aliases = ("mia", "luka", "female mannequin", "male mannequin", "melody", "oliver")
+    cases = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                empty = await session.call_tool("avatar_measurements", {})
+                assert empty.isError
+            for alias in aliases:
+                args = {"name_or_path": alias}
+                assert await json_result(clo, "avatar_load", args) == await json_result(rust, "avatar_load", args)
+                native_scene = await json_result(clo, "scene_info")
+                rust_scene = await json_result(rust, "scene_info")
+                normal = await json_result(clo, "avatar_measurements")
+                assert normal["body"]["source"] == "obj", normal["source"]
+                assert len(normal["body"]) == 33
+                assert await json_result(rust, "avatar_measurements") == normal
+                for session, scene in ((clo, native_scene), (rust, rust_scene)):
+                    refreshed = await json_result(session, "avatar_measurements", {"refresh": True})
+                    assert refreshed == normal, (alias, refreshed, normal)
+                    invalid = await session.call_tool("avatar_measurements", {"refresh": []})
+                    assert invalid.isError and await json_result(session, "scene_info") == scene
+                cases.append({"alias": alias, "scene_name": normal["avatar"], "numeric_fields": 32})
+            assert not any(cache_dir.glob("*.json")), "mesh fallback should not populate the CLO measurement cache"
+
+            await json_result(clo, "avatar_load")
+            await json_result(rust, "avatar_load")
+            mesh = await json_result(clo, "avatar_measurements")
+            name = mesh["avatar"]
+            cache = cache_dir / f"{name}.json"
+            values = {
+                "CIRCUMFERENCE_Bust": {"value": 864.125, "unit": "mm"},
+                "CIRCUMFERENCE_Waist": {"value": 657.5, "unit": "mm"},
+                "HEIGHT_Total": 1732.25,
+            }
+            payload = json.dumps({"avatar": name, "measurements": values})
+            cache_dir.mkdir(exist_ok=True)
+            with cache.open("x", encoding="utf-8") as handle:
+                handle.write(payload)
+            try:
+                cached = await json_result(clo, "avatar_measurements")
+                assert cached["source"] == f"cached CLO measurements ({cache.name})"
+                assert cached["body"]["source"] == "clo"
+                assert (cached["body"]["height"], cached["body"]["bust"], cached["body"]["waist"]) == (
+                    1732.25, 864.125, 657.5)
+                for session in (clo, rust):
+                    assert await json_result(session, "avatar_measurements") == cached
+                    assert await json_result(session, "avatar_measurements", {"refresh": True}) == mesh
+                    assert await json_result(session, "avatar_measurements") == cached
+                assert cache.read_text(encoding="utf-8") == payload
+            finally:
+                cache.unlink()
+        finally:
+            if original["project_path"]:
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "avatar_measurements", "cases": cases, "mesh_responses": "exact",
+                      "seeded_cache_read_refresh_read": "exact", "cache_bytes_unchanged": True,
+                      "missing_avatar_and_invalid_refresh": "pass", "result": "pass"}))
+
+
 async def verify_avatar_changes_keep_drape():
     with TemporaryDirectory(prefix="clo-avatar-drape-") as directory:
         root = Path(directory)
@@ -6019,6 +6089,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
+    comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
+                             const=compare_live_avatar_measurements,
+                             help="compare live avatar mesh measurements and shared measurement cache behavior")
     comparisons.add_argument("--compare-live-avatar-workflow", action="store_const", dest="comparison",
                              const=compare_live_avatar_workflow,
                              help="compare native avatar loads, scene names, library and arrangement on both backends")

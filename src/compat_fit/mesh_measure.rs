@@ -17,17 +17,22 @@ pub(super) type RegionFace = ([usize; 3], Region);
 
 impl Region {
     pub(super) fn from_material(material: &str) -> Option<Self> {
-        let suffix = material.rsplit(':').next()?.to_ascii_lowercase();
-        if suffix.contains("arm") || suffix.contains("hand") {
+        let material = material.to_ascii_lowercase();
+        const EXCLUDED: &[&str] = &[
+            "hair", "eye", "tooth", "teeth", "lash", "shoe", "pump", "heel", "dummy",
+            "sole", "boot", "sneaker", "accessor", "glass", "brow", "sandal", "sock",
+        ];
+        if EXCLUDED.iter().any(|part| material.contains(part)) {
+            return None;
+        }
+        if material.contains("arm") || material.contains("hand") {
             Some(Self::Arm)
-        } else if suffix.contains("leg") || suffix.contains("foot") || suffix.contains("feet") {
+        } else if material.contains("leg") || material.contains("foot") || material.contains("feet") {
             Some(Self::Leg)
-        } else if suffix.contains("face") || suffix.contains("head") {
+        } else if material.contains("face") || material.contains("head") {
             Some(Self::Head)
-        } else if suffix.contains("body") {
-            Some(Self::Body)
         } else {
-            None
+            Some(Self::Body)
         }
     }
 }
@@ -193,9 +198,13 @@ fn x_extent(contour: &[Point]) -> f64 {
 pub(super) fn measure(
     points: &[Point],
     faces: &[RegionFace],
-    floor: f64,
-    height: f64,
 ) -> Option<Value> {
+    let (floor, top) = faces.iter().flat_map(|(face, _)| face).map(|&i| points[i][1])
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| (lo.min(y), hi.max(y)));
+    let height = top - floor;
+    if !(1.0..=5000.0).contains(&height) {
+        return None;
+    }
     let surface = Surface { points, faces };
     let all = |_| true;
     let leg_body = |r| matches!(r, Region::Leg | Region::Body);
