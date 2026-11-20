@@ -547,6 +547,14 @@ fn scene_drawings(
 }
 
 pub(crate) fn native_previews(state: &Value) -> Result<Vec<u8>, String> {
+    project_views(state, &["right", "back", "left"])
+}
+
+pub(crate) fn native_primary_preview(state: &Value) -> Result<Vec<u8>, String> {
+    project_views(state, &["front"])
+}
+
+fn project_views(state: &Value, views: &[&str]) -> Result<Vec<u8>, String> {
     const SIDE: usize = 500;
     let [width, height] = SIZE;
     let scale = (width.max(height) as f64) / SIDE as f64;
@@ -554,7 +562,7 @@ pub(crate) fn native_previews(state: &Value) -> Result<Vec<u8>, String> {
     let margin_y = (SIDE as f64 - height as f64 / scale) / 2.0;
     let drawings = scene_drawings(state, false, &mut TextureCache::default())?;
     let mut output = Vec::new();
-    for view in ["right", "back", "left"] {
+    for &view in views {
         let canvas = render_canvas(&drawings, view, false)?;
         let mut pixels = Vec::with_capacity(SIDE * SIDE * 3);
         for y in 0..SIDE {

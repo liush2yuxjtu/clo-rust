@@ -2,7 +2,7 @@
 
 use super::{
     clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
-    native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
+    native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
     native_avatar_ids::AvatarIdentities, native_compose, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
@@ -584,6 +584,81 @@ fn project_preview(input: Vec<u8>, thumbnail: bool, state: &Value) -> Result<Vec
     }
 }
 
+fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Result<Vec<u8>, String> {
+    const WORKSPACE: &str = "garment.osw";
+    const GARMENT: &str = "garment.zpac";
+    let zero = 0u32.to_le_bytes();
+    let linked = 1u32.to_le_bytes();
+    let version = 13u32.to_le_bytes();
+    let one = 1f32.to_le_bytes();
+    let null = b"NULL";
+    let scene_properties = encode_map(&[
+        (b"qsScenePropFileName", BYTE_TYPE, null),
+        (b"qsScenePropFileNameUTF8", BYTE_TYPE, null),
+    ])?;
+    let animation = encode_map(&[
+        (b"iAnimationToX", 4, &zero),
+        (b"fAnimationScale", 6, &one),
+        (b"iAnimationToY", 4, &linked),
+        (b"iAnimationToZ", 4, &2i32.to_le_bytes()),
+        (b"bAnimationInvertX", 1, &[0]),
+        (b"bAnimationInvertY", 1, &[0]),
+        (b"bAnimationInvertZ", 1, &[0]),
+        (b"bAnimationCreateTransAnim", 1, &[0]),
+        (b"dAnimationFPS", 7, &30f64.to_le_bytes()),
+        (b"fAnimationTimeScale", 6, &one),
+    ])?;
+    // The CLO workspace reader also expects the linked scene and animation
+    // records when a project contains neither scene props nor animation.
+    let workspace = encode_map(&[
+        (b"listAvatarFilePath", LIST_TYPE, &zero),
+        (b"uiVersion", 5, &version),
+        (b"uiAvatarLink", 5, &linked),
+        (b"qsClothFilePathUTF8", BYTE_TYPE, GARMENT.as_bytes()),
+        (b"qsPointCacheShapeName", BYTE_TYPE, null),
+        (b"uiClothLink", 5, &linked),
+        (b"uiAvatarCount", 5, &zero),
+        (b"qsClothFilePath", BYTE_TYPE, GARMENT.as_bytes()),
+        (b"uiScenePropLink", 5, &linked),
+        (b"uiScenePropCount", 5, &zero),
+        (b"mapSceneProperty", MAP_TYPE, &scene_properties),
+        (b"uiAnimationLink", 5, &linked),
+        (b"qsAnimationCacheFileName", BYTE_TYPE, b""),
+        (b"qsAnimationFileName", BYTE_TYPE, null),
+        (b"qsAnimationCacheFileNameUTF8", BYTE_TYPE, b""),
+        (b"qsAnimationFileNameUTF8", BYTE_TYPE, null),
+        (b"qsPointCacheShapeNameUTF8", BYTE_TYPE, null),
+        (b"mapAnimationParam", MAP_TYPE, &animation),
+    ])?;
+    let manifest = serde_json::to_vec(&json!({WORKSPACE: WORKSPACE, GARMENT: GARMENT}))
+        .map_err(|error| error.to_string())?;
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (name, bytes) in [(WORKSPACE, workspace.as_slice()), (GARMENT, garment), ("clofiles.json", &manifest)] {
+        zip.start_file(name, options).map_err(|error| error.to_string())?;
+        zip.write_all(bytes).map_err(|error| error.to_string())?;
+    }
+    let archive = zip.finish().map_err(|error| error.to_string())?.into_inner();
+
+    let primary = crate::compat_fit::native_primary_preview(state)?;
+    let primary_size = u32::try_from(primary.len()).map_err(|_| "native project thumbnail too large")?;
+    let mut prefix = ZPRJ.to_vec();
+    // Version, legacy preview span, primary PNG offset and length, ZIP offset and length.
+    for field in [12u32, 16, 40, primary_size, 0, 0] {
+        prefix.extend_from_slice(&field.to_le_bytes());
+    }
+    prefix.extend(primary);
+    if thumbnail {
+        prefix.extend(crate::compat_fit::native_previews(state)?);
+    }
+    let outer = join_archive(prefix, &archive)?;
+    if state["avatar"].is_null() && super::super::array(state, "additional_avatars").is_empty() {
+        return Ok(outer);
+    }
+    let avatars = project_avatar_edits(&outer, state)?;
+    replace_member(&outer, ZPRJ, b".zpac", garment, avatars)
+}
+
 fn source_path(source: &Value) -> Result<&Path, String> {
     source["path"].as_str().map(Path::new).ok_or_else(||
         "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene".into(),
@@ -827,7 +902,7 @@ pub(in crate::compat_scene) fn save(
 pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &Path) {
     let source = &state[SOURCE];
     let compacted = source["compacted_fabrics"] == true
-        || !super::super::array(source, "appended").is_empty()
+        || (source["empty_append"] == true || !super::super::array(source, "appended").is_empty())
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
     let _ = rebind_project_avatars(state, path);
     remember(state, path, true);
@@ -846,12 +921,6 @@ pub(in crate::compat_scene) fn encode(
     let parts = super::super::array(source, "appended");
     let source_project = source["project"] == true;
     let empty_append = source["empty_append"] == true;
-    if project && empty_append {
-        return Err("saving this appended scene as .zprj is unsupported; use .zpac or .clorust".into());
-    }
-    if project && !source_project {
-        return Err("saving a .zprj requires a loaded native .zprj project".into());
-    }
     let switched = state["current_colorway"] != source["current_colorway"];
     let changed_material = source["fabrics"].as_u64() != Some(fabric_fingerprint(state));
     let only_unused_changed = changed_material && !has_material_edits(source)
@@ -944,7 +1013,9 @@ pub(in crate::compat_scene) fn encode(
         Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes, assets)?,
         None => garment,
     };
-    let output = if project {
+    let output = if project && (!source_project || empty_append) {
+        project_from_garment(&garment, state, thumbnail)?
+    } else if project {
         let avatar_changed = source["avatars"].as_u64() != Some(avatar_fingerprint(state));
         let avatar_assets = if avatar_changed {
             project_avatar_edits(&original, state)?

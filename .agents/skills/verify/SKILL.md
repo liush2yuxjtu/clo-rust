@@ -1043,6 +1043,18 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-garment-to-project` with the native bridge up.
+Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
+and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave
+`CLO_RUST_CHECKPOINT_DIR` unset so checkpoints use the shared native format.
+Load the ZPAC into a cleared scene using replace and append, then save, export,
+or checkpoint as ZPRJ. Cross-open both writers' output on both readers and
+compare the actual panels, seams, fabrics, RGBA and colorway state. Check that
+replacement keeps the nested ZPAC bytes and that requesting thumbnails adds
+three PNG views to the primary preview. Set `CLO_ZPRJ_AVATAR_FIXTURE` to
+`scene-clear-avatar.avt` to add the avatar case. Verify the packed AVT matches
+the input bytes and both readers report the same avatar name.
+
 Run `--compare-live-texture-collisions` with Pillow installed, a fresh
 `CLO_MCP_STATE`, and `CLO_TEXTURE_COLLISION_FIXTURE` set to
 `multi-colorway-textured.zpac`. The verifier makes an incoming copy

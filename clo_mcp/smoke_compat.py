@@ -6539,6 +6539,85 @@ async def compare_live_composed_zprj():
     print(json.dumps({"tool": "scene_save", "format": "ZPRJ", "cases": reports, "result": "pass"}))
 
 
+async def compare_live_garment_to_project():
+    source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert source.is_file() and root.is_dir()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    cases = [
+        ("replace", "scene_save", True, None),
+        ("append", "scene_export", False, None),
+        ("replace", "checkpoint_save", False, None),
+    ]
+    if avatar := os.environ.get("CLO_ZPRJ_AVATAR_FIXTURE"):
+        assert Path(avatar).is_file()
+        cases.append(("replace", "scene_save", False, avatar))
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for mode, tool, thumbnail, avatar in cases:
+                label = f"{tool}-{mode}" + ("-avatar" if avatar else "")
+                outputs = {}
+                for writer, session in backends:
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    await json_result(session, "scene_open", {"path": str(source), "mode": mode})
+                    if avatar:
+                        await json_result(session, "scene_open", {"path": avatar})
+                    if tool == "checkpoint_save":
+                        result = await json_result(session, tool, {"name": f"{label}-{writer}"})
+                        path = Path(result["path"])
+                    else:
+                        path = root / f"{label}-{writer}.zprj"
+                        args = {"path": str(path)}
+                        if tool == "scene_save":
+                            args["thumbnail"] = thumbnail
+                        assert await json_result(session, tool, args) == {"path": str(path)}
+                    assert path.suffix == ".zprj" and path.is_file()
+                    assert (await json_result(session, "scene_info"))["project_path"] == str(path)
+                    outputs[writer] = path
+
+                generated = outputs["rust"].read_bytes()
+                start = struct.unpack_from("<I", generated, 32)[0]
+                views = generated[:start].count(b"\x89PNG\r\n\x1a\n")
+                assert views == (4 if thumbnail else 1), (label, views)
+                if mode == "replace":
+                    with zipfile.ZipFile(outputs["rust"]) as archive:
+                        name = next(name for name in archive.namelist() if name.endswith(".zpac"))
+                        assert archive.read(name) == source.read_bytes()
+                        if avatar:
+                            embedded = [name for name in archive.namelist() if name.endswith(".avt")]
+                            assert len(embedded) == 1
+                            assert archive.read(embedded[0]) == Path(avatar).read_bytes()
+
+                reference = None
+                for writer, path in outputs.items():
+                    for reader, session in backends:
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        await json_result(session, "scene_open", {"path": str(path)})
+                        readback = await read_composed_archive(session)
+                        readback["avatars"] = (await json_result(session, "scene_info"))["avatars"]
+                        assert len(readback["avatars"]) == int(avatar is not None)
+                        assert readback["patterns"] and readback["materials"] > 0
+                        if reference is None:
+                            reference = readback
+                        assert readback == reference, (label, writer, reader, {
+                            key: (reference[key], value) for key, value in readback.items()
+                            if reference[key] != value})
+                reports.append({"tool": tool, "mode": mode, "cross_reopens": 4,
+                                "panels": len(reference["patterns"]),
+                                "colorways": reference["colorways"], "avatars": reference["avatars"],
+                                "rust_pngs": views})
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": reports, "result": "pass"}))
+
+
 async def compare_live_texture_collisions():
     from PIL import Image
 
@@ -7096,6 +7175,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-composed-zprj", action="store_const", dest="comparison",
                              const=compare_live_composed_zprj,
                              help="verify composed project saves and checkpoints with both backends")
+    comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
+                             const=compare_live_garment_to_project,
+                             help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")
     comparisons.add_argument("--compare-live-texture-collisions", action="store_const", dest="comparison",
                              const=compare_live_texture_collisions,
                              help="verify conflicting texture payloads and their colorway bindings")
