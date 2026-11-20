@@ -124,7 +124,7 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
             })
             .collect();
     }
-    cached
+    let mut drawn = cached
         .iter()
         .enumerate()
         .filter(|(_, mesh)| !hidden(state, &mesh["id"]))
@@ -134,10 +134,32 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
                 .find(|p| p["id"] == mesh["id"])
                 .map_or(&mesh["fabric_index"], |p| &p["fabric_index"]);
             let mut drawing = Drawing::from_mesh(mesh)?;
+            if super::mesh_uses_rest_mm(state, mesh) {
+                drawing.texcoords = solver::uv_coordinates(&drawing.texcoords);
+            }
             textures.apply(state, fabric_id, index, &mut drawing);
             Ok(drawing)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    if state["simulation"]["source"] == "mixed_saved_pose" {
+        for (i, panel) in array(&state["patterns"]).iter().enumerate() {
+            if panel["hide"] == true || cached.iter().any(|mesh| mesh["id"] == panel["id"]) {
+                continue;
+            }
+            let mesh = solver::new_mesh(panel, f64::INFINITY, state)?;
+            let mut drawing = Drawing {
+                points: mesh.positions,
+                faces: mesh.triangles,
+                color: [0; 3],
+                texcoords: mesh.texcoords,
+                texture: None,
+                strokes: Vec::new(),
+            };
+            textures.apply(state, &mesh.fabric_index, i, &mut drawing);
+            drawn.push(drawing);
+        }
+    }
+    Ok(drawn)
 }
 
 fn hidden(state: &Value, id: &Value) -> bool {

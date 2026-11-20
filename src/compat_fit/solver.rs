@@ -482,7 +482,7 @@ fn sampled_sides(indices: &[usize], corners: &[usize]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
+pub(super) fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
     build_mesh(pattern, distance, state, false)
 }
 
@@ -844,6 +844,53 @@ fn native_meshes(
                 .map_err(|error| format!("native panel {}: {error}", pattern["name"]))
         })
         .collect()
+}
+
+fn mixed_meshes(
+    state: &Value,
+    patterns: &[Value],
+    prior: &[Value],
+    distance: f64,
+    legacy_uniform: bool,
+) -> Result<Vec<Mesh>, String> {
+    let by_id: HashMap<_, _> = prior.iter().map(|mesh| (&mesh["id"], mesh)).collect();
+    patterns.iter().map(|panel| {
+        let saved = by_id.get(&panel["id"]).copied();
+        if let Some(saved) = saved.filter(|mesh| mesh["texcoords_units"] == "mm") {
+            return native_mesh(panel, saved, state, saved["velocities"].is_null());
+        }
+        let target = number(panel, "particle_distance", distance);
+        if !(3.0..=500.0).contains(&target) {
+            return Err("individual pattern particle_distance must be 3..500 mm".into());
+        }
+        let mut mesh = build_mesh(panel, target, state, legacy_uniform)?;
+        if let Some(saved) = saved {
+            let velocities = Vec::<Point>::deserialize(&saved["velocities"])
+                .map_err(|error| format!("invalid saved simulation velocities: {error}"))?;
+            let saved = SavedPoseMesh::deserialize(saved)
+                .map_err(|error| format!("invalid saved simulation mesh: {error}"))?;
+            let transfer = |mesh: &Mesh| {
+                transfer_shirred_pose(
+                    &mesh.texcoords, &mesh.shirring_edges, &saved.texcoords, &saved.positions, &velocities,
+                )
+            };
+            let mut resumed = transfer(&mesh);
+            if resumed.is_none() && target != distance {
+                // Earlier sessions only recorded an explicit remesh distance
+                // at scene level. Try that topology for the previous CPU mesh.
+                let alternate = build_mesh(panel, distance, state, legacy_uniform)?;
+                if let Some(result) = transfer(&alternate) {
+                    mesh = alternate;
+                    resumed = Some(result);
+                }
+            }
+            if let Some((positions, velocities)) = resumed {
+                mesh.positions = positions;
+                mesh.velocities = velocities;
+            }
+        }
+        Ok(mesh)
+    }).collect()
 }
 
 pub fn initial_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
@@ -1311,8 +1358,13 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let explicit_distance = args["particle_distance"].is_number();
     let saved_pose = existing["source"] == NATIVE_SAVED_POSE;
+    let mixed_pose = !explicit_distance && existing["source"] == "mixed_saved_pose";
     let use_native = !explicit_distance && (saved_pose || existing["source"] == RUST_NATIVE_REST);
     let prior_meshes = array(&existing["meshes"]);
+    let mixed_native_ids: HashSet<_> = prior_meshes.iter()
+        .filter(|mesh| mixed_pose && mesh["texcoords_units"] == "mm")
+        .map(|mesh| mesh["id"].clone())
+        .collect();
     let legacy_uniform = !use_native
         && !explicit_distance
         && existing["particle_distance"].is_number()
@@ -1324,6 +1376,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             native_meshes(patterns, prior_meshes, state, saved_pose)?,
             !saved_pose,
         )
+    } else if mixed_pose {
+        (mixed_meshes(state, patterns, prior_meshes, distance, legacy_uniform)?, true)
     } else {
         let mut meshes = patterns
             .iter()
@@ -1377,7 +1431,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         (meshes, resume)
     };
     let primary_avatar = &state["avatar"];
-    let use_saved_avatar_proxy = |avatar: &Value| use_native && !avatar["source_project"].is_null();
+    let use_saved_avatar_proxy = |avatar: &Value| (use_native || mixed_pose) && !avatar["source_project"].is_null();
     let mesh_geometry = |avatar: &Value| {
         (!avatar["mesh"].is_null() && !use_saved_avatar_proxy(avatar))
             .then(|| avatar_geometry(avatar))
@@ -1540,7 +1594,18 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
     }
     let shirring_vertices: usize = meshes.iter().map(|mesh| mesh.shirring_edges.len()).sum();
-    state["simulation"] = json!({"steps":total,"quality":quality,"meshes":meshes});
+    let mut next = json!({"steps":total,"quality":quality,"meshes":meshes});
+    if mixed_pose {
+        next["source"] = json!("mixed_saved_pose");
+        if let Some(meshes) = next["meshes"].as_array_mut() {
+            for mesh in meshes {
+                if mixed_native_ids.contains(&mesh["id"]) {
+                    mesh["texcoords_units"] = json!("mm");
+                }
+            }
+        }
+    }
+    state["simulation"] = next;
     if use_native {
         state["simulation"]["source"] = json!(RUST_NATIVE_REST);
         state["simulation"]["texcoords_units"] = json!("mm");
@@ -1561,7 +1626,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     if using_proxy {
         limitations.push("The primary avatar uses an analytic collision proxy.".into());
     }
-    if use_native {
+    if use_native || mixed_pose {
         limitations.push("Native topology and saved drape initialize the independent CPU solver. Official CLO solver velocities and state are unavailable.".into());
     }
     if native_stitches.unsupported > 0 {
@@ -1574,8 +1639,10 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
         "elastic_constraint_count":elastic.len(),"shirring_refined_vertices":shirring_vertices,"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_inner_seam_groups":native_stitches.inner_groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
-    if use_native {
-        result["initialization"] = json!(if saved_pose {
+    if use_native || mixed_pose {
+        result["initialization"] = json!(if mixed_pose {
+            "mixed_saved_and_initialized_pose"
+        } else if saved_pose {
             "native_saved_pose_zero_velocity"
         } else {
             "native_rest_rust_velocities"

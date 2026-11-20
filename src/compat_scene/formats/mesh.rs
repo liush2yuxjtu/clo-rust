@@ -551,13 +551,18 @@ pub(in crate::compat_scene) fn write_mesh(
                 {
                     export_mesh.fabric_index = pattern["fabric_index"].clone();
                 }
-                if state["simulation"]["texcoords_units"] == "mm"
-                    || state["simulation"]["source"] == "native_saved_pose"
-                {
+                if crate::compat_fit::mesh_uses_rest_mm(state, mesh) {
                     export_mesh.texcoords =
                         crate::compat_fit::uv_coordinates(&export_mesh.texcoords);
                 }
                 meshes.push(export_mesh);
+            }
+        }
+        if state["simulation"]["source"] == "mixed_saved_pose" {
+            for pattern in array(state, "patterns").iter().filter(|p| !flag(p, "hide", false)) {
+                if !simulated.iter().any(|mesh| mesh["id"] == pattern["id"]) {
+                    meshes.push(layout_mesh(pattern)?);
+                }
             }
         }
     }

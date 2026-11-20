@@ -1024,6 +1024,64 @@ async def verify_native_append():
                       "empty_append_reexports_native": True, "garment_append_keeps_avatar": True}))
 
 
+async def verify_mixed_native_append():
+    fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
+    assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj"
+    request = {"path": str(Path(fixture).resolve(strict=True))}
+    result = []
+    with TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        async with open_backend("rust") as session:
+            await inspect_contract(session)
+
+            async def saved(name):
+                path = folder / f"{name}.clorust"
+                await json_result(session, "scene_save", {"path": str(path)})
+                return path, json.loads(path.read_text())["scene"]
+
+            await json_result(session, "scene_open", request)
+            _, baseline = await saved("baseline")
+            native = baseline["simulation"]["meshes"]
+            assert native
+            for prior_simulated in (False, True):
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                await json_result(session, "pattern_create", {
+                    "name": "Local panel", "points": [[0, 0], [160, 0], [130, 110]],
+                })
+                if prior_simulated:
+                    await json_result(session, "simulate", {
+                        "steps": 1, "quality": 1, "particle_distance": 90,
+                    })
+                    _, prior = await saved("prior")
+                imported = await json_result(session, "scene_open", {**request, "mode": "append"})
+                assert imported["native_import"]["saved_pose_loaded"]
+                combined, before = await saved("combined")
+                before_meshes = before["simulation"]["meshes"]
+                assert len(before_meshes) == len(native) + int(prior_simulated)
+                obj = folder / "combined.obj"
+                await json_result(session, "scene_export", {"path": str(obj)})
+                assert sum(line.startswith("o ") for line in obj.read_text().splitlines()) == len(native) + 1
+                await json_result(session, "scene_open", {"path": str(combined)})
+                sim = await json_result(session, "simulate", {"steps": 0})
+                assert sim["initialization"] == "mixed_saved_and_initialized_pose"
+                _, after = await saved("continued")
+                after_meshes = after["simulation"]["meshes"]
+                assert len(after_meshes) == len(native) + 1
+                assert after["simulation"]["steps"] == int(prior_simulated)
+                for original, observed in zip(native, after_meshes[1:], strict=True):
+                    assert observed["texcoords_units"] == "mm"
+                    for key in ("positions", "triangles", "texcoords"):
+                        assert original[key] == observed[key], (original["name"], key)
+                if prior_simulated:
+                    old = prior["simulation"]["meshes"][0]
+                    for key in ("positions", "triangles", "texcoords", "velocities"):
+                        assert old[key] == after_meshes[0][key], key
+                result.append({"prior_simulated": prior_simulated, "meshes": len(after_meshes),
+                               "inner_seam_groups": sim["native_inner_seam_groups"]})
+    print(json.dumps({"tools": ["scene_open", "scene_export", "simulate"],
+                      "case": "mixed native append", "results": result}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -1087,8 +1145,12 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
+    comparisons.add_argument("--verify-mixed-native-append", action="store_const", dest="comparison",
+                             const=verify_mixed_native_append,
+                             help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow, verify_native_append)
+    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
+                                verify_native_append, verify_mixed_native_append)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

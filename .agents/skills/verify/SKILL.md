@@ -34,20 +34,36 @@ Verify it through MCP stdio with matching requests sent to `CLO_MCP_BACKEND=offi
 and `CLO_MCP_BACKEND=rust`. A tool is behaviorally matched only when its relevant
 inputs, results, state changes, and error cases pass the dual-backend comparison.
 
+| Check | Passing evidence |
+| --- | --- |
+| Public tool contract | `tools/list` entries match the pinned contract, including names, descriptions, and input/output schemas, on each backend. |
+| Rust call smoke | One successful representative call per public tool in an isolated synthetic Rust scene. The JSON report shows each tool and its MCP content types. |
+| Dual-backend behavior | The same relevant cases pass through both backends, with assertions for returned values, observable scene changes, errors, and produced files as applicable. |
+
 From the repository root, use a Python 3.11+ environment with `clo_mcp/requirements.txt`
-installed and build the Rust release binary with `cargo build --release --locked`.
-Run the synthetic fixture smoke test with the asset overrides empty:
+installed. Build the binary and save the all-tool call report and the detailed smoke log:
 
 ```sh
-CLO_RUST_BINARY="$PWD/target/release/pattern-native" \
-  CLO_RUST_AVATAR_DIR='' CLO_RUST_FABRIC_DIR='' \
-  python -m clo_mcp.smoke_compat
+cargo build --release --locked
+export CLO_RUST_BINARY="$PWD/target/release/pattern-native"
+python -m clo_mcp.sweep_compat > rust-tool-calls.json 2> rust-tool-calls.log
+CLO_RUST_AVATAR_DIR='' CLO_RUST_FABRIC_DIR='' python -m clo_mcp.smoke_compat
 ```
+
+The sweep exits nonzero for missing, unexpected, or failed calls. Its success criterion
+is `expected_count = called_count = ok_count = 48` with empty `missing`,
+`unexpected`, and `errors` arrays. Use `tools.<name>` to inspect each result.
 
 Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
 to include the official backend smoke. Run it with the CLO 3D bridge connected.
 `tools/list` is checked against the contract, including input and output schemas.
 The Rust fixtures also exercise selected scene, image, export, failure, and session flows.
+
+For behavior verification, use the comparison recipes below and record one verdict
+per tool after reviewing all applicable cases. Use a disposable CLO scene for tests
+that change state, preserve the exact requests and both results, and reopen exported
+files or read scene state back when the tool promises a side effect. A review begins
+with an unknown behavioral tally until evidence is collected for that revision.
 
 The first repeatable live comparison checks the full fabric catalog, a mixed-case filter,
 an empty result, and an invalid filter type. Use the same CLO asset library on both
@@ -144,8 +160,12 @@ identity, shifts new panel and fabric indices, and restores both saved meshes
 and embedded avatars. Save and reopen the combined project. Test invalid input
 in both modes. Append to an empty scene, re-export as ZPAC, then append the
 ZPAC and confirm the avatar stays in the scene and both poses are available.
-A combined scene without complete native poses requires a
-separate initialization test.
+Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
+before and after simulation. Export all panels immediately after append,
+save and reopen the combined project, then call `simulate` with zero steps.
+Check that preserved meshes retain positions, topology and any Rust velocities.
+Only panels without a mesh initialize from their outlines. A new explicit
+particle distance requests a remesh.
 
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group

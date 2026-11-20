@@ -14,6 +14,12 @@ pub(crate) use texture::png_for_export;
 
 use serde_json::{json, Value};
 
+pub(crate) fn mesh_uses_rest_mm(state: &Value, mesh: &Value) -> bool {
+    state["simulation"]["texcoords_units"] == "mm"
+        || state["simulation"]["source"] == "native_saved_pose"
+        || mesh["texcoords_units"] == "mm"
+}
+
 pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Result<Value, String>> {
     Some(match name {
         "avatar_list" => Ok(assets::avatar_list(state)),

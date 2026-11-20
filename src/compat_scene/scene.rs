@@ -251,21 +251,25 @@ fn append_native_pose(
     let pose = array(imported, "saved_pose");
     let added = &panels[prior_count..];
     let original = array(imported, "patterns");
-    if pose.is_empty() || pose.len() != added.len() || pose.len() != original.len() {
+    if !pose.is_empty() && (pose.len() != added.len() || pose.len() != original.len()) {
         return None;
     }
-    let mut meshes = if prior_count == 0 {
-        Vec::new()
-    } else {
-        match existing? {
-            Value::Array(meshes) => meshes,
-            _ => return None,
-        }
+    let mut previous = existing.unwrap_or(Value::Null);
+    let complete = (prior_count == 0 || previous["source"] == "native_saved_pose")
+        && array(&previous, "meshes").len() == prior_count
+        && array(&previous, "meshes").iter().zip(panels).all(|(mesh, panel)| mesh["id"] == panel["id"])
+        && pose.len() == added.len();
+    let previous_native = previous["source"] == "native_saved_pose"
+        || previous["texcoords_units"] == "mm";
+    let mut meshes = match previous.get_mut("meshes").map(Value::take) {
+        Some(Value::Array(meshes)) => meshes,
+        _ => Vec::new(),
     };
-    if meshes.len() != prior_count
-        || meshes.iter().zip(panels).any(|(mesh, panel)| mesh["id"] != panel["id"])
-    {
-        return None;
+    meshes.retain(|mesh| panels[..prior_count].iter().any(|panel| panel["id"] == mesh["id"]));
+    if !complete && previous_native {
+        for mesh in &mut meshes {
+            mesh["texcoords_units"] = json!("mm");
+        }
     }
     for ((mesh, old), new) in pose.iter().zip(original).zip(added) {
         if mesh["id"] != old["id"] {
@@ -273,9 +277,24 @@ fn append_native_pose(
         }
         let mut mesh = mesh.clone();
         mesh["id"] = new["id"].clone();
+        if !complete {
+            mesh["texcoords_units"] = json!("mm");
+        }
         meshes.push(mesh);
     }
-    Some(json!({"source": "native_saved_pose", "meshes": meshes}))
+    if meshes.is_empty() {
+        return None;
+    }
+    if complete {
+        return Some(json!({"source": "native_saved_pose", "meshes": meshes}));
+    }
+    let mut mixed = json!({"source": "mixed_saved_pose", "meshes": meshes});
+    for field in ["steps", "quality", "particle_distance", "mesh_refinement"] {
+        if let Some(value) = previous.get_mut(field) {
+            mixed[field] = value.take();
+        }
+    }
+    Some(mixed)
 }
 
 pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
@@ -344,8 +363,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                     .iter()
                     .all(|key| array(state, key).is_empty())
                 && state["colorways"].as_array().is_none_or(|names| names == &[json!("Colorway 1")]);
-            let old_pose = (append && state["simulation"]["source"] == "native_saved_pose")
-                .then(|| state["simulation"]["meshes"].clone());
+            let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if append && !fresh_append {
                 vec_mut(state, "fabrics").extend(fabrics);
@@ -396,7 +414,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             reply["partial"] = json!(true);
             reply["native_import"] = loaded["native_import"].clone();
             reply["native_import"]["embedded_avatar_loaded"] = json!(embedded_avatar);
-            reply["native_import"]["saved_pose_loaded"] = json!(state["simulation"]["source"] == "native_saved_pose");
+            reply["native_import"]["saved_pose_loaded"] = json!(!pose.is_empty() && !state["simulation"].is_null());
             let mut warnings = vec![
                 "Loaded native outlines from saved mesh samples. Verified curve metrics, child shapes and internal seam paths are available for supported records.".to_owned(),
                 "Saved arrangement settings may be present. Official placement calibration and solver continuation state are unavailable.".to_owned(),
@@ -411,8 +429,8 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             if array(&loaded, "fabrics").is_empty() {
                 warnings.push("Archived fabric assignments and front colors could not be validated for this file.".into());
             }
-            if append && !pose.is_empty() && state["simulation"].is_null() {
-                warnings.push("The combined scene has no complete set of saved native poses. The 3D pose will be initialized from the pattern outlines.".into());
+            if append && !pose.is_empty() && state["simulation"]["source"] == "mixed_saved_pose" {
+                warnings.push("The combined scene retains saved poses. Panels without a pose are initialized from the pattern outlines.".into());
             } else if pose.is_empty() {
                 warnings.push("The saved 3D pose could not be validated for this file.".into());
             }
