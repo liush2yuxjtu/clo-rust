@@ -1,6 +1,7 @@
 use super::{array, array_mut, avt, boolean, pattern_index, string, texture::BaseTexture};
 use serde_json::{json, Value};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -429,6 +430,9 @@ fn avatar_from_mesh(
     if !(1.0..=5000.0).contains(&height) {
         return Err("avatar height is out of the supported millimetre range".into());
     }
+    let native_rest = rest_details.is_some();
+    let center_x = if native_rest { (xmin + xmax) / 2.0 } else { 0.0 };
+    let floor = if native_rest { ymin } else { 0.0 };
     if rest_details.is_none() {
         for point in &mut points {
             point[0] -= (xmin + xmax) / 2.0;
@@ -444,9 +448,8 @@ fn avatar_from_mesh(
         ("high_hip", "h_high_hip"),
         ("hip", "h_hip"),
     ] {
-        let floor = if rest_details.is_some() { ymin } else { 0.0 };
         let level = body[height_key].as_f64().unwrap() + floor;
-        if let Some(circumference) = mesh_section(&points, &faces, level) {
+        if let Some(circumference) = mesh_section(&points, &faces, level, center_x, height) {
             body[measurement] = json!(circumference);
         }
     }
@@ -475,19 +478,68 @@ fn avatar_from_mesh(
     Ok(avatar)
 }
 
-fn mesh_section(points: &[[f64; 3]], faces: &[[usize; 3]], y: f64) -> Option<f64> {
-    // Estimate a girth from the convex hull of the horizontal mesh intersection.
-    let mut section = Vec::<[f64; 2]>::new();
+fn mesh_section(
+    points: &[[f64; 3]],
+    faces: &[[usize; 3]],
+    y: f64,
+    center_x: f64,
+    height: f64,
+) -> Option<f64> {
+    // Weld the slice endpoints in a 0.05 mm grid. UV seams and separate
+    // mesh parts can have coincident vertices with different indices.
+    let key = |point: [f64; 2]| point.map(|v| (v * 20.0).round() as i64);
+    let mut positions = HashMap::new();
+    let mut edges: HashMap<_, HashSet<_>> = HashMap::new();
     for face in faces {
+        let mut intersections = [[0.0; 2]; 2];
+        let mut count = 0;
         for i in 0..3 {
             let a = points[face[i]];
             let b = points[face[(i + 1) % 3]];
             if (a[1] <= y && b[1] > y) || (b[1] <= y && a[1] > y) {
                 let t = (y - a[1]) / (b[1] - a[1]);
-                section.push([a[0] + t * (b[0] - a[0]), a[2] + t * (b[2] - a[2])]);
+                intersections[count] = [a[0] + t * (b[0] - a[0]), a[2] + t * (b[2] - a[2])];
+                count += 1;
+            }
+        }
+        if count == 2 {
+            let [a, b] = intersections.map(key);
+            if a == b {
+                continue;
+            }
+            positions.entry(a).or_insert(intersections[0]);
+            positions.entry(b).or_insert(intersections[1]);
+            edges.entry(a).or_default().insert(b);
+            edges.entry(b).or_default().insert(a);
+        }
+    }
+    // Estimate the tape around the central loop only. A hull of the whole
+    // slice can span unrelated arm, hand, or accessory loops.
+    let mut seen = HashSet::new();
+    let mut best = None;
+    for &start in edges.keys() {
+        if !seen.insert(start) {
+            continue;
+        }
+        let mut pending = vec![start];
+        let mut contour = Vec::new();
+        let mut closed = true;
+        while let Some(node) = pending.pop() {
+            contour.push(positions[&node]);
+            closed &= edges[&node].len() == 2;
+            pending.extend(edges[&node].iter().copied().filter(|p| seen.insert(*p)));
+        }
+        let center = contour.iter().map(|p| p[0]).sum::<f64>() / contour.len() as f64;
+        if closed && (center - center_x).abs() <= height * 0.09 {
+            if let Some(value) = tape_perimeter(contour) {
+                best = Some(best.map_or(value, |previous: f64| previous.max(value)));
             }
         }
     }
+    best
+}
+
+fn tape_perimeter(mut section: Vec<[f64; 2]>) -> Option<f64> {
     if section.len() < 3 {
         return None;
     }
@@ -516,6 +568,33 @@ fn mesh_section(points: &[[f64; 3]], faces: &[[usize; 3]], y: f64) -> Option<f64
         .map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]))
         .sum::<f64>();
     (length > 1.0).then_some(length)
+}
+
+#[cfg(test)]
+#[test]
+fn avatar_tape_excludes_disconnected_arms() {
+    let mut points = Vec::new();
+    let mut faces = Vec::new();
+    for (x, half_width) in [(0.0, 100.0), (-360.0, 30.0), (360.0, 30.0)] {
+        let base = points.len();
+        for y in [0.0, 200.0] {
+            for (dx, z) in [
+                (-half_width, -half_width),
+                (half_width, -half_width),
+                (half_width, half_width),
+                (-half_width, half_width),
+            ] {
+                points.push([x + dx, y, z]);
+            }
+        }
+        for i in 0..4 {
+            let a = base + i;
+            let b = base + (i + 1) % 4;
+            faces.extend([[a, b, b + 4], [a, b + 4, a + 4]]);
+        }
+    }
+    assert_eq!(mesh_section(&points, &faces, 80.0, 0.0, 1750.0), Some(800.0));
+    assert_eq!(mesh_section(&points, &faces, 220.0, 0.0, 1750.0), None);
 }
 
 fn avatar_obj(path: &Path) -> Result<(Vec<[f64; 3]>, Vec<[usize; 3]>), String> {

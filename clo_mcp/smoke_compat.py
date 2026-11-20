@@ -456,6 +456,28 @@ async def compare_saved_scene_info():
     }, ensure_ascii=False))
 
 
+async def compare_saved_arrangements():
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene = await json_result(session, "scene_info")
+        official = await json_result(session, "arrangement_points")
+    assert scene["avatars"], "open a saved CLO project with an avatar"
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust_scene = await json_result(session, "scene_info")
+        rust = await json_result(session, "arrangement_points")
+    assert rust_scene["avatars"] == scene["avatars"]
+    assert official["count"] == len(official["names"]) > 0
+    assert rust == official, (official, rust)
+    print(json.dumps({
+        "tool": "arrangement_points", "project": scene["project"],
+        "avatars": scene["avatars"], "ordered_names_matched": rust["count"],
+    }, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -477,6 +499,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-scene-info", action="store_const", dest="comparison",
                              const=compare_saved_scene_info,
                              help="compare scene metadata for the same saved CLO project")
+    comparisons.add_argument("--compare-saved-arrangements", action="store_const", dest="comparison",
+                             const=compare_saved_arrangements,
+                             help="compare ordered avatar arrangement names in a saved CLO project")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

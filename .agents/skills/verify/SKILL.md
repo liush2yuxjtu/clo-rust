@@ -98,6 +98,17 @@ avatars and fabrics, seam group count, colorway names, active colorway index
 and the shared asset path. It checks that each backend reports its own version
 and temp path. Use additional fixtures to verify multiple avatars and colorways.
 
+Use `--compare-saved-arrangements` with the same saved project and a loaded
+avatar. Compare the scene's avatar names, the arrangement count and every name
+in order. This case checks the names exposed by `arrangement_points`.
+
+For mesh-based avatar girth estimates, run
+`cargo test --locked avatar_tape_excludes_disconnected_arms`. Compare the
+central torso slice against a known section with detached limb contours. For
+an actual project, record the measurement source and differences in millimetres
+against the CLO tool at the same avatar. Require independent evidence before
+claiming parity for `avatar_measurements`.
+
 For saved internal seams, run `cargo test --locked native_inner_seam_uses_saved_mesh_edges`.
 Open a native fixture with internal seams over MCP and use `simulate` without a
 new particle distance. Save and reopen the resulting `.clorust` scene, then
