@@ -6239,35 +6239,73 @@ async def compare_live_composed_zpac():
     directory = Path(os.environ["CLO_MCP_STATE"])
     assert project.is_file() and garment.is_file() and directory.is_dir()
 
+    async def api(session, name, *args):
+        return (await json_result(session, "clo_api_call", {"name": name, "args": list(args)}))["value"]
+
     async def read(session):
         scene = await json_result(session, "scene_info")
         fabrics = await json_result(session, "fabric_list")
         seams = await json_result(session, "seams_list")
-        total = await json_result(session, "clo_api_call", {
-            "name": "fabric_api.GetFabricCount", "args": [False],
-        })
+        total = await api(session, "fabric_api.GetFabricCount", False)
+        colors = []
+        for colorway in range(len(scene["colorways"])):
+            row = []
+            for fabric in range(total):
+                rgba = await api(session, "fabric_api.GetFabricPBRMaterialBaseColor", colorway, fabric, 0)
+                row.append(struct.pack("<4f", *rgba).hex())
+            colors.append(row)
         return {"patterns": scene["patterns"], "colorways": scene["colorways"],
-                "current_colorway": scene["current_colorway"], "materials": total["value"],
-                "fabrics": fabrics, "seams": seams}
+                "current_colorway": scene["current_colorway"], "materials": total,
+                "fabric_rgba_f32": colors, "fabrics": fabrics, "seams": seams}
 
     cases = (("empty", None, garment, [1, 1], [0, 0], 1, 0),
              ("empty_project", None, project, [1, 1], [0, 0], 1, 0),
              ("nonempty", project, garment, [0, 0, 1, 1], [0, 0, 1, 1], 2, 1))
-    if selected := os.environ.get("CLO_COMPOSED_ZPAC_CASE"):
-        cases = tuple(case for case in cases if case[0] == selected)
-        assert cases, "CLO_COMPOSED_ZPAC_CASE must be empty, empty_project or nonempty"
+    selected = os.environ.get("CLO_COMPOSED_ZPAC_CASE")
+    variants = {
+        "active_zero": (garment, "utility_api.SetCurrentColorwayIndex(0)"),
+        "renamed": (garment, "utility_api.SetColorwayName(0,'Spare'); utility_api.SetColorwayName(1,'Original')"),
+        "short": (garment, "utility_api.DeleteColorwayItem(1)"),
+        "long": (project, "assert utility_api.CopyColorway(0,2) == 2; "
+                          "utility_api.SetColorwayName(2,'Third'); utility_api.SetCurrentColorwayIndex(2)"),
+    }
+    sources = {label: directory / f"source-{label}.zpac" for label in variants}
+    same_indices = [0, 0, 1, 1]
+    palette_cases = tuple((label, initial, source, same_indices, same_indices, 2, active)
+                          for label, initial, source, active in (
+                              ("active_index", project, sources["active_zero"], 1),
+                              ("renamed_palette", project, sources["renamed"], 1),
+                              ("short_source", project, sources["short"], 1),
+                              ("short_receiver", sources["short"], garment, 0),
+                              ("long_receiver", sources["long"], garment, 2)))
+    cases += palette_cases
+    if selected:
+        cases = tuple(case for case in cases if case[0] == selected
+                      or selected == "palette" and case in palette_cases)
+        assert cases, f"unknown composed ZPAC case {selected}"
     reports = []
     async with open_backend("official") as clo, open_backend("rust") as rust:
         original = (await json_result(clo, "scene_info"))["project_path"]
         status = await json_result(clo, "clo_status")
         assert status["bridge"] == "up"
         try:
+            required_sources = {path for case in cases for path in case[1:3]}
+            await json_result(clo, "scene_clear", {"keep_avatar": False})
+            for label, (fixture, code) in variants.items():
+                path = sources[label]
+                if path in required_sources:
+                    assert not path.exists(), "use a fresh test directory"
+                    await json_result(clo, "scene_open", {"path": str(fixture)})
+                    await json_result(clo, "clo_run_python", {"code": code + "; utility_api.UpdateColorways(True)"})
+                    await json_result(clo, "scene_export", {"path": str(path)})
+                    assert path.is_file()
             for label, initial, source, before, after, count, active in cases:
                 archives = {backend: directory / f"composition-{label}-{backend}.zpac"
                             for backend in ("official", "rust")}
                 assert not any(path.exists() for path in archives.values()), "use a fresh test directory"
                 expected = None
                 expected_archive = None
+                expected_import = None
                 report = {"case": label, "checked": {}, "export_errors": {}}
                 for backend, session in (("official", clo), ("rust", rust)):
                     await json_result(session, "scene_clear", {"keep_avatar": False})
@@ -6276,6 +6314,9 @@ async def compare_live_composed_zpac():
                     await json_result(session, "scene_open", {"path": str(source), "mode": "append"})
                     composed = await read(session)
                     assert [piece["fabric_index"] for piece in composed["patterns"]] == before
+                    if expected_import is None:
+                        expected_import = composed
+                    assert composed == expected_import, (label, backend, composed, expected_import)
                     response = await session.call_tool("scene_export", {"path": str(archives[backend])})
                     assert await read(session) == composed, (label, backend, "export changed the scene")
                     if response.isError:
@@ -6307,6 +6348,10 @@ async def compare_live_composed_zpac():
                             if expected_archive is None:
                                 expected_archive = archive
                             assert archive == expected_archive, (label, backend, "stored meshes or seam endpoints differ")
+                        if label == "short_source":
+                            await json_result(target, "fabric_set_color", {"fabric_index": 1, "color": "#123456"})
+                            recolored = (await read(target))["fabric_rgba_f32"]
+                            assert recolored[0][1] == recolored[1][1] != reopened["fabric_rgba_f32"][0][1]
                 report["stored_meshes_and_seams_compared"] = not report["export_errors"]
                 reports.append(report)
         finally:

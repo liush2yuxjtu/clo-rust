@@ -977,9 +977,18 @@ variant even when the source was saved with its second colorway active.
 Read back fabrics, colorways and seams. Compare saved mesh coordinates,
 triangle indices, 2D rest coordinates and sewing endpoints via the reopened
 Rust scenes. The `nonempty` case appends a saved native garment to a
-native project with a matching palette. Require four panels, two independent
-fabric slots and two seam groups with endpoints on the corresponding panels.
-Confirm the same record counts and open the Rust-written file in official CLO.
+native project. Require four panels, two independent fabric slots and two
+seam groups with endpoints on the corresponding panels.
+Set `CLO_COMPOSED_ZPAC_CASE=palette` to cover five more combinations with
+different names, active indices or palette lengths. Compare the exact f32
+material colors with `fabric_api.GetFabricPBRMaterialBaseColor` across all
+slots before export and after reopening. The receiver keeps its own names
+and active index. Source variants are copied by ordinal, and extra receiver
+slots use the first source style chip. Recolor the imported material in
+`short_source` after reopening, then check that both linked slots update.
+The three-argument color query uses the ordinal in the assigned-material
+list. After appending into a fresh scene, query ordinal 0 and verify the
+appended fabric's color while the garment still uses catalog index 1.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.

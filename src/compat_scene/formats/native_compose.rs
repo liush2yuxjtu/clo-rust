@@ -1,9 +1,10 @@
 //! Combine supported archived panels and their fabric, colorway and sewing records.
 
-use super::native_materials::read_colorways;
+use super::native_materials::{read_colorways, select_colorway};
 use super::native_pose::{
     encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE,
 };
+use crate::compat_scene::appended_colorway;
 use std::borrow::Cow;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -267,10 +268,15 @@ fn colorways(a: &Fields<'_>, b: &Fields<'_>, offsets: &Offsets) -> Result<Vec<u8
     let key = b"mapNewColorway";
     let left = a.map(key)?;
     let right = b.map(key)?;
+    let source = maps(&right, list)?;
+    if source.is_empty() {
+        return Err("native PAC composition is missing incoming colorway rows".into());
+    }
     let rows = maps(&left, list)?
         .iter()
-        .zip(maps(&right, list)?)
-        .map(|(l, r)| {
+        .enumerate()
+        .map(|(position, l)| {
+            let r = &source[appended_colorway(position, source.len())];
             let mut output = l.encoded().to_vec();
             for (key, supported) in [
                 (
@@ -334,13 +340,13 @@ fn counts(root: &Fields<'_>) -> Result<(u32, u32), String> {
 }
 
 pub(super) fn join(receiver: &[u8], incoming: &[u8]) -> Result<Vec<u8>, String> {
-    if read_colorways(receiver)? != read_colorways(incoming)? {
-        return Err(
-            "native PAC composition requires matching palettes and active colorways".into(),
-        );
-    }
+    let (_, active) = read_colorways(receiver)?;
+    let (source_colorways, source_active) = read_colorways(incoming)?;
+    let mapped = appended_colorway(active, source_colorways.len());
+    let incoming_selected = (mapped != source_active)
+        .then(|| select_colorway(incoming, mapped as u32)).transpose()?;
     let a = Fields::read(receiver)?;
-    let b = Fields::read(incoming)?;
+    let b = Fields::read(incoming_selected.as_deref().unwrap_or(incoming))?;
     let (panels, fabrics) = counts(&a)?;
     counts(&b)?;
     let ap = a.map(b"mapPatternEditor")?;

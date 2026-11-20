@@ -1301,11 +1301,16 @@ pub(super) fn invoke(
         }
         "fabric_api.GetFabricPBRMaterialBaseColor" => {
             let fabric_index = usize::from(colorway_color);
-            let mut fabric = &fabrics[index(&arg[fabric_index], fabrics.len(), "fabric")?];
-            if colorway_color {
+            let fabric = if colorway_color {
                 let colorway = index(&arg[0], array(&state["colorways"]).len().max(1), "colorway")?;
-                fabric = crate::compat_scene::fabric_for_colorway(state, fabric, colorway)?;
-            }
+                let ordinal = index(&arg[1], fabrics.len(), "fabric")?;
+                let Some(fabric) = crate::compat_scene::assigned_fabrics(state).nth(ordinal) else {
+                    return Ok(json!([0.0, 0.0, 0.0, 1.0]));
+                };
+                crate::compat_scene::fabric_for_colorway(state, fabric, colorway)?
+            } else {
+                &fabrics[index(&arg[0], fabrics.len(), "fabric")?]
+            };
             let face = &arg[fabric_index + 1];
             let face_color = array(&fabric["info"]["face_colors"]).iter()
                 .find(|row| row["type"] == *face).map(|row| &row["rgba"]);

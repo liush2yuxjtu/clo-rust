@@ -11,8 +11,49 @@ pub(crate) use patterns::{bridge_pattern_index, internal_strokes, layout_outline
 pub(crate) use patterns::sampled_perimeter;
 pub(crate) use annotations::seam_group_names;
 pub(crate) use formats::write as write_artifact;
-pub(crate) use scene::{assigned_fabric_count, avatar_names, checkpoint_before_build, clear_patterns, default_fabric, empty_project};
+pub(crate) use scene::{assigned_fabric_count, assigned_fabrics, avatar_names, checkpoint_before_build, clear_patterns, default_fabric, empty_project};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
+
+fn appended_colorway(index: usize, source_count: usize) -> usize {
+    // CLO fills receiver slots by position, reusing the first source style
+    // chip when the receiver has more colorways.
+    if index < source_count { index } else { 0 }
+}
+
+fn remap_appended_colorways(fabric: &mut Value, receiver: &Value, archived: &Value) {
+    let names = &receiver["colorways"];
+    let count = array(receiver, "colorways").len();
+    let source_count = array(archived, "colorways").len();
+    let active = receiver["current_colorway"].as_u64().unwrap_or(0) as usize;
+    let source_active = archived["current_colorway"].as_u64().unwrap_or(0) as usize;
+    if count == 0 || source_count == 0 || active >= count
+        || (*names == archived["colorways"] && active == source_active)
+    {
+        return;
+    }
+    let variants = &fabric["native_colorway_materials"];
+    let mut base = fabric.clone();
+    base.as_object_mut().expect("archived fabric record").remove("native_colorway_materials");
+    let mut materials = Vec::with_capacity(count);
+    let mut chips = Vec::with_capacity(count);
+    for position in 0..count {
+        let source = appended_colorway(position, source_count);
+        let mut material = if source == source_active {
+            base.clone()
+        } else if let Some(item) = variants["values"].get(source).filter(|item| item.is_object()) {
+            item.clone()
+        } else {
+            return;
+        };
+        material["index"] = base["index"].clone();
+        materials.push(material);
+        chips.push(variants["chips"].get(source).cloned().unwrap_or_else(|| json!(source)));
+    }
+    *fabric = materials[active].clone();
+    if count > 1 {
+        fabric["native_colorway_materials"] = json!({"names": names, "values": materials, "chips": chips});
+    }
+}
 
 pub(crate) fn fabric_for_colorway<'a>(
     state: &Value,

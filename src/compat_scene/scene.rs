@@ -47,7 +47,7 @@ fn open_reply(state: &Value, path: &Path) -> Value {
     json!({"ok": true, "path": path, "pattern_count": array(state, "patterns").len(), "avatars": avatar_names(state)})
 }
 
-pub(crate) fn assigned_fabric_count(state: &Value) -> usize {
+pub(crate) fn assigned_fabrics(state: &Value) -> impl Iterator<Item = &Value> {
     let assignments = array(state, "patterns")
         .iter()
         .map(|pattern| pattern["fabric_index"].as_u64().unwrap_or(0))
@@ -55,8 +55,13 @@ pub(crate) fn assigned_fabric_count(state: &Value) -> usize {
     array(state, "fabrics")
         .iter()
         .enumerate()
-        .filter(|(position, fabric)| assignments.contains(&fabric["index"].as_u64().unwrap_or(*position as u64)))
-        .count()
+        .filter_map(move |(position, fabric)| {
+            assignments.contains(&fabric["index"].as_u64().unwrap_or(position as u64)).then_some(fabric)
+        })
+}
+
+pub(crate) fn assigned_fabric_count(state: &Value) -> usize {
+    assigned_fabrics(state).count()
 }
 
 pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
@@ -269,6 +274,7 @@ fn prepare_archived_fabrics(
             fabric["index"] = json!(offset
                 .checked_add(index as u64)
                 .ok_or("native material-index limit exceeded")?);
+            super::remap_appended_colorways(fabric, state, loaded);
         }
         for field in ["patterns", "imported_meshes"] {
             for piece in vec_mut(loaded, field) {
@@ -558,23 +564,15 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 None
             };
             let mut loaded = formats::clo_native::read(path, is_project)?;
-            let composition = composition.filter(|_| state["colorways"] == loaded["colorways"]
-                && state["current_colorway"] == loaded["current_colorway"]);
+            let composition = composition.filter(|_| !array(state, "colorways").is_empty()
+                && !array(&loaded, "colorways").is_empty());
             let empty_receiver = append
                 && prior_count == 0
                 && array(state, "imported_meshes").is_empty()
                 && state["fabrics"] == json!([default_fabric()])
                 && state["colorways"] == json!([DEFAULT_COLORWAY])
                 && array(&loaded, "fabrics").len() == 1;
-            let mut fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
-            if empty_receiver {
-                let fabric = &mut fabrics[0];
-                if let Some(first) = fabric["native_colorway_materials"]["values"].get(0) {
-                    let mut first = first.clone();
-                    first["index"] = fabric["index"].clone();
-                    *fabric = first;
-                }
-            }
+            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if append {
