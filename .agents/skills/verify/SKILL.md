@@ -1033,6 +1033,18 @@ mesh positions, topology and UV after reopening it in Rust. Missing files
 return an MCP error and preserve the scene. Compare the response and the
 scene, panel and seam readback on both backends.
 
+Run `--compare-live-recovered-zpac-save` with a live bridge, a fresh shared
+`CLO_MCP_STATE`, `CLO_SCENE_OPEN_GARMENT` pointing to the saved-pose ZPAC, and
+`CLO_SCENE_OPEN_PROJECT` pointing to the two-panel ZPRJ. Unset
+`CLO_RUST_CHECKPOINT_DIR`. Remove the ZIP end record from a disposable copy.
+Open it directly or append it to the project. Each backend writes a ZPAC,
+a ZPRJ and a named checkpoint. Reopen every output in both backends.
+Compare scene structure, fabric and colorway data, and archive integrity.
+For Rust outputs, compare pose coordinates, triangles and UV to the intact
+source case. The directly saved garment payloads must match the intact file
+byte for byte. Change disposable source copies after opening them and
+verify that saving fails without changing the output file or live scene.
+
 Run `--compare-live-scene-open` with a live bridge and a fresh disposable
 `CLO_MCP_STATE`. Set `CLO_SCENE_OPEN_PROJECT` to `multi-colorway-colored.zprj`,
 `CLO_SCENE_OPEN_GARMENT` to `multi-colorway-simulated.zpac`, and

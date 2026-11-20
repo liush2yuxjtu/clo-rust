@@ -614,6 +614,26 @@ fn locate_footerless_directory(data: &[u8]) -> Option<(usize, usize, usize)> {
     None
 }
 
+pub(super) fn restore_zpac_footer(data: &mut Vec<u8>) -> bool {
+    if !data.starts_with(ZPAC) || data.len() as u64 > ARCHIVE_LIMIT {
+        return false;
+    }
+    let Some((central, base, count)) = locate_footerless_directory(data) else {
+        return false;
+    };
+    let size = (data.len() - central) as u32;
+    let offset = (central - base) as u32;
+    // The directory and its local file records are intact. Recreate the
+    // missing ZIP end record in memory and let the ZIP reader validate it.
+    data.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    data.extend_from_slice(&(count as u16).to_le_bytes());
+    data.extend_from_slice(&(count as u16).to_le_bytes());
+    data.extend_from_slice(&size.to_le_bytes());
+    data.extend_from_slice(&offset.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    true
+}
+
 fn read_footerless_garment(path: &Path) -> Result<SceneGarment, String> {
     let mut file = bounded_file(path)?;
     let mut prefix = [0; 16];
@@ -632,19 +652,9 @@ fn read_footerless_garment(path: &Path) -> Result<SceneGarment, String> {
     if data.len() as u64 > ARCHIVE_LIMIT {
         return Err("native CLO file exceeds 512 MiB".into());
     }
-    let Some((central, base, count)) = locate_footerless_directory(&data) else {
+    if !restore_zpac_footer(&mut data) {
         return Ok(SceneGarment::UnreadableArchive);
-    };
-    let size = (data.len() - central) as u32;
-    let offset = (central - base) as u32;
-    // The directory and its local file records are intact. Recreate the
-    // missing ZIP end record in memory and let the ZIP reader validate it.
-    data.extend_from_slice(b"PK\x05\x06\0\0\0\0");
-    data.extend_from_slice(&(count as u16).to_le_bytes());
-    data.extend_from_slice(&(count as u16).to_le_bytes());
-    data.extend_from_slice(&size.to_le_bytes());
-    data.extend_from_slice(&offset.to_le_bytes());
-    data.extend_from_slice(&0u16.to_le_bytes());
+    }
     let Some(archive) = scene_archive(Cursor::new(data), ZPAC)? else {
         return Ok(SceneGarment::UnreadableArchive);
     };

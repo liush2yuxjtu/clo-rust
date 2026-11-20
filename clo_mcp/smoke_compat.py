@@ -7420,6 +7420,111 @@ async def compare_live_resumed_native_save():
     print(json.dumps({"cases": results, "remesh_rejected_without_changes": True, "result": "pass"}))
 
 
+async def compare_live_recovered_zpac_save():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    fixture = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    assert root.is_dir() and project.is_file() and fixture.is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    intact = fixture.read_bytes()
+    assert intact[-22:-18] == b"PK\x05\x06"
+    source = root / "recovered.zpac"
+    broken = intact[:-22]
+    source.write_bytes(broken)
+    reports = []
+
+    async def open_recovered(session, mode, path=source):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        if mode == "append":
+            await json_result(session, "scene_open", {"path": str(project)})
+        await json_result(session, "scene_open", {"path": str(path), "mode": mode})
+
+    async def structure(session):
+        scene = await json_result(session, "scene_info")
+        return ([row["name"] for row in scene["patterns"]], scene["seam_groups"], scene["avatars"])
+
+    async def poses(session, label):
+        result, _ = await snapshot_composed_archive(session, root / f"{label}.clorust")
+        return [{key: mesh[key] for key in ("positions", "triangles", "texcoords")} for mesh in result]
+
+    def payload(path):
+        with zipfile.ZipFile(path) as outer:
+            assert outer.testzip() is None
+            if path.suffix == ".zpac":
+                return {name: outer.read(name) for name in outer.namelist()}
+            garment = outer.read(next(name for name in outer.namelist() if name.endswith(".zpac")))
+        with zipfile.ZipFile(BytesIO(garment)) as inner:
+            assert inner.testzip() is None
+            return {name: inner.read(name) for name in inner.namelist()}
+
+    original_payload = payload(fixture)
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as inspector:
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        try:
+            for mode in ("replace", "append"):
+                for writer, session in (("official", clo), ("rust", rust)):
+                    for kind in ("zpac", "zprj", "checkpoint"):
+                        label = f"{mode}-{writer}-{kind}"
+                        await open_recovered(session, mode)
+                        expected = await structure(session)
+                        assert expected == (["Front", "Back"] * (2 if mode == "append" else 1),
+                                            2 if mode == "append" else 1, [])
+                        if kind == "checkpoint":
+                            reply = await json_result(session, "checkpoint_save", {"name": label})
+                            path = Path(reply["path"])
+                            assert path.suffix == ".zprj" and reply["name"] == label
+                        else:
+                            path = root / f"{label}.{kind}"
+                            assert await json_result(session, "scene_save", {
+                                "path": str(path), "thumbnail": False,
+                            }) == {"path": str(path)}
+                        members = payload(path)
+                        if writer == "rust" and mode == "replace":
+                            assert members == original_payload, label
+                        observed = []
+                        for reader, consumer in (("official", clo), ("rust", rust)):
+                            await json_result(consumer, "scene_clear", {"keep_avatar": False})
+                            if kind == "checkpoint":
+                                await json_result(consumer, "checkpoint_restore", {"name": label})
+                            else:
+                                await json_result(consumer, "scene_open", {"path": str(path)})
+                            assert await structure(consumer) == expected, (label, reader)
+                            observed.append(await read_composed_archive(consumer))
+                        assert observed[0] == observed[1], label
+                        await json_result(inspector, "scene_open", {"path": str(path)})
+                        mesh = await poses(inspector, label)
+                        if writer == "rust":
+                            await open_recovered(inspector, mode, fixture)
+                            assert mesh == await poses(inspector, f"control-{label}"), label
+                        reports.append({"mode": mode, "writer": writer, "format": kind,
+                                        "readers": 2, "panels": len(expected[0]),
+                                        "vertices": sum(len(item["positions"]) for item in mesh)})
+            for mode in ("replace", "append"):
+                guarded = root / f"guard-{mode}.zpac"
+                guarded.write_bytes(broken)
+                await open_recovered(rust, mode, guarded)
+                before = await json_result(rust, "scene_info")
+                target = root / f"protected-{mode}.zpac"
+                target.write_bytes(intact)
+                guarded.write_bytes(broken[:-1])
+                failure = await rust.call_tool("scene_save", {"path": str(target), "thumbnail": False})
+                assert failure.isError and "source archive changed" in failure.content[0].text, failure
+                assert target.read_bytes() == intact
+                assert await json_result(rust, "scene_info") == before
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert source.read_bytes() == broken and fixture.read_bytes() == intact
+    print(json.dumps({"result": "pass", "cases": reports, "cross_backend_reads": 2 * len(reports),
+                      "source_change_rejected": True, "source_sha256": hashlib.sha256(intact).hexdigest()}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -8080,6 +8185,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-resumed-native-save", action="store_const", dest="comparison",
                              const=compare_live_resumed_native_save,
                              help="resume native ZPRJ and ZPAC and cross-open the position-only updates")
+    comparisons.add_argument("--compare-live-recovered-zpac-save", action="store_const", dest="comparison",
+                             const=compare_live_recovered_zpac_save,
+                             help="cross-open native saves and checkpoints made from a recovered ZPAC")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

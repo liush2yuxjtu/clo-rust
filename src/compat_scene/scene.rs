@@ -543,7 +543,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
         }
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
-            let mut intact = true;
+            let mut recovered_zpac = false;
             let loaded = if is_project {
                 if load_avatar {
                     formats::clo_native::read_scene_project(path)?
@@ -564,7 +564,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                         return Ok(Some(open_reply(state, path)));
                     }
                     SceneGarment::Loaded { garment, intact: source_intact } => {
-                        intact = source_intact;
+                        recovered_zpac = !source_intact;
                         Some(garment)
                     }
                 }
@@ -581,14 +581,14 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 return Ok(Some(open_reply(state, path)));
             };
             let prior_count = array(state, "patterns").len();
-            let composition = if intact && append && prior_count != 0 {
-                formats::native_save::append_sources(state, path, is_project)
+            let composition = if append && prior_count != 0 {
+                formats::native_save::append_sources(state, path, is_project, recovered_zpac)
             } else {
                 None
             };
             let composition = composition.filter(|_| !array(state, "colorways").is_empty()
                 && !array(&loaded, "colorways").is_empty());
-            let empty_receiver = intact && append
+            let empty_receiver = append
                 && prior_count == 0
                 && array(state, "imported_meshes").is_empty()
                 && state["colorways"] == json!([DEFAULT_COLORWAY])
@@ -640,10 +640,10 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if intact && load_avatar && !append {
-                formats::native_save::remember(state, path, is_project);
+            if load_avatar && !append {
+                formats::native_save::remember(state, path, is_project, recovered_zpac);
             } else if empty_receiver && !array(state, "patterns").is_empty() {
-                formats::native_save::remember_empty_append(state, path, is_project);
+                formats::native_save::remember_empty_append(state, path, is_project, recovered_zpac);
             } else if let Some(parts) = composition {
                 formats::native_save::remember_composition(state, parts);
             }

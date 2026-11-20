@@ -1,7 +1,7 @@
 //! Preserve proprietary scene payloads while updating verified editable fields.
 
 use super::{
-    clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
+    clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, restore_zpac_footer, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
     native_pose::{encode_map, encoded_list, map_list, replace_positions, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
     native_avatar_ids::AvatarIdentities, native_author, native_compose, native_materials, native_recolor, native_textures, write,
 };
@@ -211,7 +211,7 @@ fn avatar_fingerprint(state: &Value) -> u64 {
     hash.finish()
 }
 
-pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project: bool) {
+pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project: bool, recovered_zpac: bool) {
     let value = path
         .canonicalize()
         .ok()
@@ -234,16 +234,19 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
         })
         .unwrap_or(Value::Null);
     state[SOURCE] = value;
+    if recovered_zpac && state[SOURCE].is_object() {
+        state[SOURCE]["recovered_zpac"] = json!(true);
+    }
 }
 
-pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &Path, project: bool) {
-    remember(state, path, project);
+pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &Path, project: bool, recovered_zpac: bool) {
+    remember(state, path, project, recovered_zpac);
     if state[SOURCE].is_object() {
         state[SOURCE]["empty_append"] = json!(true);
     }
 }
 
-pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool) -> Option<Vec<Value>> {
+pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool, recovered_zpac: bool) -> Option<Vec<Value>> {
     let source = &state[SOURCE];
     if source["garment"].as_u64()? != garment_fingerprint(state)
         || (source["fabrics"].as_u64()? != fabric_fingerprint(state)
@@ -257,7 +260,8 @@ pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, projec
     if parts.len() >= 16 {
         return None;
     }
-    parts.push(json!({"path": path.to_str()?, "stamp": stamp(&path).ok()?, "project": project}));
+    parts.push(json!({"path": path.to_str()?, "stamp": stamp(&path).ok()?, "project": project,
+                      "recovered_zpac": recovered_zpac}));
     Some(parts)
 }
 
@@ -274,11 +278,12 @@ pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Ve
     let path = source["path"].as_str().map(std::path::PathBuf::from);
     let project = source["project"] == true;
     let old_stamp = source["stamp"].clone();
+    let recovered_zpac = source["recovered_zpac"] == true;
     let archived_avatars = source["avatars"].clone();
     let empty_append = source["empty_append"] == true;
     let compacted_fabrics = source["compacted_fabrics"] == true;
     if let Some(path) = path {
-        remember(state, &path, project);
+        remember(state, &path, project, recovered_zpac);
         if state[SOURCE].is_object() {
             state[SOURCE]["stamp"] = old_stamp;
             state[SOURCE]["avatars"] = archived_avatars;
@@ -721,9 +726,12 @@ fn read_source(source: &Value) -> Result<Vec<u8>, String> {
     if expected != source["stamp"] {
         return Err("native source archive changed since it was opened".into());
     }
-    let original = fs::read(template).map_err(|error| format!("{}: {error}", template.display()))?;
+    let mut original = fs::read(template).map_err(|error| format!("{}: {error}", template.display()))?;
     if stamp(template)? != expected || Some(original.len() as u64) != expected[0].as_u64() {
         return Err("native source archive changed during save".into());
+    }
+    if source["recovered_zpac"] == true && !restore_zpac_footer(&mut original) {
+        return Err("native ZPAC source could not be recovered during save".into());
     }
     Ok(original)
 }
@@ -937,18 +945,18 @@ pub(in crate::compat_scene) fn save(
     if project {
         remember_project_save(state, path);
     } else if author_scene(&state[SOURCE]) && state[SOURCE]["project"] != true {
-        remember(state, path, false);
+        remember(state, path, false, false);
         if state[SOURCE].is_object() {
             state[SOURCE]["authored"] = json!(true);
         }
     } else if state[SOURCE]["empty_append"] == true {
-        remember_empty_append(state, path, false);
+        remember_empty_append(state, path, false, false);
     } else if state[SOURCE]["project"] != true {
         // The saved garment has compact indices. Keep the original parts
         // when their indices differ from the live fabric catalog.
         let appended = !super::super::array(&state[SOURCE], "appended").is_empty();
         if !appended || super::super::assigned_fabric_count(state) == super::super::array(state, "fabrics").len() {
-            remember(state, path, false);
+            remember(state, path, false, false);
         }
     }
     Ok(())
@@ -961,7 +969,7 @@ pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &P
         || (source["empty_append"] == true || !super::super::array(source, "appended").is_empty())
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
     let _ = rebind_project_avatars(state, path);
-    remember(state, path, true);
+    remember(state, path, true, false);
     if authored && state[SOURCE].is_object() {
         state[SOURCE]["authored"] = json!(true);
     }
