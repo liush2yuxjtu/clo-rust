@@ -4,15 +4,15 @@ use super::clo_native::find;
 use super::native_materials::{
     colorway_materials, face_records, face_type, material, read_colorways, select_colorway,
 };
-use super::native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE};
+use super::native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use super::native_recolor::edit_materials_in_active_colorway;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::{DefaultHasher, Hasher};
-use std::io::{Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use zip::ZipArchive;
@@ -297,7 +297,7 @@ pub(super) fn hydrate<R: Read + Seek>(
 struct Edit {
     kind: i32,
     image: Option<Vec<u8>>,
-    label: Option<String>,
+    new_asset: Option<(String, String)>,
     matches: RefCell<Vec<String>>,
     desaturated: bool,
 }
@@ -310,6 +310,7 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     let mut desaturation = None;
     let mut converted = HashMap::new();
     let mut removed = Vec::new();
+    let mut added = Vec::new();
     for edit in edits {
         let mut found = None;
         for (index, texture) in list.iter().enumerate() {
@@ -323,10 +324,11 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
                 }
                 continue;
             }
-            let name = filename(texture)?;
+            let archive_name = filename(texture)?;
+            let name = edit.new_asset.as_ref().map_or(archive_name, |(asset, _)| asset);
             let image_type = integer(texture, b"enImageType")?;
             if !matches!(image_type, 2 | 5)
-                || !Path::new(name)
+                || !Path::new(archive_name)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
             {
@@ -340,23 +342,30 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
             } else {
                 None
             };
-            if let Some(label) = &edit.label {
+            if let Some((asset, label)) = &edit.new_asset {
                 let bytes = record.as_deref().unwrap_or_else(|| texture.encoded());
-                record = Some(label_texture(&Fields::read(bytes)?, label, name)?);
+                record = Some(label_texture(&Fields::read(bytes)?, label, asset)?);
             }
             if let Some(record) = record {
                 converted.insert(index, record);
             }
         }
-        if edit.image.is_some() {
-            let name = found.ok_or("native save requires an existing texture slot on the fabric")?;
+        if let Some(image) = &edit.image {
+            let name = match (found, &edit.new_asset) {
+                (Some(name), _) => name,
+                (None, Some((asset, label))) if edit.kind == 0 => {
+                    added.push(Cow::Owned(new_base_texture(label, asset, image)?));
+                    asset
+                }
+                _ => return Err("native save requires an existing texture slot on the fabric".into()),
+            };
             edit.matches.borrow_mut().push(name.to_owned());
             if edit.kind == 0 {
                 desaturation = Some(edit.desaturated);
             }
         }
     }
-    if desaturation.is_none() && converted.is_empty() && removed.is_empty() {
+    if desaturation.is_none() && converted.is_empty() && removed.is_empty() && added.is_empty() {
         return Ok(None);
     }
     let mut updated = if let Some(desaturated) = desaturation {
@@ -365,7 +374,7 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     } else {
         face.encoded().to_vec()
     };
-    if !converted.is_empty() || !removed.is_empty() {
+    if !converted.is_empty() || !removed.is_empty() || !added.is_empty() {
         let textures: Vec<_> = list
             .iter()
             .enumerate()
@@ -375,6 +384,7 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
                     .remove(&index)
                     .map_or(Cow::Borrowed(texture.encoded()), Cow::Owned)
             })
+            .chain(added)
             .collect();
         updated = Fields::read(&updated)?.replace(
             b"listTexture",
@@ -383,6 +393,49 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
         )?;
     }
     Ok(Some(updated))
+}
+
+fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, String> {
+    let info = png::Decoder::new(Cursor::new(image)).read_info().map_err(|e| e.to_string())?;
+    let info = info.info();
+    let density = info.pixel_dims.filter(|dims| dims.unit == png::Unit::Meter)
+        .map(|dims| [dims.xppu, dims.yppu]).unwrap_or([2835; 2]);
+    let size: Vec<u8> = [info.width, info.height].into_iter().zip(density)
+        .flat_map(|(pixels, per_meter)| (pixels as f32 * 1000.0 / per_meter.max(1) as f32).to_le_bytes())
+        .collect();
+    let white: Vec<u8> = [1.0f32; 4].into_iter().flat_map(f32::to_le_bytes).collect();
+    let color = encode_map(&[
+        (b"qsPLMIdUTF8", BYTE_TYPE, b""), (b"v4Color", 12, &white),
+        (b"qsName", BYTE_TYPE, b""), (b"qsPLMId", BYTE_TYPE, b""),
+        (b"qsNameUTF8", BYTE_TYPE, b""),
+    ])?;
+    let zero = 0i32.to_le_bytes();
+    let minus_one = (-1i32).to_le_bytes();
+    let repeat = 10497i32.to_le_bytes();
+    encode_map(&[
+        (b"v2Translation", 10, &[0; 8]),
+        (b"qsFileName", BYTE_TYPE, label.as_bytes()),
+        (b"bAIFindBR", 1, &[0]), (b"enWrapS", 4, &repeat),
+        (b"qsFileNameUTF8", BYTE_TYPE, label.as_bytes()),
+        (b"qsAIFileName", BYTE_TYPE, b""), (b"qsAIFileNameUTF8", BYTE_TYPE, b""),
+        (b"isSubstanceExtract", 1, &[0]), (b"qsAIFileImageType", 4, &zero),
+        (b"qsAIFileLayerNo", 4, &minus_one), (b"qsAIFilePageNo", 4, &minus_one),
+        (b"enImageType", 4, &5i32.to_le_bytes()), (b"bUseManualOriginColor", 1, &[0]),
+        (b"qsUniqueFileName", BYTE_TYPE, asset.as_bytes()),
+        (b"qsUniqueFileNameUTF8", BYTE_TYPE, asset.as_bytes()),
+        (b"bIsJeanFile", 1, &[0]), (b"enType", 4, &zero),
+        (b"fIntensity", 6, &1.0f32.to_le_bytes()), (b"enWrapT", 4, &repeat),
+        (b"enMinFilter", 4, &9987i32.to_le_bytes()), (b"enMagFilter", 4, &9729i32.to_le_bytes()),
+        (b"v4BorderColor", 12, &[0; 16]), (b"bUseOverallColorSwitch", 1, &[0]),
+        (b"enMappingType", 4, &zero), (b"fSignedAngle", 6, &zero),
+        (b"bAppliedTransformToThumbnail", 1, &[0]), (b"bColorInverted", 1, &[1]),
+        (b"iAlphaMode", 4, &zero), (b"v2Size", 10, &size),
+        (b"bButtonUnified", 1, &[1]), (b"v2PhysicalSize", 10, &size),
+        (b"v2UvSize", 10, &white[..8]), (b"fUnifiedScale", 6, &0.001f32.to_le_bytes()),
+        (b"listLayer", LIST_TYPE, &zero), (b"bCanvasTransparency", 1, &[1]),
+        (b"mapOverallColorSwitchColor", MAP_TYPE, &color),
+        (b"mapManualOriginColor", MAP_TYPE, &color), (b"bTileTexture", 1, &[0]),
+    ])
 }
 
 fn label_texture(texture: &Fields<'_>, label: &str, asset: &str) -> Result<Vec<u8>, String> {
@@ -446,7 +499,7 @@ pub(super) fn replacements(
             edits.entry(index).or_insert_with(Vec::new).push(Edit {
                 kind,
                 image,
-                label: None,
+                new_asset: None,
                 matches: RefCell::new(Vec::new()),
                 desaturated: fabric["base_texture_desaturated"] == true,
             });
@@ -470,7 +523,7 @@ fn apply_edits(
             .ok_or("native texture binding was not found")?;
         if matches.len() < 4
             || matches.iter().any(|candidate| candidate != name)
-            || occurrences(pac, name.as_bytes()) != matches.len() * 2
+            || edit.new_asset.is_none() && occurrences(pac, name.as_bytes()) != matches.len() * 2
             || images.contains_key(name)
         {
             return Err(
@@ -487,11 +540,13 @@ pub(super) fn replace_colorways(
     state: &Value,
     targets: &[ColorwayTextureEdit],
     active: u32,
-) -> Result<(Vec<u8>, HashMap<String, Vec<u8>>), String> {
+    mut occupied: HashSet<String>,
+) -> Result<(Vec<u8>, BTreeMap<String, Vec<u8>>), String> {
     let (_, mut current) = read_colorways(pac)?;
     let fabrics = super::super::array(state, "fabrics");
     let mut edits = BTreeMap::<usize, HashMap<usize, Vec<Edit>>>::new();
     let mut image_bytes = 0;
+    let mut next_asset = occupied.len();
     for target in targets {
         let material = super::super::fabric_for_colorway(
             state, fabrics.get(target.fabric).ok_or("native fabric index no longer exists")?,
@@ -499,7 +554,7 @@ pub(super) fn replace_colorways(
         )?;
         let (_, kind) = TYPES.iter().find(|(key, _)| *key == target.map)
             .ok_or("unknown native texture map")?;
-        let (image, label) = if target.clear {
+        let (image, new_asset) = if target.clear {
             (None, None)
         } else {
             let path = material["texture_maps"][&target.map].as_str()
@@ -507,19 +562,26 @@ pub(super) fn replace_colorways(
             let path = Path::new(path);
             let name = path.file_name().and_then(|name| name.to_str())
                 .ok_or("native texture replacement needs a UTF-8 filename")?;
-            (Some(crate::compat_fit::png_for_export(path, false)?), Some(name.to_owned()))
+            let asset = loop {
+                let asset = format!("clo-rust-texture-{next_asset}.png");
+                next_asset += 1;
+                if occupied.insert(asset.clone()) {
+                    break asset;
+                }
+            };
+            (Some(crate::compat_fit::png_for_export(path, false)?), Some((asset, name.to_owned())))
         };
         image_bytes += image.as_ref().map_or(0, Vec::len);
         if image_bytes > 256 * 1024 * 1024 {
             return Err("replacement texture assets exceed 256 MiB".into());
         }
         edits.entry(target.colorway).or_default().entry(target.fabric).or_default().push(Edit {
-            kind: *kind, image, label, matches: RefCell::new(Vec::new()),
+            kind: *kind, image, new_asset, matches: RefCell::new(Vec::new()),
             desaturated: material["base_texture_desaturated"] == true,
         });
     }
     let mut result = Cow::Borrowed(pac);
-    let mut images = HashMap::new();
+    let mut images = BTreeMap::new();
     for (colorway, edits) in edits {
         if colorway != current {
             result = Cow::Owned(select_colorway(&result, colorway as u32)?);

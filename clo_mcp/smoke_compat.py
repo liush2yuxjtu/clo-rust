@@ -4178,8 +4178,14 @@ async def verify_native_colorway_refresh():
                     await json_result(session, "scene_open", {"path": str(saved)})
                     assert await base_images() == [None, baseline[0]]
                     assert (await json_result(session, "scene_info"))["current_colorway"] == 0
-                    target_bytes = saved.read_bytes()
                     await set_base(replacement)
+                    await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                    await json_result(session, "scene_open", {"path": str(saved)})
+                    assert await base_images() == [baseline[0], baseline[0]]
+                    target_bytes = saved.read_bytes()
+                    await json_result(session, "fabric_set_texture", {
+                        "fabric_index": 0, "map": "normal", "image_path": str(replacement),
+                    })
                     rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
                     assert rejected.isError and saved.read_bytes() == target_bytes
                     texture_archives.append(fixture.name)

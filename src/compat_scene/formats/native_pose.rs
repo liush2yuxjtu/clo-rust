@@ -77,29 +77,38 @@ impl<'a> Fields<'a> {
             }
             fields.push(replacement);
         }
-        let count = u8::try_from(fields.len()).map_err(|_| "too many native PAC map fields")?;
-        let mut output = vec![count];
-        for field in &fields {
-            output.push(u8::try_from(field.name.len()).map_err(|_| "native PAC field name is too long")?);
-        }
-        output.extend(fields.iter().map(|field| field.kind));
-        for field in &fields {
-            output.extend(
-                u32::try_from(field.value.len())
-                    .map_err(|_| "PAC map field exceeds the size limit")?
-                    .to_le_bytes(),
-            );
-        }
-        for field in &fields {
-            output.extend(field.name);
-            output.extend(field.value);
-        }
-        Ok(output)
+        encode_fields(&fields)
     }
 
     pub(super) fn map(&self, name: &[u8]) -> Result<Self, String> {
         Self::read(self.get(name, MAP_TYPE)?)
     }
+}
+
+pub(super) fn encode_map(values: &[(&[u8], u8, &[u8])]) -> Result<Vec<u8>, String> {
+    let fields: Vec<_> = values.iter().map(|&(name, kind, value)| Field { name, kind, value }).collect();
+    encode_fields(&fields)
+}
+
+fn encode_fields(fields: &[Field<'_>]) -> Result<Vec<u8>, String> {
+    let count = u8::try_from(fields.len()).map_err(|_| "too many native PAC map fields")?;
+    let mut output = vec![count];
+    for field in fields {
+        output.push(u8::try_from(field.name.len()).map_err(|_| "native PAC field name is too long")?);
+    }
+    output.extend(fields.iter().map(|field| field.kind));
+    for field in fields {
+        output.extend(
+            u32::try_from(field.value.len())
+                .map_err(|_| "PAC map field exceeds the size limit")?
+                .to_le_bytes(),
+        );
+    }
+    for field in fields {
+        output.extend(field.name);
+        output.extend(field.value);
+    }
+    Ok(output)
 }
 
 fn inner_seam_paths(record: &Fields<'_>) -> Result<InnerSeamPaths, String> {

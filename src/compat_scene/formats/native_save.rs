@@ -8,10 +8,10 @@ use super::{
 use serde_json::{json, Value};
 use native_textures::ColorwayTextureEdit;
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -338,12 +338,18 @@ fn join_archive(mut prefix: Vec<u8>, archive: &[u8]) -> Result<Vec<u8>, String> 
     Ok(prefix)
 }
 
+#[derive(Default)]
+struct TextureAssets {
+    replaced: HashMap<String, Vec<u8>>,
+    added: BTreeMap<String, Vec<u8>>,
+}
+
 fn replace_member(
     input: &[u8],
     header: &[u8],
     suffix: &[u8],
     replacement: &[u8],
-    mut assets: HashMap<String, Vec<u8>>,
+    mut assets: TextureAssets,
 ) -> Result<Vec<u8>, String> {
     let (prefix, _) = split_archive(input)?;
     let mut source = open_archive(Cursor::new(input), header)?;
@@ -355,11 +361,33 @@ fn replace_member(
         .map_err(|error| error.to_string())?;
     let mut replaced = false;
     for index in 0..source.len() {
-        let file = source.by_index(index).map_err(|error| error.to_string())?;
+        let mut file = source.by_index(index).map_err(|error| error.to_string())?;
         let name = file.name_raw();
+        if !assets.added.is_empty()
+            && assets.added.contains_key(&file.name().map_err(|error| error.to_string())?.to_ascii_lowercase())
+        {
+            return Err("native texture asset name already exists in the archive".into());
+        }
         let asset = std::str::from_utf8(name)
             .ok()
-            .and_then(|name| assets.remove(name));
+            .and_then(|name| assets.replaced.remove(name));
+        let manifest = if name == b"clofiles.json" && !assets.added.is_empty() {
+            let mut data = Vec::new();
+            (&mut file).take(4 * 1024 * 1024 + 1).read_to_end(&mut data)
+                .map_err(|error| error.to_string())?;
+            if data.len() > 4 * 1024 * 1024 {
+                return Err("native file manifest exceeds 4 MiB".into());
+            }
+            let mut entries: serde_json::Map<String, Value> = serde_json::from_slice(&data)
+                .map_err(|error| format!("invalid native file manifest: {error}"))?;
+            for name in assets.added.keys() {
+                entries.insert(name.clone(), json!(name));
+            }
+            Some(serde_json::to_vec_pretty(&entries).map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        let name = file.name_raw();
         let body = if name.len() >= suffix.len()
             && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
         {
@@ -369,7 +397,7 @@ fn replace_member(
             replaced = true;
             Some(replacement)
         } else {
-            asset.as_deref()
+            asset.as_deref().or(manifest.as_deref())
         };
         if let Some(bytes) = body {
             let name = file.name().map_err(|error| error.to_string())?;
@@ -382,8 +410,13 @@ fn replace_member(
             zip.raw_copy_file(file).map_err(|error| error.to_string())?;
         }
     }
-    if !replaced || !assets.is_empty() {
+    if !replaced || !assets.replaced.is_empty() {
         return Err("native archive is missing a member being replaced".into());
+    }
+    for (name, data) in assets.added {
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        zip.start_file(name, options).map_err(|error| error.to_string())?;
+        zip.write_all(&data).map_err(|error| error.to_string())?;
     }
     let output = zip
         .finish()
@@ -501,10 +534,8 @@ pub(in crate::compat_scene) fn encode(
     } else {
         original.clone()
     };
-    let pac = member(
-        &mut open_archive(Cursor::new(garment.as_slice()), ZPAC)?,
-        "pac",
-    )?;
+    let mut garment_archive = open_archive(Cursor::new(garment.as_slice()), ZPAC)?;
+    let pac = member(&mut garment_archive, "pac")?;
     let renamed = renamed_pac(&pac, state)?;
     let (edited, assets) = if write_colorways {
         let index = state["current_colorway"]
@@ -512,19 +543,26 @@ pub(in crate::compat_scene) fn encode(
             .and_then(|index| u32::try_from(index).ok())
             .ok_or("invalid active colorway index")?;
         let pac = renamed.as_deref().unwrap_or(&pac);
-        let (pac, assets) = match (recolors.is_empty(), texture_edits.is_empty()) {
-            (true, true) => (native_materials::select_colorway(pac, index)?, HashMap::new()),
-            (true, false) => native_textures::replace_colorways(pac, state, &texture_edits, index)?,
-            (false, _) => {
-                let pac = native_recolor::recolor_colorways(pac, state, &recolors, index, &texture_edits)?;
-                if texture_edits.is_empty() {
-                    (pac, HashMap::new())
-                } else {
-                    native_textures::replace_colorways(&pac, state, &texture_edits, index)?
-                }
-            }
+        let recolored = if recolors.is_empty() {
+            None
+        } else {
+            Some(native_recolor::recolor_colorways(pac, state, &recolors, index, &texture_edits)?)
         };
-        (Some(pac), assets)
+        if texture_edits.is_empty() {
+            let pac = match recolored {
+                Some(pac) => pac,
+                None => native_materials::select_colorway(pac, index)?,
+            };
+            (Some(pac), TextureAssets::default())
+        } else {
+            let occupied = garment_archive.file_names()
+                .map(|name| name.map(|name| name.to_ascii_lowercase()))
+                .collect::<Result<_, _>>().map_err(|error| error.to_string())?;
+            let (pac, added) = native_textures::replace_colorways(
+                recolored.as_deref().unwrap_or(pac), state, &texture_edits, index, occupied,
+            )?;
+            (Some(pac), TextureAssets { added, ..TextureAssets::default() })
+        }
     } else {
         let recolored = native_recolor::recolor(
             renamed.as_deref().unwrap_or(&pac),
@@ -540,7 +578,7 @@ pub(in crate::compat_scene) fn encode(
             super::super::array(source, "recolored"),
             super::super::array(source, "retextured"),
         )?;
-        (textures.or(edited), assets)
+        (textures.or(edited), TextureAssets { replaced: assets, ..TextureAssets::default() })
     };
     let has_edits = edited.is_some();
     let garment = match edited {
@@ -549,7 +587,7 @@ pub(in crate::compat_scene) fn encode(
     };
     let output = if project {
         let project_bytes = if has_edits {
-            replace_member(&original, ZPRJ, b".zpac", &garment, HashMap::new())?
+            replace_member(&original, ZPRJ, b".zpac", &garment, TextureAssets::default())?
         } else {
             original
         };

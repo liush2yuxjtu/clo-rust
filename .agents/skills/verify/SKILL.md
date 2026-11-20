@@ -526,7 +526,10 @@ binding and desaturation after reopening. With the textured ZPAC, replace the
 existing base image in `Alternate`, switch to `Original`, and clear its base
 image. Save, reopen in both backends, and compare which GLB files contain a base
 image and its decoded pixels. Check that the replacement retains its source
-label and that attempting to add an image to a missing archive slot leaves a
+label. Add a base image back to the cleared colorway and verify both colorways
+after reopening. Repeat with a non-square PNG with explicit pixel density.
+Compare the stored physical size, the UV bounds and the decoded image against
+official CLO. Trying to add an unsupported map to a missing slot must leave the
 previous save intact.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
