@@ -8,7 +8,7 @@ mod solver;
 mod texture;
 
 pub(crate) use assets::project_avatar;
-pub(crate) use render::native_previews;
+pub(crate) use render::{export_snapshot, native_previews};
 pub(crate) use solver::{avatar_geometry, uv_coordinates};
 pub(crate) use texture::png_for_export;
 

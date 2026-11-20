@@ -162,14 +162,15 @@ fn camera(view: &str) -> Result<Camera, String> {
         "right" => 90.0,
         "3/4-right" => 42.0,
         "3/4-left" => -42.0,
-        "top" => 0.0,
+        "top" | "bottom" => 0.0,
         _ => return Err(format!("unknown snapshot view {view:?}")),
     };
-    if view == "top" {
+    if matches!(view, "top" | "bottom") {
+        let sign = if view == "top" { 1.0 } else { -1.0 };
         return Ok(Camera {
             horizontal: [1.0, 0.0, 0.0],
-            up: [0.0, 0.0, -1.0],
-            depth: [0.0, 1.0, 0.0],
+            up: [0.0, 0.0, -sign],
+            depth: [0.0, sign, 0.0],
         });
     }
     let (sin, cos) = f64::to_radians(angle).sin_cos();
@@ -359,7 +360,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn write_chunk(file: &mut fs::File, kind: [u8; 4], data: &[u8]) -> std::io::Result<()> {
+fn write_chunk(file: &mut impl Write, kind: [u8; 4], data: &[u8]) -> std::io::Result<()> {
     let mut chunk = Vec::with_capacity(4 + data.len());
     chunk.extend(kind);
     chunk.extend_from_slice(data);
@@ -368,7 +369,7 @@ fn write_chunk(file: &mut fs::File, kind: [u8; 4], data: &[u8]) -> std::io::Resu
     file.write_all(&crc32(&chunk).to_be_bytes())
 }
 
-fn png(file: &mut fs::File, canvas: &Canvas) -> std::io::Result<()> {
+fn png(file: &mut impl Write, canvas: &Canvas) -> std::io::Result<()> {
     let [w, h] = SIZE;
     let mut bytes = Vec::with_capacity(h * (w * 3 + 1));
     for line in canvas.pixels.chunks_exact(w * 3) {
@@ -526,6 +527,34 @@ pub(crate) fn native_previews(state: &Value) -> Result<Vec<u8>, String> {
         writer.finish().map_err(|error| error.to_string())?;
     }
     Ok(output)
+}
+
+pub(crate) fn export_snapshot(path: &Path, state: &Value, flat: bool) -> Result<(), String> {
+    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")) {
+        return Err("snapshot export requires a .png path".into());
+    }
+    let current = &state["runtime"]["ui"]["view"];
+    let view = if flat {
+        "2d"
+    } else {
+        match current.as_i64() {
+            Some(0) => "bottom",
+            Some(1) => "3/4-right",
+            Some(2) => "front",
+            Some(3) => "3/4-left",
+            Some(4) => "right",
+            Some(5) => "top",
+            Some(6) => "left",
+            Some(8) => "back",
+            Some(_) => return Err("unsupported snapshot camera preset".into()),
+            None => current.as_str().unwrap_or("front"),
+        }
+    };
+    let drawings = scene_drawings(state, flat, &mut TextureCache::default())?;
+    let canvas = render_canvas(&drawings, view, flat)?;
+    let mut bytes = Vec::new();
+    png(&mut bytes, &canvas).map_err(|e| e.to_string())?;
+    crate::compat_scene::write_artifact(path, &bytes)
 }
 
 pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String> {

@@ -119,6 +119,14 @@ skirts. Compare the complete preview, including radial seam order, the four
 waist joins on dresses and standalone waist elastic. Build a skirt and dress
 through Rust, read back the stored sewing and check one simulation step.
 
+Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
+keyword, catalog pagination, qualified and unqualified documentation lookup,
+and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.
+The case compares the direct and Python layout exports with `snapshot_2d`, checks the
+thumbnail camera direction and reopens the FBX. It rejects unsupported layout
+modes without writing the destination. Compare live reference export and
+argument behavior separately when the CLO bridge is available.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 pub(crate) type InnerSeamPaths = Vec<Vec<Vec<usize>>>;
 pub(crate) type InnerSeamRest = Vec<Vec<Vec<[f64; 2]>>>;
 pub(crate) use patterns::internal_strokes;
+pub(crate) use formats::write as write_artifact;
 pub(crate) use scene::avatar_names;
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 

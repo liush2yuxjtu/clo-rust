@@ -55,6 +55,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Export the 2D pattern geometry as DXF."
     ),
     (
+        "export_api.ExportFBX",
+        "(path, option=None)",
+        "Export the active garment as FBX and return the generated file paths."
+    ),
+    (
         "export_api.ExportGLB",
         "(path, option=None)",
         "Export the active garment as GLB."
@@ -68,6 +73,16 @@ const FUNCTIONS: &[Entry] = functions![
         "export_api.ExportOBJ",
         "(path, option=None)",
         "Export the active garment as OBJ."
+    ),
+    (
+        "export_api.ExportSnapshot2D",
+        "(path, mode)",
+        "Export the current 2D pattern layout to PNG. The Rust renderer supports layout mode 0."
+    ),
+    (
+        "export_api.ExportThumbnail3D",
+        "(path)",
+        "Export a PNG of the current garment from the selected camera direction."
     ),
     (
         "export_api.ExportZPac",
@@ -473,6 +488,11 @@ const FUNCTIONS: &[Entry] = functions![
         "utility_api.GetCLOTemporaryFolderPath",
         "()",
         "Get the Rust workbench temporary directory."
+    ),
+    (
+        "utility_api.GetCLOAssetFolderPath",
+        "(bLinuxTypePathDelimeter=True)",
+        "Return the configured CLO asset folder, or an empty string when unset."
     ),
     (
         "utility_api.GetCurrentColorwayIndex",
@@ -1129,15 +1149,30 @@ pub(super) fn invoke(
             domain("scene_open", &json!({"path":arg[0],"mode":if append {"append"} else {"replace"}}),state).map(|result| success(&result))
         }
         "import_api.ImportFile" | "pattern_api.ImportPatternJSON" => domain("scene_open", &json!({"path":arg[0],"mode":"append"}),state).map(|result| success(&result)),
-        "export_api.ExportDXF" | "export_api.ExportGLB" | "export_api.ExportGLTF" | "export_api.ExportOBJ" | "pattern_api.ExportPatternJSON" => {
+        "export_api.ExportDXF" | "export_api.ExportFBX" | "export_api.ExportGLB" | "export_api.ExportGLTF" | "export_api.ExportOBJ" | "pattern_api.ExportPatternJSON" => {
             let option = arg.get(1).unwrap_or(&Value::Null);
+            if name == "export_api.ExportFBX" {
+                let path = arg[0].as_str().ok_or("expected an FBX path")?;
+                if !std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("fbx")) {
+                    return Err("FBX export requires a .fbx path".into());
+                }
+            }
             let result = domain("scene_export", &json!({"path":arg[0],"include_avatar":option["bExportAvatar"].as_bool().unwrap_or(false),"colorways":option["bSaveColorWays"].as_bool().unwrap_or(false)}),state)?;
             let path = project_path(&result);
             match name {
                 "pattern_api.ExportPatternJSON" => Ok(json!(!path.is_null())),
-                "export_api.ExportGLB" | "export_api.ExportGLTF" | "export_api.ExportOBJ" if !path.is_array() => Ok(json!([path])),
+                "export_api.ExportFBX" | "export_api.ExportGLB" | "export_api.ExportGLTF" | "export_api.ExportOBJ" if !path.is_array() => Ok(json!([path])),
                 _ => Ok(path),
             }
+        }
+        "export_api.ExportSnapshot2D" | "export_api.ExportThumbnail3D" => {
+            let flat = name == "export_api.ExportSnapshot2D";
+            if flat && arg[1].as_i64() != Some(0) {
+                return Err("Rust 2D snapshot export supports mode 0".into());
+            }
+            let path = arg[0].as_str().ok_or("expected a PNG path")?;
+            crate::compat_fit::export_snapshot(std::path::Path::new(path), state, flat)?;
+            Ok(if flat { json!([path]) } else { json!(path) })
         }
         "export_api.ExportZPac" | "export_api.ExportZPrj" => {
             let result = domain("scene_save", &json!({"path":arg[0],"thumbnail":arg.get(1).and_then(Value::as_bool).unwrap_or(false)}),state)?;
@@ -1334,6 +1369,12 @@ pub(super) fn invoke(
         }
         "utility_api.GetCurrentColorwayIndex" => Ok(json!(state["current_colorway"].as_u64().unwrap_or(0))),
         "utility_api.GetCLOTemporaryFolderPath" => Ok(json!(std::env::temp_dir())),
+        "utility_api.GetCLOAssetFolderPath" => {
+            let linux = arg[0].as_bool().ok_or("path delimiter option must be a boolean")?;
+            let info = domain("scene_info", &json!({}), state)?;
+            let path = info["asset_folder"].as_str().unwrap_or_default();
+            Ok(json!(if linux { path.replace('\\', "/") } else { path.to_owned() }))
+        }
         "utility_api.GetMajorVersion" | "utility_api.GetMinorVersion" | "utility_api.GetPatchVersion" => {
             let index = match name { "utility_api.GetMajorVersion" => 0, "utility_api.GetMinorVersion" => 1, _ => 2 };
             let part = env!("CARGO_PKG_VERSION").split('.').nth(index).and_then(|value| value.parse::<u32>().ok()).unwrap_or(0);

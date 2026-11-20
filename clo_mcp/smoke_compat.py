@@ -790,6 +790,79 @@ async def compare_curved_skirt_preview():
                       "comparisons": results, "last_spec_unchanged": True}))
 
 
+async def verify_runtime_export_workflow():
+    names = (
+        "export_api.ExportFBX", "export_api.ExportSnapshot2D",
+        "export_api.ExportThumbnail3D", "utility_api.GetCLOAssetFolderPath",
+    )
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        for name in names:
+            module, short = name.split(".")
+            request = {"module": module, "query": short, "limit": 1}
+            expected = await json_result(session, "clo_api_catalog", request)
+            assert expected["total"] == 1 and expected["entries"][0]["name"] == name
+            assert expected["next_offset"] is None
+            search = await json_result(session, "clo_api_search", {"query": short.lower(), "limit": 1})
+            assert json.loads(search["result"])["entries"] == expected["entries"]
+            describe = await json_result(session, "clo_api_describe", {"name": name})
+            for query in (name, short):
+                doc = await json_result(session, "clo_api_doc", {"function_name": query})
+                assert json.loads(doc["result"]) == describe
+            assert describe["name"] == name and describe["doc"]
+        request = {"module": "export_api", "query": "Export", "limit": 1}
+        first = await json_result(session, "clo_api_catalog", request)
+        second = await json_result(session, "clo_api_catalog", {**request, "offset": first["next_offset"]})
+        assert first["next_offset"] == 1 and first["entries"] != second["entries"]
+
+        async def invoke(name, args=None):
+            request = {"name": name}
+            if args is not None:
+                request["args"] = args
+            return (await json_result(session, "clo_api_call", request))["value"]
+
+        await json_result(session, "pattern_create", {
+            "name": "export test", "points": [[0, 0], [160, 0], [130, 110]],
+        })
+        scene = await json_result(session, "scene_info")
+        assert await invoke(names[3]) == (scene["asset_folder"] or "").replace("\\", "/")
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            layout = str(folder / "layout.png")
+            assert await invoke(names[1], [layout, 0]) == [layout]
+            capture = await successful(session, "snapshot_2d")
+            image, = [block for block in capture.content if block.type == "image"]
+            assert base64.b64decode(image.data, validate=True) == Path(layout).read_bytes()
+            scripted_path = str(folder / "scripted.png")
+            scripted = await json_result(session, "clo_run_python", {
+                "code": f"result = export_api.ExportSnapshot2D({scripted_path!r}, 0)",
+            })
+            assert scripted["value"] == [scripted_path] and Path(scripted_path).read_bytes() == Path(layout).read_bytes()
+            invalid = await session.call_tool("clo_api_call", {"name": names[1], "args": [layout, 1]})
+            assert invalid.isError and Path(layout).read_bytes() == base64.b64decode(image.data)
+            thumbnails = []
+            for camera in (2, 4):
+                await invoke("utility_api.SetCamViewPoint", [camera])
+                path = folder / f"view-{camera}.png"
+                assert await invoke(names[2], [str(path)]) == str(path)
+                thumbnails.append(path.read_bytes())
+            assert all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in thumbnails)
+            assert thumbnails[0] != thumbnails[1]
+            fbx = folder / "piece.fbx"
+            assert await invoke(names[0], [str(fbx), {"$type": "ApiTypes.ImportExportOption"}]) == [str(fbx)]
+            assert fbx.stat().st_size > 1000
+            assert await json_result(session, "scene_info") == scene
+            await json_result(session, "scene_open", {"path": str(fbx)})
+            saved = folder / "reopened.clorust"
+            await json_result(session, "scene_save", {"path": str(saved)})
+            mesh, = json.loads(saved.read_text())["scene"]["imported_meshes"]
+            assert len(mesh["positions"]) == 3 and len(mesh["triangles"]) == 1
+    print(json.dumps({"workflow": "runtime export", "discovered_and_called": names,
+                      "png_matches_snapshot": True, "python_entry_point": True,
+                      "camera_changes_thumbnail": True,
+                      "fbx_reopened": True, "invalid_mode_error": "pass"}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -841,7 +914,11 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
+    comparisons.add_argument("--verify-runtime-export-workflow", action="store_const", dest="comparison",
+                             const=verify_runtime_export_workflow,
+                             help="verify Rust discovery and calls for the snapshot and FBX workflow")
     args = parser.parse_args()
-    if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+    if (args.comparison not in (None, verify_runtime_export_workflow)
+            and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
