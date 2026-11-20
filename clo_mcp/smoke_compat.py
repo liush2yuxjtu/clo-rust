@@ -2109,6 +2109,50 @@ async def verify_runtime_pattern_query():
         raise SystemExit(2)
 
 
+async def compare_python_response_timeout():
+    fixture = Path(os.environ["CLO_RUNTIME_PATTERN_FIXTURE"]).resolve(strict=True)
+    setter = "pattern_api.SetPatternPieceName"
+    checked = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            assert (await json_result(session, "clo_status"))["bridge"] == "up"
+            if backend == "rust":
+                await json_result(session, "scene_open", {"path": str(fixture)})
+            scene = await json_result(session, "scene_info")
+            assert Path(scene["project_path"]).resolve() == fixture
+            original = scene["patterns"][0]["name"]
+            observed = []
+            try:
+                for late_error in (False, True):
+                    final = original + (" [late error]" if late_error else " [late success]")
+                    script = (
+                        f"import time\n{setter}(0, {original + ' [before deadline]'!r})\n"
+                        f"time.sleep(2.5)\n{setter}(0, {final!r})"
+                    )
+                    if late_error:
+                        script += "\nraise ValueError('after client deadline')"
+                    loop = asyncio.get_running_loop()
+                    start = loop.time()
+                    result = await session.call_tool("clo_run_python", {"code": script, "timeout_seconds": 1})
+                    elapsed = loop.time() - start
+                    assert result.isError and 0.7 <= elapsed < 2.4, (backend, elapsed)
+                    # This request queues behind the outstanding script on both backends.
+                    state = await json_result(session, "scene_info")
+                    assert state["patterns"][0]["name"] == final, (backend, state["patterns"][0]["name"])
+                    checked_name = await json_result(session, "clo_run_python", {
+                        "code": "pattern_api.GetPatternPieceName(0)",
+                    })
+                    assert checked_name == {"value": final, "stdout": ""}
+                    observed.append({"late_error": late_error, "returned_error_seconds": round(elapsed, 3),
+                                     "late_change": final, "new_request_ok": True})
+            finally:
+                await json_result(session, "clo_api_call", {"name": setter, "args": [0, original]})
+            assert await json_result(session, "scene_info") == scene
+            checked[backend] = {"version": scene["clo_version"], "cases": observed, "restored": True}
+    print(json.dumps({"case": "Python response timeout and late execution", "observations": checked},
+                     ensure_ascii=False))
+
+
 async def verify_runtime_export_workflow():
     names = (
         "export_api.ExportFBX", "export_api.ExportSnapshot2D",
@@ -4742,6 +4786,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-runtime-pattern-query", action="store_const", dest="comparison",
                              const=verify_runtime_pattern_query,
                              help="verify pattern discovery, calls, Python and handles against a saved .zprj")
+    comparisons.add_argument("--compare-python-response-timeout", action="store_const", dest="comparison",
+                             const=compare_python_response_timeout,
+                             help="compare scene changes and recovery after an MCP Python response timeout")
     comparisons.add_argument("--verify-runtime-export-workflow", action="store_const", dest="comparison",
                              const=verify_runtime_export_workflow,
                              help="verify Rust discovery and calls for the snapshot and FBX workflow")

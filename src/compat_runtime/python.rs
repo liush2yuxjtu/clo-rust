@@ -83,28 +83,27 @@ impl Runner {
     fn request(
         &mut self,
         code: &str,
-        timeout: Duration,
+        timeout: Option<Duration>,
         state: &mut Value,
         domain: DomainCall,
     ) -> Result<ToolResult, String> {
         self.send(&json!({"code":code}))?;
-        let deadline = Instant::now() + timeout;
+        let deadline = timeout.map(|duration| Instant::now() + duration);
         loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(TIME_LIMIT)?;
-            let line = self
-                .replies
-                .recv_timeout(remaining)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => TIME_LIMIT.to_owned(),
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        "CLO Rust Python process exited during script execution".to_owned()
-                    }
-                })??;
+            let line = if let Some(deadline) = deadline {
+                let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TIME_LIMIT)?;
+                self.replies.recv_timeout(remaining)
+            } else {
+                self.replies.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            }.map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => TIME_LIMIT.to_owned(),
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "CLO Rust Python process exited during script execution".to_owned()
+                }
+            })??;
             let reply: Value = serde_json::from_str(&line)
                 .map_err(|error| format!("Invalid Python message: {error}"))?;
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(TIME_LIMIT.into());
             }
             match reply["kind"].as_str() {
@@ -126,7 +125,7 @@ impl Runner {
                         Err(error) => json!({"ok":false,"error":error}),
                     };
                     // Keep completed calls, then stop the interpreter before it runs more code.
-                    if Instant::now() >= deadline {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         return Err(TIME_LIMIT.into());
                     }
                     self.send(&response)?;
@@ -159,17 +158,23 @@ pub(super) fn stop() {
 
 pub(super) fn run(args: &Value, state: &mut Value, domain: DomainCall) -> ToolResult {
     let code = text(args, "code")?;
-    let seconds = args["timeout_seconds"].as_f64().unwrap_or(600.0);
-    if !(0.0 < seconds && seconds <= 86_400.0) {
-        return Err("timeout_seconds must be positive and at most 86400".into());
-    }
+    let timeout = if matches!(args.get("timeout_seconds"), Some(Value::Null)) {
+        // The MCP adapter owns the response deadline. Keep running to completion.
+        None
+    } else {
+        let seconds = args["timeout_seconds"].as_f64().unwrap_or(600.0);
+        if !(0.0 < seconds && seconds <= 86_400.0) {
+            return Err("timeout_seconds must be positive and at most 86400".into());
+        }
+        Some(Duration::from_secs_f64(seconds))
+    };
     PROCESS.with_borrow_mut(|process| {
         if process.is_none() {
             *process = Some(Runner::new()?);
         }
         let result = process.as_mut().expect("runner was initialized").request(
             code,
-            Duration::from_secs_f64(seconds),
+            timeout,
             state,
             domain,
         );
@@ -199,12 +204,12 @@ mod tests {
         let mut runner = Runner::new().unwrap();
         let mut scene = json!({"patterns":[]});
         runner
-            .request("1", Duration::from_secs(5), &mut scene, slow_domain)
+            .request("1", Some(Duration::from_secs(5)), &mut scene, slow_domain)
             .unwrap()
             .unwrap();
         let result = runner.request(
             "pattern_api.CreatePatternWithPoints([(0,0),(40,0),(0,40)]); result = 'resumed after deadline'",
-            Duration::from_millis(300),
+            Some(Duration::from_millis(300)),
             &mut scene,
             slow_domain,
         );

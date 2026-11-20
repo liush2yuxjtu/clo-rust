@@ -41,6 +41,9 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
   设为 JSON 数组，例如 `["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp.server"]`。
   官方后端的返回内容及错误直接透传。
 
+`clo_run_python` 的 `timeout_seconds` 限制调用方等待响应的时间。超时后，
+脚本可能继续修改当前工程。重试前先通过 MCP 读回场景，确认哪些修改已完成。
+
 把两端的 `CLO_MCP_STATE` 指向同一目录后，Rust 的 `checkpoint_list` 和
 `checkpoint_restore` 可从其 `checkpoints` 子目录读取 CLO 保存的 `.zprj`。
 Rust 保存的检查点使用 `.clorust`，两个文件同名时 Rust 端优先恢复 `.clorust`。

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,12 +27,26 @@ class RustBackend:
     def __init__(self):
         self._process = None
         self._lock = asyncio.Lock()
+        self._scripts = set()
+        self._closed = False
 
     async def close(self):
+        self._closed = True
+        tasks = tuple(self._scripts)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self._close_process()
+
+    async def _close_process(self):
         process, self._process = self._process, None
         if process and process.returncode is None:
             try:
-                process.terminate()
+                if os.name == "posix":
+                    # A script may still be executing after its caller timed out.
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.terminate()
             except ProcessLookupError:
                 pass
             try:
@@ -41,7 +56,29 @@ class RustBackend:
                 await process.wait()
 
     async def call(self, name, arguments):
+        if name != "clo_run_python":
+            return await self._call(name, arguments)
+        timeout = arguments.get("timeout_seconds", 600)
+        if not 0 < timeout <= 86400:
+            raise ValueError("timeout_seconds must be positive and at most 86400")
+        task = asyncio.create_task(self._call(name, {**arguments, "timeout_seconds": None}))
+        self._scripts.add(task)
+        task.add_done_callback(self._script_finished)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except TimeoutError as exc:
+            raise ValueError("CLO Rust Python response timed out. The script may still be running. Inspect the scene before retrying.") from exc
+
+    def _script_finished(self, task):
+        self._scripts.discard(task)
+        if not task.cancelled():
+            # Retrieve a late error even when the MCP caller has already left.
+            task.exception()
+
+    async def _call(self, name, arguments):
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("CLO Rust session is closed")
             if self._process is None:
                 binary, _ = await asyncio.to_thread(runtime.native_binary)
                 self._process = await asyncio.create_subprocess_exec(
@@ -50,6 +87,7 @@ class RustBackend:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     limit=64 * 1024 * 1024,
+                    start_new_session=os.name == "posix",
                 )
             request = json.dumps({"name": name, "args": arguments}, allow_nan=False).encode()
             try:
@@ -60,10 +98,10 @@ class RustBackend:
                     raise RuntimeError("CLO Rust engine exited")
                 response = json.loads(raw)
             except asyncio.CancelledError:
-                await self.close()
+                await self._close_process()
                 raise
             except (ValueError, OSError, RuntimeError) as exc:
-                await self.close()
+                await self._close_process()
                 raise RuntimeError("CLO Rust engine disconnected. Open the last saved project to recover the session.") from exc
             if "error" in response:
                 raise ValueError(response["error"])

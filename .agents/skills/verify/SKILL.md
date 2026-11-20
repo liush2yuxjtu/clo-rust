@@ -672,13 +672,17 @@ Python call can read it. The test restores the original name and compares
 `scene_info` with the starting scene without saving the changes. A down
 bridge or a different project is `BLOCKED` with exit 2.
 
-Run `cargo test --locked completed_api_call_past_deadline_stops_the_script`
-for a Python request whose synchronous API call finishes after the deadline.
-Check that the completed mutation remains in the scene and the interpreter
-receives no reply that would let it execute a subsequent statement. Through
-MCP stdio, also create a pattern, call Python with a rename followed by a sleep
-and a second rename, and read back the first rename after the timeout. Verify
-a new Python request can read the scene.
+With the same fixture open on a dedicated live CLO bridge, run
+`python -m clo_mcp.smoke_compat --compare-python-response-timeout` from the
+verification environment. Both adapters should return an MCP error around the
+one-second response deadline, before the script finishes its 2.5-second wait.
+The next scene request should read the second rename in each backend, including
+when the script raises after that rename. Check a follow-up Python request and
+restore the starting scene. Before changing session teardown, also close a
+Rust MCP session after a script starts and the response times out. Use a
+temporary marker file to verify the script cannot write after session close.
+The native engine's direct timed request is independently covered by
+`cargo test --locked completed_api_call_past_deadline_stops_the_script`.
 
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
