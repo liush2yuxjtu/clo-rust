@@ -326,6 +326,19 @@ pub(in crate::compat_scene) fn save(
     project: bool,
     thumbnail: bool,
 ) -> Result<(), String> {
+    let output = encode(state, project, thumbnail)?;
+    write(path, &output)?;
+    if (state[SOURCE]["project"] == true) == project {
+        remember(state, path, project);
+    }
+    Ok(())
+}
+
+pub(in crate::compat_scene) fn encode(
+    state: &Value,
+    project: bool,
+    thumbnail: bool,
+) -> Result<Vec<u8>, String> {
     let source = &state[SOURCE];
     let template = source["path"].as_str().map(Path::new).ok_or(
         "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene",
@@ -392,9 +405,5 @@ pub(in crate::compat_scene) fn save(
     if output.len() as u64 > ARCHIVE_LIMIT {
         return Err("native output archive exceeds 512 MiB".into());
     }
-    write(path, &output)?;
-    if project == source_project {
-        remember(state, path, project);
-    }
-    Ok(())
+    Ok(output)
 }

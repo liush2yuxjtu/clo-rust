@@ -3356,6 +3356,27 @@ async def compare_shared_checkpoint_folder():
             for field in ("patterns", "fabrics", "native_seam_groups", "simulation", "avatar"):
                 assert state.get(field) == baseline.get(field), field
 
+            before_publish = await json_result(rust, "scene_info")
+            published = await json_result(rust, "checkpoint_save", {"name": "复用检查点"})
+            checkpoint = directory / "复用检查点.zprj"
+            assert published == {"name": "复用检查点", "path": str(checkpoint)}
+            assert await json_result(rust, "scene_info") == before_publish
+            shared_rows = await listing(clo)
+            assert await listing(rust) == shared_rows
+            assert any(row["path"] == str(checkpoint) for row in shared_rows)
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            readback = await json_result(rust, "checkpoint_restore", {"name": published["name"]})
+            assert readback["pattern_count"] == direct["pattern_count"]
+            shared_state = await saved_scene("shared-readback")
+            for field in ("patterns", "fabrics", "native_seam_groups", "simulation"):
+                assert shared_state.get(field) == baseline.get(field), field
+            previous_avatar, restored_avatar = baseline["avatar"], shared_state["avatar"]
+            if isinstance(previous_avatar, dict) and "source_project" in previous_avatar:
+                assert Path(restored_avatar["source_project"]).resolve() == checkpoint.resolve()
+                assert restored_avatar == previous_avatar | {"source_project": restored_avatar["source_project"]}
+            else:
+                assert previous_avatar == restored_avatar
+
             (directory / "corrupt.zprj").write_text("not a CLO project")
             before_error = await json_result(rust, "scene_info")
             for name in ("missing", "corrupt"):
@@ -3375,7 +3396,8 @@ async def compare_shared_checkpoint_folder():
                       "case": "shared native checkpoint folder", "same_native_listing": True,
                       "restored_patterns": direct["pattern_count"],
                       "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
-                      "corrupt_and_missing_preserve_scene": True, "portable_name_precedence": True}))
+                      "corrupt_and_missing_preserve_scene": True, "portable_name_precedence": True,
+                      "rust_native_checkpoint_listed_by_reference": True}))
 
 
 async def verify_native_append():

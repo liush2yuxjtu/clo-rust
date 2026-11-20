@@ -715,6 +715,23 @@ pub(crate) fn checkpoint_before_build(state: &Value) -> Reply {
 }
 
 fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
+    if let Some(name) = name {
+        let portable = checkpoint_path(name)?;
+        let native = portable.with_extension("zprj");
+        // A compatible project can publish a new native checkpoint in the shared directory.
+        // Existing native checkpoints are protected and portable snapshots cover other scenes.
+        if env::var_os("CLO_MCP_STATE").is_some()
+            && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none()
+            && !portable.exists()
+            && !native.exists()
+        {
+            if let Ok(bytes) = formats::native_save::encode(state, true, false) {
+                if formats::write_new(&native, &bytes)? {
+                    return Ok(json!({"name": name, "path": native}));
+                }
+            }
+        }
+    }
     let mut document = scene_document(state)?;
     if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
         // Keep the original fingerprint and edit lists so undo doesn't

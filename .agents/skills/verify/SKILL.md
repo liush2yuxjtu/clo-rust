@@ -471,9 +471,11 @@ Run `--compare-shared-checkpoint-folder` with the same official command and a
 native `CLO_CHECKPOINT_FIXTURE` containing saved drape. Unset
 `CLO_RUST_CHECKPOINT_DIR` for this case. Both adapters list the fixture from the
 same disposable `CLO_MCP_STATE/checkpoints`. Rust restores it by name and checks
-the archived geometry, fabrics, seams, and pose, then verifies isolation of a
-same-name `.clorust` write and failed restores. A live CLO restore is a separate
-case requiring the bridge.
+the archived geometry, fabrics, seams, and pose. It then saves a new named
+native `.zprj` checkpoint and verifies both adapters list it, the active
+project stays selected, and Rust restores its saved state. Check that
+same-name `.clorust` writes preserve the existing native archive and failed
+restores preserve the scene. A live CLO restore requires the bridge.
 
 Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an
