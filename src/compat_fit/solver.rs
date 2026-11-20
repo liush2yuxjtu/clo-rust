@@ -424,7 +424,16 @@ pub(crate) fn uv_coordinates(points: &[Point2]) -> Vec<Point2> {
         .collect()
 }
 
+fn flat_arrangement(pattern: &Value, points: &[Point2]) -> Vec<Point> {
+    let dx = pattern["pos_2d"][0].as_f64().unwrap_or_default();
+    let dy = pattern["pos_2d"][1].as_f64().unwrap_or_default();
+    points.iter().map(|&[x, y]| [x + dx, y + dy, 200.0]).collect()
+}
+
 fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
+    if avatar.is_null() && pattern.get("draft_offset_x").is_none() {
+        return flat_arrangement(pattern, points);
+    }
     let (low, high) = bounds(points);
     let center = std::array::from_fn::<_, 2, _>(|i| (low[i] + high[i]) / 2.0);
     let arrangement = string(pattern, "arrangement", "").to_lowercase();
@@ -839,10 +848,7 @@ fn native_mesh(
         }
         velocities
     };
-    let distance = number(pattern, "particle_distance", 20.0);
-    if !(3.0..=500.0).contains(&distance) {
-        return Err("individual pattern particle_distance must be 3..500 mm".into());
-    }
+    let distance = particle_distance(number(pattern, "particle_distance", 20.0))?;
     let shirring_edges =
         shirring::refine(pattern, &mut points, &mut triangles, &mut sides, distance)?;
     let native_shirring_base = (!shirring_edges.is_empty()).then(|| NativeShirringBase {
@@ -923,10 +929,7 @@ fn mixed_meshes(
             return native_mesh(panel, saved, state, saved["velocities"].is_null());
         }
         let requested = number(panel, "particle_distance", distance);
-        let target = saved.map_or(requested, |mesh| number(mesh, "rest_particle_distance", requested));
-        if !(3.0..=500.0).contains(&target) {
-            return Err("individual pattern particle_distance must be 3..500 mm".into());
-        }
+        let target = particle_distance(saved.map_or(requested, |mesh| number(mesh, "rest_particle_distance", requested)))?;
         let mut mesh = build_mesh(panel, target, state, legacy_uniform)?;
         if let Some(saved) = saved {
             let velocities = Vec::<Point>::deserialize(&saved["velocities"])
@@ -1388,48 +1391,89 @@ fn append_inverse_masses(mesh: &Mesh, use_density: bool, weights: &mut Vec<f64>)
     }
 }
 
-pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
-    let start = std::time::Instant::now();
-    let unsigned = |key: &str, default: u64| {
-        if args[key].is_null() {
-            Ok(default)
-        } else {
-            args[key]
-                .as_u64()
-                .ok_or_else(|| format!("{key} must be a nonnegative integer"))
-        }
-    };
-    let steps = unsigned("steps", 100)?;
-    let quality = unsigned(
-        "quality",
-        state["runtime"]["quality"].as_u64()
-            .or_else(|| state["simulation"]["quality"].as_u64())
-            .unwrap_or(0),
-    )?;
-    if quality > 3 {
-        return Err(
-            "simulation accepts 0..3000 steps, particle_distance 3..500 mm, and quality 0..3"
-                .into(),
-        );
+pub(crate) fn particle_distance(value: f64) -> Result<f64, String> {
+    let distance = value as f32;
+    if !distance.is_finite() {
+        return Err("particle_distance must be a finite 32-bit float".into());
     }
+    Ok(f64::from(distance.max(0.8)))
+}
+
+pub(crate) fn simulation_quality(state: &Value) -> u64 {
+    state["runtime"]["quality"].as_u64()
+        .or_else(|| state["simulation"]["quality"].as_u64())
+        .unwrap_or(4)
+}
+
+pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result<(), String> {
+    let quality = value.as_i64().and_then(|n| i32::try_from(n).ok())
+        .ok_or("quality must be a 32-bit integer")?;
     if quality == 3 {
         return Err("quality 3 requires a GPU cloth solver; CLO Rust currently supports CPU qualities 0, 1, and 2".into());
     }
-    if args["quality"].is_number() {
+    if (0..=2).contains(&quality) {
         state["runtime"]["quality"] = json!(quality);
     }
+    Ok(())
+}
+
+pub(super) fn reset_arrangement(state: &mut Value) -> Result<Value, String> {
+    let quality = simulation_quality(state);
+    state["runtime"]["quality"] = json!(quality);
     let existing = &state["simulation"];
+    let native_rest = matches!(existing["source"].as_str(), Some(NATIVE_SAVED_POSE | RUST_NATIVE_REST));
+    if !state["avatar"].is_null() || !native_rest {
+        state["simulation"] = Value::Null;
+        return Ok(json!({"ok": true}));
+    }
+
+    // Retain the native rest topology for a flat arrangement with no avatar.
+    let mut reset = existing.clone();
+    let meshes = reset["meshes"].as_array_mut().ok_or("missing native rest meshes")?;
+    for mesh in meshes {
+        let pattern = array(&state["patterns"]).iter().find(|p| p["id"] == mesh["id"])
+            .ok_or("native rest mesh refers to a missing panel")?;
+        let rest: Vec<Point2> = Vec::deserialize(&mesh["texcoords"])
+            .map_err(|error| format!("invalid native rest coordinates: {error}"))?;
+        mesh["positions"] = json!(flat_arrangement(pattern, &rest));
+        if mesh["velocities"].is_array() {
+            mesh["velocities"] = json!(vec![[0.0; 3]; rest.len()]);
+        }
+    }
+    reset["steps"] = json!(0);
+    reset["quality"] = json!(quality);
+    state["simulation"] = reset;
+    Ok(json!({"ok": true}))
+}
+
+pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
+    let start = std::time::Instant::now();
+    if !args["quality"].is_null() {
+        set_simulation_quality(state, &args["quality"])?;
+    }
+    let quality = simulation_quality(state);
     let requested_distance = args["particle_distance"]
         .as_f64()
-        .filter(|distance| *distance != 0.0);
-    let distance = requested_distance.unwrap_or_else(|| number(existing, "particle_distance", 20.0));
-    if steps > 3000 || !(3.0..=500.0).contains(&distance) {
-        return Err("simulation accepts 0..3000 steps and particle_distance 3..500 mm".into());
-    }
+        .filter(|distance| *distance != 0.0)
+        .map(particle_distance).transpose()?;
+    let steps = if args["steps"].is_null() {
+        Some(100)
+    } else {
+        args["steps"].as_u64().filter(|&n| u32::try_from(n).is_ok())
+    };
+    let Some(steps) = steps else {
+        // The bridge applies the particle distance before it calls Simulate.
+        if let Some(distance) = requested_distance {
+            simulate(&json!({"steps": 0, "particle_distance": distance}), state)?;
+        }
+        return Err("steps must be a nonnegative 32-bit integer".into());
+    };
+    let existing = &state["simulation"];
     let patterns = array(&state["patterns"]);
     if patterns.is_empty() {
-        return Err("simulation requires at least one pattern".into());
+        return Ok(json!({"ok": true, "steps": steps, "seconds": 0.0}));
     }
+    let distance = requested_distance.unwrap_or_else(|| number(existing, "particle_distance", 20.0));
     let explicit_distance = requested_distance.is_some();
     let saved_pose = existing["source"] == NATIVE_SAVED_POSE;
     let mixed_pose = !explicit_distance && existing["source"] == "mixed_saved_pose";
@@ -1462,14 +1506,11 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         let mut meshes = patterns
             .iter()
             .map(|pattern| {
-                let target = if explicit_distance {
+                let target = particle_distance(if explicit_distance {
                     distance
                 } else {
                     number(pattern, "particle_distance", distance)
-                };
-                if !(3.0..=500.0).contains(&target) {
-                    return Err("individual pattern particle_distance must be 3..500 mm".into());
-                }
+                })?;
                 build_mesh(pattern, target, state, legacy_uniform)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1547,6 +1588,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             .flat_map(mesh_geometry),
     );
     let colliders = [primary_triangles.as_ref(), additional_triangles.as_ref()];
+    let flat_scene = primary_avatar.is_null() && array(&state["additional_avatars"]).is_empty();
     let body = if primary_triangles.is_some() {
         &Value::Null
     } else {
@@ -1577,9 +1619,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let seam_constraints = stitches(state, &meshes, &offsets)?;
     let native_stitches = native_stitches::build(state, &meshes, &offsets, &weights);
     let iterations = match quality {
-        0 => 4,
         1 => 7,
-        _ => 12,
+        2 => 12,
+        _ => 4,
     };
     let dt = 1.0 / 30.0;
     let mut contacts = 0usize;
@@ -1616,6 +1658,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut old = positions.clone();
     for _ in 0..steps {
+        if start.elapsed() >= std::time::Duration::from_secs(1800) {
+            return Err("simulation exceeded the MCP response window".into());
+        }
         old.copy_from_slice(&positions);
         for ((p, v), &weight) in positions
             .iter_mut()
@@ -1655,6 +1700,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                     project_proxy(p, body, &proxies);
                     if use_mesh_collision {
                         contacts += reserve_contact(start_of_iteration[i], p, i);
+                    }
+                    if flat_scene {
+                        p[1] = p[1].max(1.5);
                     }
                 }
             }

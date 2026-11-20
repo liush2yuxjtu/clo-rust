@@ -703,11 +703,27 @@ simulation and after reset. Exercise the public tools and corresponding
 `utility_api` calls, checking that both use the same quality setting,
 reset keeps the sewing and per-panel particle distance, and opening a
 saved scene in a fresh session can recover the saved quality before reset.
-Check that a requested CPU quality takes effect before an empty-scene error
-or invalid particle distance and is used by the next call. Verify that the
-invalid distance leaves the prior mesh and per-panel distances intact, that
+Check that a requested CPU quality takes effect on an empty-scene success
+or before a nonrepresentable particle distance and is used by the next call. Verify that the
+nonrepresentable distance leaves the prior mesh and per-panel distances intact, that
 rejected quality 3 leaves the previous setting, and that the public response
 reports the requested steps and seconds to two decimal places.
+
+Run `--verify-native-simulation-reference` with `CLO_SIMULATION_REFERENCES`
+pointing to the directory containing the official call captures
+`native-simulation-probe.json`, `native-simulation-limits.jsonl` and
+`native-simulation-error-stage.json`, plus
+`native-simulation-archives/simulation-stage-*.zpac`. The fixture is
+`multi-colorway-colored.zprj` with two sewn triangles and no avatar.
+Capture initial, zero-, three- and five-step poses, and poses after a
+zero-step remesh to 32 mm and a subsequent zero-distance request. Replay
+these operations and both reset paths. Verify rest positions within
+0.001 mm and native topology exactly. Record the maximum paired seam gap
+at each step on each solver. Check distances 0, 2, 501 and -5 mm,
+CPU qualities 0–2, ignored quality values -1 and 4, and the
+`GetSimulationQuality` readback. Check that an empty scene accepts 0, 2
+and 3001 steps. Verify that a negative step count returns a tool error
+and preserves the quality and distance applied earlier in that request.
 
 Run `--verify-simulation-remesh-keeps-pose` to refine settled cloth from
 90 mm to 25 mm at zero steps. Check exact shared vertices, inherited

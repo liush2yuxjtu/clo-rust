@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -3464,7 +3465,7 @@ async def verify_simulation_remesh_keeps_pose():
                 return path, json.loads(path.read_text())["scene"]["simulation"]
 
             await json_result(rust, "pattern_create", {
-                "name": "Panel", "points": [[0, 0], [140, 0], [58, 110]],
+                "name": "Panel", "points": [[0, 500], [140, 500], [58, 610]],
             })
             async def batch_distance(distance):
                 return await json_result(rust, "clo_api_call", {
@@ -3497,7 +3498,7 @@ async def verify_simulation_remesh_keeps_pose():
             _, api_refined = await save("api-refined")
             assert api_refined == refined
             denied = await rust.call_tool("clo_api_call", {
-                "name": "pattern_api.SetParticleDistanceOfPatterns", "args": [0],
+                "name": "pattern_api.SetParticleDistanceOfPatterns", "args": [1e39],
             })
             assert denied.isError
             result = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 0})
@@ -3525,6 +3526,114 @@ async def verify_simulation_remesh_keeps_pose():
                       "api_remesh_matches_simulate": True, "zero_distance_kept_mesh": True}))
 
 
+async def verify_native_simulation_reference():
+    root = Path(os.environ["CLO_SIMULATION_REFERENCES"]).resolve(strict=True)
+    observed = json.loads((root / "native-simulation-probe.json").read_text())["official"]
+    limits = {row["label"]: row for row in map(json.loads, (root / "native-simulation-limits.jsonl").read_text().splitlines())}
+    rejected_stage = json.loads((root / "native-simulation-error-stage.json").read_text())
+    archives = root / "native-simulation-archives"
+
+    async def save(session, target):
+        await json_result(session, "scene_save", {"path": str(target), "thumbnail": False})
+        return json.loads(target.read_text())["scene"]
+
+    def meshes(scene):
+        return scene["simulation"]["meshes"]
+
+    def verify_rest(expected, actual):
+        for left, right in zip(meshes(expected), meshes(actual), strict=True):
+            assert left["name"] == right["name"] and left["triangles"] == right["triangles"]
+            assert left["texcoords"] == right["texcoords"]
+            assert all(math.dist(a, b) <= 0.001 for a, b in zip(left["positions"], right["positions"], strict=True))
+
+    def seam_gap(scene):
+        front, back = [[(uv[0], xyz) for uv, xyz in zip(mesh["texcoords"], mesh["positions"], strict=True)
+                        if abs(uv[1]) < 0.001] for mesh in meshes(scene)]
+        pairs = zip(sorted(front), sorted(back, reverse=True), strict=True)
+        return max(math.dist(a[1], b[1]) for a, b in pairs)
+
+    with TemporaryDirectory(prefix="clo-sim-reference-") as directory:
+        target = Path(directory) / "state.clorust"
+        captures = {}
+        async with open_backend("rust") as reader:
+            for stage in ("initial", "zero", "three", "next", "coarser", "default_particle_zero"):
+                await json_result(reader, "scene_open", {"path": str(archives / f"simulation-stage-{stage}.zpac")})
+                captures[stage] = await save(reader, target)
+        verify_rest(captures["initial"], captures["zero"])
+        verify_rest(captures["coarser"], captures["default_particle_zero"])
+        async with open_backend("rust") as rust:
+            await json_result(rust, "scene_open", {"path": str(archives / "simulation-stage-original.zpac")})
+            reply = await json_result(rust, "simulation_reset")
+            assert reply == observed["reset"]
+            verify_rest(captures["initial"], await save(rust, target))
+            gaps = {"official": {}, "rust": {}}
+            for stage, steps, accumulated in (("zero", 0, 0), ("three", 3, 3), ("next", 2, 5)):
+                args = {"steps": steps} | ({"quality": 0} if stage == "three" else {})
+                reply = await json_result(rust, "simulate", args)
+                expected = observed[stage]["value"]
+                assert reply["ok"] == expected["ok"] and reply["steps"] == expected["steps"] == steps
+                assert reply["seconds"] >= 0 and reply["seconds"] == round(reply["seconds"], 2)
+                record = await save(rust, target)
+                assert record["simulation"]["steps"] == accumulated
+                if stage == "zero":
+                    verify_rest(captures[stage], record)
+                gaps["official"][stage] = seam_gap(captures[stage])
+                gaps["rust"][stage] = seam_gap(record)
+            for result in gaps.values():
+                assert result["three"] < result["zero"] and result["next"] < 1.0, result
+            assert await json_result(rust, "simulation_reset") == observed["reset_after_drape"]
+            restored = await save(rust, target)
+            verify_rest(captures["initial"], restored)
+            assert restored["native_seam_groups"] == captures["initial"]["native_seam_groups"]
+
+            qualities = {}
+            for quality in (0, 1, 2, -1, 4):
+                reply = await json_result(rust, "simulate", {"steps": 0, "quality": quality})
+                assert reply["ok"] and reply["steps"] == 0
+                lookup = await json_result(rust, "clo_api_call", {
+                    "name": "utility_api.GetSimulationQuality", "args": [],
+                })
+                assert lookup == json.loads(limits[f"observed_quality_{quality}"]["value"])
+                qualities[quality] = lookup["value"]
+            checked = {}
+            for label, distance in (
+                ("coarser", 32), ("default_particle_zero", 0), ("distance_above", 501),
+                ("distance_small", 2), ("distance_negative", -5),
+            ):
+                args = {"steps": 0, "particle_distance": distance}
+                reply = await json_result(rust, "simulate", args)
+                assert reply["ok"] is observed[label]["value"]["ok"] and reply["steps"] == 0
+                distances = [(await json_result(rust, "pattern_info", {"pattern": name}))["particle_distance"]
+                             for name in ("Front", "Back")]
+                assert distances == observed[f"{label}_distances"], (label, distances)
+                checked[label] = distances
+            invalid = await rust.call_tool("simulate", {"steps": -1, "particle_distance": 28, "quality": 2})
+            assert invalid.isError == rejected_stage["rejected"]
+            distances = [(await json_result(rust, "pattern_info", {"pattern": name}))["particle_distance"]
+                         for name in ("Front", "Back")]
+            assert distances == rejected_stage["distances"]
+            for phase in ("quality", "quality_after_reset"):
+                if phase == "quality_after_reset":
+                    assert await json_result(rust, "simulation_reset") == rejected_stage["reset"]
+                lookup = await json_result(rust, "clo_api_call", {
+                    "name": "utility_api.GetSimulationQuality", "args": [],
+                })
+                assert lookup["value"] == rejected_stage[phase]
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            for label, request in (("empty_zero", {"steps": 0, "quality": 1}), ("empty_positive", {"steps": 2})):
+                assert await json_result(rust, "simulate", request) == observed[label]["value"]
+            assert await json_result(rust, "simulate", {"steps": 3001}) == json.loads(limits["empty_steps_3001"]["value"])
+            invalid = await rust.call_tool("simulate", {"steps": -1})
+            assert invalid.isError and limits["empty_steps_-1"]["is_error"]
+            assert await json_result(rust, "simulation_reset") == observed["empty_reset"]
+            empty = await save(rust, target)
+            assert not empty["patterns"] and empty["simulation"] is None
+    print(json.dumps({"reset_pose_tolerance_mm": 0.001, "distances": checked, "quality_readback": qualities,
+                      "seam_gaps_mm": gaps,
+                      "accumulated_rust_steps": 5, "empty_scene_remained_empty": True,
+                      "invalid_steps_settings": {"particle_distances": distances, "quality": lookup["value"]}}))
+
+
 async def verify_simulation_reset_quality():
     with TemporaryDirectory(prefix="clo-reset-quality-") as directory:
         root = Path(directory)
@@ -3540,9 +3649,9 @@ async def verify_simulation_reset_quality():
             async def api(name, *args):
                 return await successful(rust, "clo_api_call", {"name": f"utility_api.{name}", "args": list(args)})
 
-            empty = await rust.call_tool("simulate", {"steps": 0, "quality": 1})
-            assert empty.isError
-            _, empty_scene = await save(rust, "after-empty-error")
+            empty = await json_result(rust, "simulate", {"steps": 0, "quality": 1})
+            assert empty == {"ok": True, "steps": 0, "seconds": 0}
+            _, empty_scene = await save(rust, "after-empty")
             assert not empty_scene["patterns"] and empty_scene["simulation"] is None
 
             for name, x in (("Front", 0), ("Back", 140)):
@@ -3586,7 +3695,7 @@ async def verify_simulation_reset_quality():
             _, after_denied = await save(rust, "after-denied")
             assert after_denied["simulation"]["quality"] == 1
             failed_distance = await rust.call_tool(
-                "simulate", {"steps": 0, "quality": 2, "particle_distance": 2},
+                "simulate", {"steps": 0, "quality": 2, "particle_distance": 1e39},
             )
             assert failed_distance.isError
             _, after_error = await save(rust, "after-invalid-distance")
@@ -3606,7 +3715,7 @@ async def verify_simulation_reset_quality():
                       "case": "reset arrangement without changing solver quality",
                       "quality_api_to_mcp": 2, "quality_mcp_to_api_and_reopen": 1,
                       "arranged_mesh_restored": True, "unsupported_quality_preserves_setting": True,
-                      "quality_retained_after_simulation_error": True,
+                      "quality_retained_after_empty_simulation": True,
                       "quality_retained_after_invalid_distance": True,
                       "failed_distance_preserves_mesh": True, "seconds_resolution": 0.01}))
 
@@ -5543,6 +5652,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-avatar-changes-keep-drape", action="store_const", dest="comparison",
                              const=verify_avatar_changes_keep_drape,
                              help="verify avatar changes preserve cloth, with updated collision on resume")
+    comparisons.add_argument("--verify-native-simulation-reference", action="store_const", dest="comparison",
+                             const=verify_native_simulation_reference,
+                             help="compare Rust simulation boundaries and arrangement with captured native results")
     comparisons.add_argument("--verify-simulation-reset-quality", action="store_const", dest="comparison",
                              const=verify_simulation_reset_quality,
                              help="verify reset keeps shared and persisted solver settings")
@@ -5604,6 +5716,7 @@ if __name__ == "__main__":
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
                                 verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape,
                                 verify_avatar_changes_keep_drape, verify_simulation_reset_quality,
+                                verify_native_simulation_reference,
                                 verify_simulation_remesh_keeps_pose)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")
             and not (args.comparison == compare_saved_arrangements and os.environ.get("CLO_ARRANGEMENT_REFERENCE"))):

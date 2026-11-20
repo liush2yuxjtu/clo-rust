@@ -571,8 +571,13 @@ const FUNCTIONS: &[Entry] = functions![
         "Refresh colorway export materials when requested."
     ),
     (
+        "utility_api.GetSimulationQuality",
+        "()",
+        "Read the selected simulation quality and mode."
+    ),
+    (
         "utility_api.SetSimulationQuality",
-        "(quality, substeps=0)",
+        "(quality, mode=0)",
         "Set the subsequent simulation quality."
     ),
     (
@@ -656,7 +661,9 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.GetCLOAssetFolderPathW" => Some("GetCLOAssetFolderPathW(bLinuxTypePathDelimeter: bool = True) -> str"),
         "utility_api.GetCLOTemporaryFolderPath" => Some("GetCLOTemporaryFolderPath() -> str"),
         "utility_api.GetCLOTemporaryFolderPathW" => Some("GetCLOTemporaryFolderPathW() -> str"),
+        "utility_api.GetSimulationQuality" => Some("GetSimulationQuality() -> Tuple[int, int]"),
         "utility_api.SetCurrentColorwayIndex" => Some("SetCurrentColorwayIndex(arg0: int) -> None"),
+        "utility_api.SetSimulationQuality" => Some("SetSimulationQuality(arg0: int, arg1: int) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1446,10 +1453,9 @@ pub(super) fn invoke(
         "pattern_api.FlipPatternPiece" => pattern_op(state,"flip",json!({"horizontal":arg[1],"each":arg[2]})).map(|result| success(&result)),
         "pattern_api.SetParticleDistanceOfPattern" => pattern_op(state,"particle_distance",json!({"mm":arg[1]})).map(|result| success(&result)),
         "pattern_api.SetParticleDistanceOfPatterns" => {
-            let distance = arg[0]
-                .as_f64()
-                .filter(|distance| (3.0..=500.0).contains(distance))
-                .ok_or("particle distance must be 3..500 mm")?;
+            let distance = crate::compat_fit::particle_distance(
+                arg[0].as_f64().ok_or("particle distance must be a number")?,
+            )?;
             if !array(&state["simulation"]["meshes"]).is_empty() {
                 domain("simulate", &json!({"steps":0,"particle_distance":distance}), state)?;
             } else {
@@ -1533,10 +1539,10 @@ pub(super) fn invoke(
             }
             Ok(Value::Null)
         }
+        "utility_api.GetSimulationQuality" => Ok(json!([crate::compat_fit::simulation_quality(state), 0])),
         "utility_api.SetSimulationQuality" => {
-            let quality = arg[0].as_u64().filter(|value| *value <= 3).ok_or("Quality must be 0..3")?;
-            state["runtime"]["quality"] = json!(quality);
-            Ok(json!(true))
+            crate::compat_fit::set_simulation_quality(state, &arg[0])?;
+            Ok(Value::Null)
         }
         "utility_api.SetZoomView" => {
             let zoom = if arg[0].is_null() {1.0} else {arg[0].as_f64().filter(|value| *value > 0.0).ok_or("Zoom must be positive")?};

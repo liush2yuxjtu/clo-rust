@@ -9,7 +9,7 @@ mod texture;
 
 pub(crate) use assets::{preserves_opacity_on_recolor, project_avatar};
 pub(crate) use render::{export_snapshot, native_previews};
-pub(crate) use solver::{avatar_geometry, uv_coordinates};
+pub(crate) use solver::{avatar_geometry, particle_distance, set_simulation_quality, simulation_quality, uv_coordinates};
 pub(crate) use texture::png_for_export;
 
 use serde_json::{json, Value};
@@ -38,13 +38,7 @@ pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Result<Va
         "garment_rebuild" => draft::build(args, state, true),
         "garment_last_spec" => Ok(draft::last_spec(state)),
         "simulate" => solver::simulate(args, state),
-        "simulation_reset" => {
-            if state["runtime"]["quality"].is_null() && state["simulation"]["quality"].is_number() {
-                state["runtime"]["quality"] = state["simulation"]["quality"].clone();
-            }
-            state["simulation"] = Value::Null;
-            Ok(json!({"ok": true}))
-        }
+        "simulation_reset" => solver::reset_arrangement(state),
         "snapshot" => render::snapshot(args, state, false),
         "snapshot_2d" => render::snapshot(args, state, true),
         _ => return None,
