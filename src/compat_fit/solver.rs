@@ -1,5 +1,6 @@
 mod native_stitches;
 mod shirring;
+pub(super) mod weld;
 
 use super::{array, assets, boolean, number, string};
 use crate::collision::MeshCollider;
@@ -608,6 +609,46 @@ fn map_boundary_cycle(
     None
 }
 
+fn refined_boundary_cycle(
+    outline: &[[u64; 2]],
+    rest: &[Point2],
+    rest_keys: &[[u64; 2]],
+    neighbors: &[Vec<usize>],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let sits_on_segment = |point: Point2, start: Point2, end: Point2| {
+        let length_squared = distance2(start, end);
+        let projection = (point[0] - start[0]) * (end[0] - start[0])
+            + (point[1] - start[1]) * (end[1] - start[1]);
+        projection > 0.0 && projection < length_squared
+            && flat_cross(start, end, point).abs() <= 1e-8 * length_squared.sqrt()
+    };
+    for start in (0..rest.len()).filter(|&i| rest_keys[i] == outline[0]) {
+        for &first in &neighbors[start] {
+            let mut path = vec![start];
+            let mut sample_offsets = vec![0];
+            let mut segment_start = rest[start];
+            let (mut previous, mut current) = (start, first);
+            while current != start && path.len() < rest.len() {
+                let key = outline[sample_offsets.len() % outline.len()];
+                if rest_keys[current] == key && sample_offsets.len() < outline.len() {
+                    sample_offsets.push(path.len());
+                    segment_start = rest[current];
+                } else if !sits_on_segment(rest[current], segment_start, key.map(f64::from_bits)) {
+                    break;
+                }
+                path.push(current);
+                let [a, b] = neighbors[current].as_slice() else { break };
+                let next = if *a == previous { *b } else { *a };
+                (previous, current) = (current, next);
+            }
+            if current == start && sample_offsets.len() == outline.len() {
+                return Some((path, sample_offsets));
+            }
+        }
+    }
+    None
+}
+
 fn native_sides(
     pattern: &Value,
     rest: &[Point2],
@@ -639,13 +680,15 @@ fn native_sides(
     }
     let neighbors = mesh_boundary(rest.len(), triangles)?;
     let rest_keys: Vec<_> = rest.iter().copied().map(coordinate_key).collect();
-    let selected = map_boundary_cycle(&distinct, &rest_keys, &neighbors)
-        .ok_or("saved native rest mesh boundary does not match the panel outline samples")?;
-    let vertex_indices: Vec<_> = vertex_slots
-        .into_iter()
-        .map(|slot| selected[slot])
-        .collect();
-    let mut sides = sampled_sides(&vertex_indices, &corners);
+    let mut sides = if let Some(selected) = map_boundary_cycle(&distinct, &rest_keys, &neighbors) {
+        let vertex_indices: Vec<_> = vertex_slots.into_iter().map(|slot| selected[slot]).collect();
+        sampled_sides(&vertex_indices, &corners)
+    } else {
+        let (selected, offsets) = refined_boundary_cycle(&distinct, rest, &rest_keys, &neighbors)
+            .ok_or("saved native rest mesh boundary does not match the panel outline samples")?;
+        let corners: Vec<_> = corners.into_iter().map(|corner| offsets[vertex_slots[corner]]).collect();
+        sampled_sides(&selected, &corners)
+    };
     for side in &mut sides {
         side.dedup();
         if side.len() < 2 {

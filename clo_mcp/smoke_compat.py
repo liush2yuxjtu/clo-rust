@@ -8,6 +8,7 @@ import os
 import shutil
 import struct
 import sys
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -712,11 +713,8 @@ async def compare_strapped_draft_preview():
             expected = await json_result(clo, "garment_plan_preview", args)
             observed = await json_result(rust, "garment_plan_preview", args)
             assert expected.keys() == observed.keys(), spec
-            for key in expected.keys() - {"notes"}:
+            for key in expected:
                 assert expected[key] == observed[key], (spec, key, expected[key], observed[key])
-            # Split-dress notes disclose the current difference in build behavior.
-            notes = slice(1, None) if expected["merge_pairs"] else slice(None)
-            assert expected["notes"][notes] == observed["notes"][notes], spec
             rows.append({"pieces": len(observed["pieces"]), "seams": len(observed["seams"])})
         for session, previous in zip((clo, rust), previous_specs, strict=True):
             assert (await session.call_tool("garment_plan_preview", {"spec": []})).isError
@@ -935,6 +933,96 @@ async def verify_tiered_build_relaxation():
     print(json.dumps({"tools": ["garment_build", "garment_rebuild", "pattern_ops", "simulate"],
                       "case": "tiered build relaxation", "comparisons": cases,
                       "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
+
+
+async def verify_one_piece_dress_merge():
+    cases = [
+        {"silhouette": "a-line", "length": "midi", "particle_distance": 80},
+        {"silhouette": "strapless", "length": "tea", "particle_distance": 70},
+        {"silhouette": "sheath", "length": "knee", "sleeve": "long", "particle_distance": 80},
+    ]
+    expected_pairs = [{"base": side, "other": f"Lower_{side}", "ok": True} for side in ("Front", "Back")]
+    results = []
+    with TemporaryDirectory(prefix="clo-dress-merge-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+                       "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints")}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            def rest_area(mesh, panel=None):
+                points = mesh["texcoords"]
+                factor = 1.0
+                if panel is not None:
+                    x, y = zip(*(point[:2] for point in panel["points"]))
+                    factor = (max(x) - min(x)) * (max(y) - min(y))
+                return factor * sum(
+                    abs((points[b][0] - points[a][0]) * (points[c][1] - points[a][1])
+                        - (points[b][1] - points[a][1]) * (points[c][0] - points[a][0])) / 2
+                    for a, b, c in mesh["triangles"]
+                )
+
+            for spec in cases:
+                request = {"spec": spec, "snapshots": False}
+                drafted = await json_result(rust, "garment_build", request | {"simulate_steps": 0})
+                assert drafted["simulation"] is None
+                await json_result(rust, "simulate", {"steps": 1, "particle_distance": spec["particle_distance"]})
+                _, split = await save("split")
+                split_panels = {panel["name"]: panel for panel in split["patterns"]}
+                split_meshes = {mesh["name"]: mesh for mesh in split["simulation"]["meshes"]}
+                built = await json_result(rust, "garment_build", request | {"simulate_steps": 1})
+                assert built["simulation"]["merged_pieces"] == expected_pairs, built["simulation"]
+                assert built["pieces"]["Lower_Front"]["index"] is None
+                assert built["pieces"]["Lower_Back"]["index"] is None
+                path, scene = await save("merged")
+                assert scene["simulation"]["steps"] == 31
+                panels = {panel["id"]: panel for panel in scene["patterns"]}
+                names = [panel["name"] for panel in panels.values()]
+                assert names[:2] == ["Front", "Back"] and len(names) == len(split_panels) - 2
+                assert len(scene["seams"]) == len(split["seams"]) - 2
+                for seam in scene["seams"]:
+                    for end in ("a", "b"):
+                        assert seam[f"line_{end}"] < len(panels[seam[f"pattern_{end}"]]["edges"])
+                for name in ("Front", "Back"):
+                    mesh = next(mesh for mesh in scene["simulation"]["meshes"] if mesh["name"] == name)
+                    lower = f"Lower_{name}"
+                    expected_area = sum(rest_area(split_meshes[p], split_panels[p]) for p in (name, lower))
+                    assert abs(rest_area(mesh) - expected_area) < 1e-5
+                    incidence = Counter(tuple(sorted((a, b)))
+                                        for face in mesh["triangles"]
+                                        for a, b in zip(face, face[1:] + face[:1]))
+                    assert len(mesh["positions"]) - len(incidence) + len(mesh["triangles"]) == 1
+                    waist_y = next(point[1] for point in split_panels[lower]["points"])
+                    join_counts = [count for (a, b), count in incidence.items()
+                                   if mesh["texcoords"][a][1] == mesh["texcoords"][b][1] == waist_y]
+                    assert join_counts and all(count == 2 for count in join_counts)
+                    if spec["silhouette"] == "strapless":
+                        panel = panels[mesh["id"]]
+                        assert panel["line_properties"]["0"]["elastic"]["on"]
+                expected_names = [panel["name"] for panel in split["patterns"]]
+                assert (await json_result(rust, "garment_last_spec"))["pieces"] == expected_names
+                await json_result(rust, "scene_open", {"path": str(path)})
+                await json_result(rust, "simulate", {"steps": 0})
+                _, reopened = await save("reopened")
+                assert reopened["simulation"] == scene["simulation"]
+                await json_result(rust, "simulate", {"steps": 1})
+                _, continued = await save("continued")
+                assert continued["simulation"]["steps"] == 32
+                results.append({"silhouette": spec["silhouette"], "panels": len(names), "seams": len(scene["seams"])})
+            rebuilt = await json_result(rust, "garment_rebuild", {
+                "changes": {"sleeve": "none"}, "simulate_steps": 1, "snapshots": False,
+            })
+            assert rebuilt["simulation"]["merged_pieces"] == expected_pairs
+            _, scene = await save("rebuilt")
+            assert [panel["name"] for panel in scene["patterns"]] == ["Front", "Back"]
+    print(json.dumps({"tools": ["garment_build", "garment_rebuild", "scene_save", "simulate"],
+                      "case": "one-piece dress waist merge", "builds": results,
+                      "rest_area_and_shared_waist": "pass", "reopen_and_rebuild": "pass"}))
 
 
 async def compare_curved_skirt_preview():
@@ -1315,6 +1403,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-tiered-build-relaxation", action="store_const", dest="comparison",
                              const=verify_tiered_build_relaxation,
                              help="verify layer reset, solver continuation and saved drape after tiered builds")
+    comparisons.add_argument("--verify-one-piece-dress-merge", action="store_const", dest="comparison",
+                             const=verify_one_piece_dress_merge,
+                             help="verify welded waist topology, remapped seams and reopened drape")
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
@@ -1335,7 +1426,8 @@ if __name__ == "__main__":
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
-                                verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation)
+                                verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
+                                verify_one_piece_dress_merge)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

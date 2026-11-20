@@ -118,7 +118,7 @@ Save and reopen the Rust project, render again and verify lines persist.
 Use `--compare-strapped-draft-preview` to compare offline strapless, tube,
 slip, sweetheart, straight neck and wide strap examples. Compare normalized
 specs, pieces, edge lengths, seam order, elastic settings and last-spec
-readback. The split-dress notes record a known post-simulation join difference.
+readback, including the drafted waist-merge pairs.
 For the Rust build path, build a strapless top, check elastic constraints in
 `simulate`, and repeat with straps to verify that the top-edge elastic is absent.
 
@@ -158,6 +158,14 @@ full-circle skirts, skater dresses, ball gowns, mermaid dresses and trumpet
 skirts. Compare the complete preview, including radial seam order, the four
 waist joins on dresses and standalone waist elastic. Build a skirt and dress
 through Rust, read back the stored sewing and check one simulation step.
+
+Run `python -m clo_mcp.smoke_compat --verify-one-piece-dress-merge` to
+verify the Rust build for A-line, strapless and long-sleeve sheath dresses.
+A zero-step build keeps the bodice and lower panels. A positive-step build
+welds both waist joins and continues for 30 steps. Compare the rest area,
+triangle incidence at the shared waist, surviving seam indices, elastic
+settings, reopening and resumed steps. Live CLO comparison requires the
+bridge and a disposable scene.
 
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,

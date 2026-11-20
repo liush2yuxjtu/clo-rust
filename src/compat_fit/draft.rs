@@ -1108,7 +1108,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
                 json!(["Front", "Lower_Front"]),
                 json!(["Back", "Lower_Back"]),
             ]);
-            notes.push(json!("one-piece dress built as bodice + lower piece for a stable drape; single-piece mesh joining after simulation is pending"));
+            notes.push(json!("one-piece dress built as bodice + lower piece for a stable drape; merged into single pieces after simulation"));
         }
         for edge in ["side_L", "side_R"] {
             seams.push(seam(&pieces, 0, edge, 1, edge, true)?);
@@ -1387,6 +1387,24 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             }
             let relax = solver::simulate(&json!({"steps": (steps / 4).max(30)}), &mut next)?;
             simulation["extra_steps_after_layer_reset"] = relax["steps"].clone();
+        }
+        let pairs = array(&draft["merge_pairs"]);
+        if !pairs.is_empty() {
+            let merged = pairs.iter().map(|pair| {
+                let base = pair[0].as_str().expect("drafted merge base");
+                let other = pair[1].as_str().expect("drafted merge partner");
+                match solver::weld::merge_drafted_pair(&mut next, &ids[base], &ids[other]) {
+                    Ok(()) => json!({"base":base,"other":other,"ok":true}),
+                    Err(error) => json!({"base":base,"other":other,"ok":false,"error":error}),
+                }
+            }).collect::<Vec<_>>();
+            simulation["merged_pieces"] = json!(merged);
+            for (name, piece) in &mut summary {
+                piece["index"] = json!(array(&next["patterns"])
+                    .iter()
+                    .position(|pattern| pattern["id"] == ids[name]));
+            }
+            solver::simulate(&json!({"steps":30}), &mut next)?;
         }
         simulation
     } else {
