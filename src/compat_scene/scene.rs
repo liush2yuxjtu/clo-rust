@@ -242,6 +242,42 @@ fn prepare_archived_fabrics(
     Ok(fabrics)
 }
 
+fn append_native_pose(
+    existing: Option<Value>,
+    prior_count: usize,
+    panels: &[Value],
+    imported: &Value,
+) -> Option<Value> {
+    let pose = array(imported, "saved_pose");
+    let added = &panels[prior_count..];
+    let original = array(imported, "patterns");
+    if pose.is_empty() || pose.len() != added.len() || pose.len() != original.len() {
+        return None;
+    }
+    let mut meshes = if prior_count == 0 {
+        Vec::new()
+    } else {
+        match existing? {
+            Value::Array(meshes) => meshes,
+            _ => return None,
+        }
+    };
+    if meshes.len() != prior_count
+        || meshes.iter().zip(panels).any(|(mesh, panel)| mesh["id"] != panel["id"])
+    {
+        return None;
+    }
+    for ((mesh, old), new) in pose.iter().zip(original).zip(added) {
+        if mesh["id"] != old["id"] {
+            return None;
+        }
+        let mut mesh = mesh.clone();
+        mesh["id"] = new["id"].clone();
+        meshes.push(mesh);
+    }
+    Some(json!({"source": "native_saved_pose", "meshes": meshes}))
+}
+
 pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     if !path.is_file() {
@@ -299,8 +335,19 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             let is_project = ext == "zprj";
             let mut loaded = formats::clo_native::read(path, is_project)?;
             let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
+            let prior_count = array(state, "patterns").len();
+            let fresh_append = append
+                && prior_count == 0
+                && state["avatar"].is_null()
+                && state["garment_spec"].is_null()
+                && ["additional_avatars", "fabrics", "imported_meshes", "seams", "native_seam_groups"]
+                    .iter()
+                    .all(|key| array(state, key).is_empty())
+                && state["colorways"].as_array().is_none_or(|names| names == &[json!("Colorway 1")]);
+            let old_pose = (append && state["simulation"]["source"] == "native_saved_pose")
+                .then(|| state["simulation"]["meshes"].clone());
             merge(state, &loaded, append)?;
-            if append {
+            if append && !fresh_append {
                 vec_mut(state, "fabrics").extend(fabrics);
             } else {
                 state["fabrics"] = json!(fabrics);
@@ -311,34 +358,47 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             }
             let mut avatar_error = None;
             let mut embedded_avatar = false;
-            if is_project && !append {
-                state["additional_avatars"] = json!([]);
-                state["avatar"] = match crate::compat_fit::project_avatar(path) {
+            if is_project {
+                if !append {
+                    state["additional_avatars"] = json!([]);
+                    state["avatar"] = Value::Null;
+                }
+                match crate::compat_fit::project_avatar(path) {
                     Ok(Some(avatar)) => {
                         embedded_avatar = true;
-                        avatar
+                        if state["avatar"].is_null() {
+                            state["avatar"] = avatar;
+                        } else {
+                            vec_mut(state, "additional_avatars").push(avatar);
+                        }
                     }
-                    Ok(None) => Value::Null,
-                    Err(error) => {
-                        avatar_error = Some(error);
-                        Value::Null
-                    }
-                };
-                set_project(state, path);
+                    Ok(None) => (),
+                    Err(error) => avatar_error = Some(error),
+                }
+                if !append {
+                    set_project(state, path);
+                }
             }
             let pose = array(&loaded, "saved_pose");
-            if !append && !pose.is_empty() {
+            if append {
+                if let Some(pose) =
+                    append_native_pose(old_pose, prior_count, array(state, "patterns"), &loaded)
+                {
+                    state["simulation"] = pose;
+                }
+            } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if !append {
+            if !append || fresh_append {
                 formats::native_save::remember(state, path, is_project);
             }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
             reply["native_import"] = loaded["native_import"].clone();
             reply["native_import"]["embedded_avatar_loaded"] = json!(embedded_avatar);
+            reply["native_import"]["saved_pose_loaded"] = json!(state["simulation"]["source"] == "native_saved_pose");
             let mut warnings = vec![
-                "Loaded native outlines from saved mesh samples. Internal seam paths can be recovered from verified meshes. Authored curve controls and editable internal shapes are unavailable.".to_owned(),
+                "Loaded native outlines from saved mesh samples. Verified curve metrics, child shapes and internal seam paths are available for supported records.".to_owned(),
                 "Saved arrangement settings may be present. Official placement calibration and solver continuation state are unavailable.".to_owned(),
                 "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list.".to_owned(),
             ];
@@ -351,8 +411,8 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             if array(&loaded, "fabrics").is_empty() {
                 warnings.push("Archived fabric assignments and front colors could not be validated for this file.".into());
             }
-            if append && !pose.is_empty() {
-                warnings.push("The saved 3D pose is loaded in replace mode only.".into());
+            if append && !pose.is_empty() && state["simulation"].is_null() {
+                warnings.push("The combined scene has no complete set of saved native poses. The 3D pose will be initialized from the pattern outlines.".into());
             } else if pose.is_empty() {
                 warnings.push("The saved 3D pose could not be validated for this file.".into());
             }

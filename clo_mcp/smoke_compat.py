@@ -948,6 +948,82 @@ async def compare_checkpoint_listing():
     print(json.dumps({"tool": "checkpoint_list", "same_order_and_local_timestamps": listings["rust"]}))
 
 
+async def verify_native_append():
+    fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
+    assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
+    project = str(Path(fixture).resolve(strict=True))
+    with TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        async with open_backend("rust") as session:
+            await inspect_contract(session)
+            baseline = await json_result(session, "scene_open", {"path": project})
+            assert baseline["native_import"]["saved_pose_loaded"] and baseline["avatars"]
+            first = await json_result(session, "scene_info")
+            assert first["fabric_count"] and first["seam_groups"]
+
+            async def save(name):
+                path = folder / f"{name}.clorust"
+                await json_result(session, "scene_save", {"path": str(path)})
+                return path, json.loads(path.read_text())["scene"]
+
+            _, before = await save("baseline")
+            reply = await json_result(session, "scene_open", {"path": project, "mode": "append"})
+            assert reply["native_import"]["saved_pose_loaded"]
+            appended = await json_result(session, "scene_info")
+            assert appended["project"] == "baseline"
+            for field in ("pattern_count", "fabric_count", "seam_groups"):
+                assert appended[field] == 2 * first[field], (field, first[field], appended[field])
+            assert appended["avatars"] == first["avatars"] * 2
+            path, both = await save("combined")
+            old = before["simulation"]["meshes"]
+            meshes = both["simulation"]["meshes"]
+            assert len(meshes) == len(old) * 2
+            assert meshes[:len(old)] == old
+            assert [mesh["id"] for mesh in meshes] == [panel["id"] for panel in both["patterns"]]
+            for a, b in zip(old, meshes[len(old):], strict=True):
+                assert a["id"] != b["id"]
+                assert {k: v for k, v in a.items() if k != "id"} == {k: v for k, v in b.items() if k != "id"}
+            ids = [panel["id"] for panel in both["patterns"]]
+            assert len(ids) == len(set(ids))
+            count = first["pattern_count"]
+            remap = dict(zip(ids[:count], ids[count:], strict=True))
+            original_groups = before["native_seam_groups"]
+            kept, added = both["native_seam_groups"][:len(original_groups)], both["native_seam_groups"][len(original_groups):]
+            assert kept == original_groups
+            for a, b in zip(original_groups, added, strict=True):
+                assert a["name"] == b["name"] and a["id"] != b["id"]
+                for old_pair, new_pair in zip(a["segments"], b["segments"], strict=True):
+                    for old, new in zip(old_pair, new_pair, strict=True):
+                        assert {**old, "pattern_id": remap[old["pattern_id"]]} == new
+            for a, b in zip(both["patterns"][:count], both["patterns"][count:], strict=True):
+                assert a["name"] == b["name"]
+                assert b["fabric_index"] == a["fabric_index"] + first["fabric_count"]
+            await json_result(session, "scene_open", {"path": str(path)})
+            stable = await json_result(session, "scene_info")
+            corrupt_path = folder / "corrupt.zprj"
+            corrupt_path.write_bytes(b"not a native project")
+            for mode in ("append", "replace"):
+                invalid = await session.call_tool("scene_open", {"path": str(corrupt_path), "mode": mode})
+                assert invalid.isError
+                assert await json_result(session, "scene_info") == stable
+            await json_result(session, "scene_clear", {"keep_avatar": False})
+            empty_append = await json_result(session, "scene_open", {"path": project, "mode": "append"})
+            assert empty_append["native_import"]["saved_pose_loaded"]
+            assert empty_append["avatars"] == first["avatars"]
+            assert (await json_result(session, "scene_info"))["colorways"] == first["colorways"]
+            garment = folder / "copy.zpac"
+            await json_result(session, "scene_export", {"path": str(garment)})
+            garment_append = await json_result(session, "scene_open", {"path": str(garment), "mode": "append"})
+            assert garment_append["pattern_count"] == count * 2
+            assert garment_append["avatars"] == first["avatars"]
+            assert garment_append["native_import"]["saved_pose_loaded"]
+    print(json.dumps({"tool": "scene_open", "case": "append two saved native poses",
+                      "patterns": appended["pattern_count"], "fabrics": appended["fabric_count"],
+                      "seam_groups": appended["seam_groups"], "avatars": len(appended["avatars"]),
+                      "pose_meshes_matched": len(meshes), "corrupt_input_preserves_scene": True,
+                      "empty_append_reexports_native": True, "garment_append_keeps_avatar": True}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -1008,8 +1084,11 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
+    comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
+                             const=verify_native_append,
+                             help="verify pose, avatar, fabric and sew group readback on Rust native append")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow)
+    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow, verify_native_append)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -137,6 +137,16 @@ With the official stdio command configured, run `--compare-checkpoint-listing`
 to compare order and local timestamps using disposable directories without
 starting CLO.
 
+Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
+`--verify-native-append` with a native project that has fabrics, seams, an
+avatar and a complete saved pose. Check that append preserves original project
+identity, shifts new panel and fabric indices, and restores both saved meshes
+and embedded avatars. Save and reopen the combined project. Test invalid input
+in both modes. Append to an empty scene, re-export as ZPAC, then append the
+ZPAC and confirm the avatar stays in the scene and both poses are available.
+A combined scene without complete native poses requires a
+separate initialization test.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains
