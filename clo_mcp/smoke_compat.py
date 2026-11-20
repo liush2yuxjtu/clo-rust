@@ -2001,6 +2001,24 @@ async def verify_runtime_pattern_query():
             assert await json_result(session, "clo_api_call", {"name": name, "args": args}) == {
                 "name": name, "value": value,
             }
+        name = "pattern_api.GetPatternPieceName"
+        for index_arg, value in ((-1, ""), (count, ""), (2**31 - 1, ""), (False, first)):
+            assert await json_result(session, "clo_api_call", {"name": name, "args": [index_arg]}) == {
+                "name": name, "value": value,
+            }
+        for short in ("GetPatternIndex", "GetPatternIndexW"):
+            name = f"pattern_api.{short}"
+            assert await json_result(session, "clo_api_call", {
+                "name": name, "args": ["MissingMcpVerificationPattern"],
+            }) == {"name": name, "value": -1}
+        empty_search = await json_result(session, "clo_api_search", {
+            "query": "MissingMcpVerificationPattern", "limit": 1,
+        })
+        assert json.loads(empty_search["result"]) == {
+            "total": 0, "next_offset": None, "entries": [], "unavailable_modules": {},
+        }
+        empty_doc = await json_result(session, "clo_api_doc", {"function_name": "MissingMcpVerificationPattern"})
+        assert json.loads(empty_doc["result"]) == {"matches": [], "help": "Use a qualified name from clo_api_catalog."}
         assert await json_result(session, "clo_run_python", {"code": "pattern_api.GetPatternCount()"}) == {
             "value": count, "stdout": "",
         }
@@ -2008,32 +2026,69 @@ async def verify_runtime_pattern_query():
             "code": "print(pattern_api.GetPatternCount()); result = pattern_api.GetPatternPieceName(0)",
         }) == {"value": first, "stdout": f"{count}\n"}
         handle_type = "ApiTypes.ImportExportOption"
+        description = await json_result(session, "clo_api_describe", {"name": handle_type})
+        required_fields = {"bAdd", "bExportAvatar", "bExportGarment", "bSaveColorWays", "bSingleObject", "scale"}
+        assert description["name"] == handle_type
+        assert required_fields <= {member["name"] for member in description["members"]}
         handle = (await json_result(session, "clo_api_call", {"name": handle_type}))["value"]
         assert handle["$handle"] and handle["type"] == "ImportExportOption"
         for released in (1, 0):
             assert await json_result(session, "clo_api_release", {"handles": [handle["$handle"]]}) == {
                 "released": released,
             }
-        for tool, args in (
+        errors = (
             ("clo_api_catalog", {"module": "pattern_api", "offset": -1}),
             ("clo_api_search", {"query": "GetPatternCount", "limit": 0}),
+            ("clo_api_search", {"query": "GetPatternCount", "limit": 501}),
+            ("clo_api_doc", {"function_name": "pattern_api.MissingMcpVerificationPattern"}),
+            ("clo_api_describe", {"name": "pattern_api.MissingMcpVerificationPattern"}),
             ("clo_api_call", {"name": "pattern_api.GetPatternCount", "args": [42]}),
             ("clo_api_call", {"name": "pattern_api.GetPatternIndex",
                               "args": [{"$handle": handle["$handle"]}]}),
             ("clo_run_python", {"code": "raise ValueError('verification control')"}),
-        ):
+        ) + tuple(("clo_api_call", {"name": "pattern_api.GetPatternPieceName", "args": [value]})
+                  for value in (2**31, "0", 1.0, None))
+        for tool, args in errors:
             assert (await session.call_tool(tool, args)).isError, (tool, args)
+        fresh = (await json_result(session, "clo_api_call", {"name": handle_type}))["value"]
+        assert fresh["type"] == handle["type"] and fresh["$handle"] != handle["$handle"]
+        assert await json_result(session, "clo_api_release", {
+            "handles": [handle["$handle"], fresh["$handle"]],
+        }) == {"released": 1}
         after = await json_result(session, "scene_info")
         for key in ("project_path", "patterns", "pattern_count", "avatars", "fabric_count", "seam_groups"):
             assert after[key] == scene[key], key
         return {"apis": findings, "pattern_count": count, "first_pattern": first,
                 "index_lookup": {"name": selected, "index": index}, "catalog_pages": 2,
-                "handle_release_counts": [1, 0], "errors_rejected": 5, "scene_unchanged": True}
+                "handle_release_counts": [1, 0, 1], "errors_rejected": len(errors),
+                "read_only_scene_unchanged": True}
+
+    async def verify_scene_edit(session, scene):
+        original = scene["patterns"][0]["name"]
+        api = "pattern_api.SetPatternPieceName"
+        renamed = original + " [MCP]"
+        partial = original + " [MCP Python]"
+        try:
+            changed = await json_result(session, "clo_api_call", {"name": api, "args": [0, renamed]})
+            assert changed == {"name": api, "value": None}
+            assert (await json_result(session, "pattern_info", {"pattern": "0"}))["name"] == renamed
+            script = f"{api}(0, {partial!r})\nraise ValueError('verify scene readback')"
+            assert (await session.call_tool("clo_run_python", {"code": script})).isError
+            assert await json_result(session, "clo_run_python", {
+                "code": "pattern_api.GetPatternPieceName(0)",
+            }) == {"value": partial, "stdout": ""}
+            assert (await json_result(session, "scene_info"))["patterns"][0]["name"] == partial
+        finally:
+            await json_result(session, "clo_api_call", {"name": api, "args": [0, original]})
+        assert await json_result(session, "scene_info") == scene
+        return {"typed_rename_readback": True, "python_error_keeps_rename": True, "restored": True}
 
     async with open_backend("rust") as rust:
         await inspect_contract(rust)
         await json_result(rust, "scene_open", {"path": str(project)})
-        observations = await observe(rust, await json_result(rust, "scene_info"))
+        scene = await json_result(rust, "scene_info")
+        observations = await observe(rust, scene)
+        observations["edit"] = await verify_scene_edit(rust, scene)
     reference = {"status": "NOT_RUN"}
     if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         async with open_backend("official") as clo:
@@ -2045,9 +2100,11 @@ async def verify_runtime_pattern_query():
                 if Path(scene.get("project_path") or ".").resolve() != project:
                     reference = {"status": "BLOCKED", "reason": "CLO has not opened the saved fixture"}
                 else:
-                    assert await observe(clo, scene) == observations
-                    reference = {"status": "PASS"}
-    print(json.dumps({"case": "read-only pattern API workflow", "rust": observations, "official": reference}))
+                    native = await observe(clo, scene)
+                    native["edit"] = await verify_scene_edit(clo, scene)
+                    assert native == observations
+                    reference = {"status": "PASS", "clo_version": scene["clo_version"]}
+    print(json.dumps({"case": "pattern API workflow", "rust": observations, "official": reference}))
     if reference["status"] == "BLOCKED":
         raise SystemExit(2)
 

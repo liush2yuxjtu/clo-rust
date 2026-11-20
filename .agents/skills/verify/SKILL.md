@@ -657,12 +657,20 @@ Set `CLO_RUNTIME_PATTERN_FIXTURE` to a saved `.zprj` containing patterns and
 run `--verify-runtime-pattern-query`. Check four pattern catalog entries,
 including two pages for `GetPatternIndex` and `GetPatternIndexW`. Verify both
 index lookups against a named piece from `scene_info`, then read the name back
-by index. Check search, description, doc lookup, Python output, and repeated
-release of an `ImportExportOption` handle. Verify a call with the released
-handle is rejected and the scene remains intact.
-With the official command configured, load the same saved fixture in CLO first.
-The case reads that scene without editing it. A down bridge or a different open
-project is recorded as `BLOCKED` with exit 2, alongside the Rust observations.
+by index. Check the empty-string result for out-of-range 32-bit indices and
+rejection of oversized integers, strings, floats, and null. Check empty and
+missing search and doc results, search limits, Python stdout, and the six
+supported fields on `ImportExportOption`. Release a handle, confirm repeat
+release is a no-op, construct a fresh handle, and release it in a mixed batch.
+
+With the official command configured, open the same fixture in a dedicated
+CLO session. Use a disposable project with at least one named pattern. The
+case temporarily renames the first pattern through `clo_api_call`, reads it
+through `pattern_info`, and uses `clo_run_python` to rename it again before
+raising an exception. Verify the second rename survives the error and a later
+Python call can read it. The test restores the original name and compares
+`scene_info` with the starting scene without saving the changes. A down
+bridge or a different project is `BLOCKED` with exit 2.
 
 Run `cargo test --locked completed_api_call_past_deadline_stops_the_script`
 for a Python request whose synchronous API call finishes after the deadline.

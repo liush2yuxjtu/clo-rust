@@ -1368,7 +1368,16 @@ pub(super) fn invoke(
             }
             Ok(json!(twice_area.abs() / 2.0))
         }
-        "pattern_api.GetPatternPieceName" => pattern_info(state,"name"),
+        "pattern_api.GetPatternPieceName" => {
+            let raw = arg[0].as_i64().or_else(|| arg[0].as_bool().map(i64::from));
+            let index = raw.and_then(|value| i32::try_from(value).ok())
+                .ok_or("Pattern index must be a 32-bit integer")?;
+            let name = usize::try_from(index).ok()
+                .and_then(|index| patterns.get(index))
+                .and_then(|pattern| pattern["name"].as_str())
+                .unwrap_or_default();
+            Ok(json!(name))
+        }
         "pattern_api.GetPatternPiecePos" => pattern_info(state,"pos_2d"),
         "pattern_api.GetPatternPieceFabricIndex" => pattern_info(state,"fabric_index"),
         "pattern_api.GetPatternLayer" => pattern_info(state,"layer"),
