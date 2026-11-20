@@ -688,6 +688,39 @@ async def compare_saved_snapshot_2d():
     }))
 
 
+async def compare_strapped_draft_preview():
+    cases = (
+        {"silhouette": "strapless", "length": "mini"},
+        {"silhouette": "tube", "length": "knee"},
+        {"silhouette": "slip", "length": "midi"},
+        {"garment": "top", "neckline": "sweetheart", "strapless": True, "sleeve": "long"},
+        {"garment": "top", "neckline": "sweetheart", "straps": "wide", "sleeve": "long", "length": "waist"},
+        {"garment": "top", "neckline": "straight", "length": "cropped"},
+        {"silhouette": "slip", "straps": "none", "length": "mini"},
+    )
+    rows = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        for session in (clo, rust):
+            await inspect_contract(session)
+        previous_specs = [await json_result(session, "garment_last_spec") for session in (clo, rust)]
+        for spec in cases:
+            args = {"spec": spec, "use_scene_measurements": False}
+            expected = await json_result(clo, "garment_plan_preview", args)
+            observed = await json_result(rust, "garment_plan_preview", args)
+            assert expected.keys() == observed.keys(), spec
+            for key in expected.keys() - {"notes"}:
+                assert expected[key] == observed[key], (spec, key, expected[key], observed[key])
+            # Split-dress notes disclose the current difference in build behavior.
+            notes = slice(1, None) if expected["merge_pairs"] else slice(None)
+            assert expected["notes"][notes] == observed["notes"][notes], spec
+            rows.append({"pieces": len(observed["pieces"]), "seams": len(observed["seams"])})
+        for session, previous in zip((clo, rust), previous_specs, strict=True):
+            assert (await session.call_tool("garment_plan_preview", {"spec": []})).isError
+            assert await json_result(session, "garment_last_spec") == previous
+    print(json.dumps({"tool": "garment_plan_preview", "case": "strap styles", "comparisons": rows,
+                      "last_spec_unchanged": True, "invalid_spec_error": "pass"}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -730,6 +763,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-snapshot-2d", action="store_const", dest="comparison",
                              const=compare_saved_snapshot_2d,
                              help="capture both backends' 2D layout and verify the PNG response")
+    comparisons.add_argument("--compare-strapped-draft-preview", action="store_const", dest="comparison",
+                             const=compare_strapped_draft_preview,
+                             help="compare offline strapless and strap garment draft previews")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

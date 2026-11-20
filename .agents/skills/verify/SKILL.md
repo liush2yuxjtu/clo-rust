@@ -99,6 +99,13 @@ with `--compare-saved-snapshot-2d`. Inspect both images for relative layout,
 outline completeness and visible internal paths. Renderer dimensions may differ.
 Save and reopen the Rust project, render again and verify lines persist.
 
+Use `--compare-strapped-draft-preview` to compare offline strapless, tube,
+slip, sweetheart, straight neck and wide strap examples. Compare normalized
+specs, pieces, edge lengths, seam order, elastic settings and last-spec
+readback. The split-dress notes record a known post-simulation join difference.
+For the Rust build path, build a strapless top, check elastic constraints in
+`simulate`, and repeat with straps to verify that the top-edge elastic is absent.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

@@ -106,6 +106,9 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         ("dress", "a-line") => (true, "regular", 0.30, "", "natural"),
         ("dress", "tent" | "trapeze") => (true, "loose", 0.55, "", "natural"),
         ("dress", "shirt" | "shirt-dress") => (true, "loose", 0.15, "", "natural"),
+        ("dress", "slip") => (true, "fitted", 0.08, "", "natural"),
+        ("dress", "strapless") => (true, "fitted", 0.05, "", "natural"),
+        ("dress", "tube") => (true, "bodycon", -0.02, "", "natural"),
         ("dress", "fit-and-flare" | "fit and flare" | "peplum") => {
             (false, "fitted", 0.0, "flare", "natural")
         }
@@ -115,8 +118,7 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         ("dress", "mermaid") => (false, "fitted", 0.0, "mermaid", "natural"),
         (
             "dress",
-            "slip" | "strapless" | "tube" | "empire" | "babydoll" | "gathered" | "dirndl"
-            | "tiered" | "drop-waist" | "wrap" | "smock",
+            "empire" | "babydoll" | "gathered" | "dirndl" | "tiered" | "drop-waist" | "wrap" | "smock",
         ) => {
             return Err(format!(
                 "Rust drafting for silhouette {silhouette:?} is not implemented"
@@ -143,7 +145,10 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         normalized.entry("skirt").or_insert(json!(skirt));
     }
     normalized.entry("fit").or_insert(json!(fit));
-    normalized.entry("neckline").or_insert(json!("round"));
+    let slip = garment == "dress" && normalized["silhouette"] == "slip";
+    normalized
+        .entry("neckline")
+        .or_insert(json!(if slip { "straight" } else { "round" }));
     let back = if ["deep-v", "halter"]
         .iter()
         .any(|s| normalized["neckline"] == *s)
@@ -157,13 +162,21 @@ fn normalize(spec: &Value) -> Result<Value, String> {
     normalized.entry("sleeve_style").or_insert(json!("regular"));
     normalized.entry("waist").or_insert(json!(waist));
     normalized.entry("length").or_insert(json!(default_length));
-    normalized.entry("straps").or_insert(json!("none"));
-    normalized.entry("strapless").or_insert(json!(false));
-    let normalized = Value::Object(normalized);
-    if string(&normalized, "straps", "none") != "none" || boolean(&normalized, "strapless", false) {
-        return Err("Rust drafting for straps and strapless shapes is not implemented".into());
+    normalized.entry("straps").or_insert(json!(if slip { "thin" } else { "none" }));
+    let strapless_preset = garment == "dress" && matches!(normalized["silhouette"].as_str(), Some("strapless" | "tube"));
+    normalized.entry("strapless").or_insert(json!(strapless_preset));
+    if matches!(normalized["neckline"].as_str(), Some("straight" | "strapless"))
+        && normalized["straps"] == "none"
+    {
+        normalized.insert("strapless".into(), json!(true));
     }
-    Ok(normalized)
+    if slip && matches!(normalized["straps"].as_str(), None | Some("none" | "")) {
+        normalized.insert("straps".into(), json!("thin"));
+    }
+    if normalized["straps"].as_str().is_some_and(|s| s != "none") {
+        normalized.insert("sleeve".into(), json!("none"));
+    }
+    Ok(Value::Object(normalized))
 }
 
 struct Measurements {
@@ -174,6 +187,7 @@ struct Measurements {
     shoulder: f64,
     top_y: f64,
     shoulder_y: f64,
+    shoulder_drop: f64,
     chest_y: f64,
     underbust_y: f64,
     standard_waist_y: f64,
@@ -208,6 +222,7 @@ fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
         shoulder: number(body, "across_shoulder", 377.0) * 0.5,
         top_y: number(body, "h_hps", 1500.0),
         shoulder_y: number(body, "h_shoulder", 1454.0),
+        shoulder_drop: number(body, "shoulder_drop", 46.0),
         chest_y: number(body, "h_apex", 1290.0),
         waist_y: waist_height,
         underbust_y: underbust,
@@ -395,14 +410,14 @@ fn body_panel(
     bottom: f64,
     hem_width: Option<f64>,
     front: bool,
+    straps: Option<&str>,
+    strapless: bool,
 ) -> Result<Panel, String> {
     let kind = string(
         spec,
         if front { "neckline" } else { "back_neckline" },
         "round",
     );
-    let (_, extra_width, _) = neck_shape(string(spec, "neckline", "round"), true)?;
-    let neck = (m.neck + extra_width).min(m.shoulder - 85.0);
     let balance = if front { 8.0 } else { -8.0 };
     let bust = m.bust + balance;
     let waist = m.waist + balance * 0.5;
@@ -464,22 +479,82 @@ fn body_panel(
             "shoulder_L",
         )
     };
-    Ok(Panel {
+    let mut edges = Vec::new();
+    let top_y = m.chest_y + if front { 40.0 } else { 60.0 };
+    if let Some(straps) = straps {
+        let half_width = if straps == "thin" { 11.0 } else { 22.5 };
+        let center = m.neck + 55.0;
+        let inner = center - half_width;
+        let outer = center + half_width;
+        let shoulder_y = m.top_y - m.shoulder_drop * (center / m.shoulder) - 8.0;
+        let mut top = edge("top", -inner, top_y);
+        if front && kind == "sweetheart" {
+            top.intermediate = vec![
+                [-inner * 0.5, top_y - 10.0, 2.0],
+                [0.0, top_y + 22.0, 2.0],
+                [inner * 0.5, top_y - 10.0, 2.0],
+            ];
+        }
+        let labels = if front {
+            ["top_R_out", "strap_R_out", "strap_R_in", "strap_L_in", "strap_L_out", "top_L_out"]
+        } else {
+            ["top_L_out", "strap_L_out", "strap_L_in", "strap_R_in", "strap_R_out", "top_R_out"]
+        };
+        edges.extend([
+            edge(labels[0], -(bust - 6.0), top_y),
+            edge(labels[1], -outer, top_y),
+            edge(s2, -outer, shoulder_y),
+            edge(labels[2], -inner, shoulder_y),
+            top,
+            edge(labels[3], inner, top_y),
+            edge(s1, inner, shoulder_y),
+            edge(labels[4], outer, shoulder_y),
+            edge(labels[5], outer, top_y),
+        ]);
+    } else if strapless {
+        let mut top = edge("top", -(bust - 6.0), top_y);
+        if front && kind == "sweetheart" {
+            top.intermediate = vec![
+                [-bust * 0.45, top_y - 12.0, 2.0],
+                [0.0, top_y + 18.0, 2.0],
+                [bust * 0.45, top_y - 12.0, 2.0],
+            ];
+        }
+        edges.push(top);
+    }
+    let open_top = straps.is_some() || strapless;
+    if open_top {
+        edges.push(edge(if front {"top_side_L"} else {"top_side_R"}, bust - 6.0, top_y));
+    } else {
+        let (_, extra_width, _) = neck_shape(string(spec, "neckline", "round"), true)?;
+        let neck = (m.neck + extra_width).min(m.shoulder - 85.0);
+        edges.extend([
+            edge(s1, neck, m.top_y),
+            armhole(a1, [m.shoulder, m.shoulder_y], [bust, underarm_y], true),
+        ]);
+    }
+    edges.extend([side_edge(l1, &stations, false), hem, side_edge(l2, &stations, true)]);
+    if open_top {
+        edges.push(edge(if front {"top_side_R"} else {"top_side_L"}, -bust, underarm_y));
+    } else {
+        let neck = edges[0].start[0];
+        edges.extend([
+            armhole(a2, [-bust, underarm_y], [-m.shoulder, m.shoulder_y], false),
+            edge(s2, -m.shoulder, m.shoulder_y),
+            neckline(kind, front, neck, m.top_y)?,
+        ]);
+    }
+    let mut panel = Panel {
         name,
         role,
         arrange,
         elastic: vec![],
-        edges: vec![
-            edge(s1, neck, m.top_y),
-            armhole(a1, [m.shoulder, m.shoulder_y], [bust, underarm_y], true),
-            side_edge(l1, &stations, false),
-            hem,
-            side_edge(l2, &stations, true),
-            armhole(a2, [-bust, underarm_y], [-m.shoulder, m.shoulder_y], false),
-            edge(s2, -m.shoulder, m.shoulder_y),
-            neckline(kind, front, neck, m.top_y)?,
-        ],
-    })
+        edges,
+    };
+    if strapless {
+        panel.elastic.push((0, panel.line_length(0) * 0.96));
+    }
+    Ok(panel)
 }
 
 fn skirt_panel(
@@ -756,12 +831,21 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     let one_piece = boolean(&spec, "one_piece", true);
     let split = has_bodice && one_piece && hem < m.standard_waist_y - 150.0;
     let has_skirt = garment == "skirt" || (has_bodice && !one_piece);
-    let sleeves = has_bodice && spec["sleeve"] != "none";
+    let straps = spec["straps"].as_str().filter(|s| *s != "none");
+    let strapless = straps.is_none() && boolean(&spec, "strapless", false);
+    let sleeves = has_bodice && straps.is_none() && !strapless && spec["sleeve"] != "none";
     let mut pieces = Vec::<Value>::new();
     let mut seams = Vec::<Value>::new();
     let mut merges = Vec::<Value>::new();
     let mut notes = Vec::<Value>::new();
     let mut armhole_length = 0.0;
+    let hem_half_width = |panel: &Value| {
+        array(&panel["edges"])
+            .iter()
+            .find(|edge| edge["name"] == "hem")
+            .and_then(|edge| edge["length"].as_f64())
+            .unwrap_or(0.0) / 2.0
+    };
     let draft_hem = if one_piece {
         if ["pencil", "bodycon"]
             .iter()
@@ -785,16 +869,17 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
         } else {
             hem
         };
-        let front = body_panel(&m, &spec, bodice_hem, draft_hem, true)?;
-        let back = body_panel(&m, &spec, bodice_hem, draft_hem, false)?;
-        armhole_length = front.line_length(1) + back.line_length(5);
+        let front = body_panel(&m, &spec, bodice_hem, draft_hem, true, straps, strapless)?;
+        let back = body_panel(&m, &spec, bodice_hem, draft_hem, false, straps, strapless)?;
+        if sleeves {
+            armhole_length = front.line_length(1) + back.line_length(5);
+        }
         pieces.extend([front.json(-520.0), back.json(520.0)]);
         if split {
-            let width = |a: usize| number(&pieces[a]["edges"][3], "length", 0.0) / 2.0;
             m.waist_y = m.standard_waist_y;
             pieces.extend([
-                skirt_panel(&m, "a-line", hem, true, Some(width(0)), draft_hem)?.json(-520.0),
-                skirt_panel(&m, "a-line", hem, false, Some(width(1)), draft_hem)?.json(520.0),
+                skirt_panel(&m, "a-line", hem, true, Some(hem_half_width(&pieces[0])), draft_hem)?.json(-520.0),
+                skirt_panel(&m, "a-line", hem, false, Some(hem_half_width(&pieces[1])), draft_hem)?.json(520.0),
             ]);
             for edge in ["side_L", "side_R"] {
                 seams.push(seam(&pieces, 2, edge, 3, edge, true)?);
@@ -807,8 +892,18 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             ]);
             notes.push(json!("one-piece dress built as bodice + lower piece for a stable drape; single-piece mesh joining after simulation is pending"));
         }
-        for edge in ["side_L", "side_R", "shoulder_L", "shoulder_R"] {
+        for edge in ["side_L", "side_R"] {
             seams.push(seam(&pieces, 0, edge, 1, edge, true)?);
+        }
+        if strapless {
+            notes.push(json!("strapless: top edges use elastic so the bodice stays up"));
+        } else {
+            for edge in ["shoulder_L", "shoulder_R"] {
+                seams.push(seam(&pieces, 0, edge, 1, edge, true)?);
+            }
+        }
+        if straps.is_some() {
+            notes.push(json!("straps are drafted as part of the front/back pieces and joined at the shoulder"));
         }
     }
     if sleeves {
@@ -839,7 +934,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     }
     if has_skirt {
         let i = pieces.len();
-        let w = has_bodice.then(|| number(&pieces[0]["edges"][3], "length", 0.0) / 2.0);
+        let w = has_bodice.then(|| hem_half_width(&pieces[0]));
         let style = string(&spec, "skirt", "a-line");
         pieces.extend([
             skirt_panel(&m, style, hem, true, w, None)?.json(-520.0),
@@ -970,6 +1065,11 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         names.push(json!(name));
         let mut inserted = panel.clone();
         inserted["id"] = json!(id);
+        for elastic in array(&panel["elastic"]) {
+            let line = elastic["line"].as_u64().ok_or("invalid drafted elastic edge")?;
+            inserted["line_properties"][line.to_string()]["elastic"] =
+                json!({"on": true, "total_length": elastic["total_length"]});
+        }
         array_mut(&mut next, "patterns").push(inserted);
         let lines: Vec<_> = array(&panel["edges"])
             .iter()
