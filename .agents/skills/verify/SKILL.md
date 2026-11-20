@@ -128,6 +128,12 @@ to include the official backend smoke. Run it with the CLO 3D bridge connected.
 `tools/list` is checked against the contract, including input and output schemas.
 The Rust fixtures also exercise selected scene, image, export, failure, and session flows.
 
+Run `python -m clo_mcp.smoke_compat --compare-control-guide` with
+`CLO_MCP_OFFICIAL_COMMAND` set to verify the shared guide workflow without
+starting CLO. The report preserves each backend's instructions and verifies
+the route from API discovery and invocation through UI inspection, action,
+and state readback.
+
 Run `python -m clo_mcp.smoke_compat --compare-desktop-observation` with
 `CLO_MCP_OFFICIAL_COMMAND` set and the CLO desktop available to the MCP host.
 The case checks the native server's `tools/list` directly against the pinned

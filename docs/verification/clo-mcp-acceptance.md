@@ -62,9 +62,9 @@
 | `clo_api_describe` | Rust 文档字段和导出 API 用例 | 双端实用类型、枚举、重载及缺失项 |
 | `clo_api_call` | Rust 调用、导出回开及相机变更 | 双端读写、参数类型和错误的状态读回 |
 | `clo_api_release` | Rust 重复释放 `ImportExportOption` 句柄返回 1 和 0 | 现场双端释放、失效及重新获取 |
-| `clo_control_guide` | 本轮双端指南结构和工具路径 | 路径所述的现场操作读回 |
-| `clo_ui_state` | 本轮双端节点树、上下界及 6 个非法输入 | 可见窗口与运行中场景、选区和对话框 |
-| `clo_ui_action` | 本轮双端过期快照拒绝 | 双端可执行动作和效果读回 |
-| `clo_ui_screenshot` | 历史双端 PNG；本轮 Rust PNG，CLO 无可见窗口 | 同一工作流的新版本截图和坐标对应 |
+| `clo_control_guide` | 本轮双端实测四步指南，覆盖 API 查找与调用、检查 UI、执行操作和读回状态 | 路径所述的现场操作读回 |
+| `clo_ui_state` | 历史双端节点树、上下界及 6 个非法输入；本轮 Rust 复测通过 | 参考端本次未找到运行中的 CLO 应用。待复测选区、窗口和对话框 |
+| `clo_ui_action` | 历史双端过期快照拒绝；本轮 Rust 复测通过 | 双端可执行动作和效果读回 |
+| `clo_ui_screenshot` | 历史双端 PNG；本轮 Rust PNG 为 1024×720 | 同一工作流的新版本截图和坐标对应 |
 
 用 [仓库 `/verify`](../../.agents/skills/verify/SKILL.md#verify-the-48-public-clo-mcp-tools) 复跑。最新报告在工作区 `work/acceptance-48/`，包含 `rust-tool-calls.json`、`bridge-status.json` 和各比较命令的 JSON 与日志。Carlita 保存姿态样例的 SHA-256 为 `4ad351eb392d40f22609961534579b65f38205d520837523e2acea6bd8af14b9`。既有结果只用于定位下一次复测。

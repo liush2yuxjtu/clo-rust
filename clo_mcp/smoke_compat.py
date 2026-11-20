@@ -498,21 +498,39 @@ async def verify_tool_contracts():
                       "reference_mcp": "pass", "official_adapter": "pass", "rust_adapter": "pass"}))
 
 
+async def inspect_control_guide(session):
+    guide = await json_result(session, "clo_control_guide")
+    assert guide.keys() == {"route", "codex_desktop", "standalone_mcp", "limits"}
+    assert all(isinstance(guide[key], str) and guide[key] for key in guide.keys() - {"route"})
+    route = guide["route"]
+    assert isinstance(route, list) and len(route) == 4
+    assert all(isinstance(step, str) and step for step in route)
+    assert "clo_api_catalog" in route[0] and "clo_api_describe" in route[0]
+    assert "clo_api_call" in route[1]
+    assert "clo_ui_state" in route[2] and "clo_ui_screenshot" in route[2]
+    assert "clo_ui_action" in " ".join(route[2:]) and "state" in route[3].lower()
+    return guide
+
+
+async def compare_control_guide():
+    guides = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+            guides[backend] = await inspect_control_guide(session)
+    print(json.dumps({"tool": "clo_control_guide", "workflow": "pass",
+                      "guides": guides}, ensure_ascii=False))
+
+
 async def compare_desktop_observation():
-    await inspect_reference_contract()
+    native_contract_count = await inspect_reference_contract()
     summary = {}
     invalid_limits = ({"max_nodes": -1}, {"max_nodes": 0}, {"max_nodes": 5001},
                       {"max_depth": -1}, {"max_depth": 0}, {"max_depth": 31})
     for backend in ("official", "rust"):
         async with open_backend(backend) as session:
             await inspect_contract(session)
-            guide = await json_result(session, "clo_control_guide")
-            assert guide.keys() == {"route", "codex_desktop", "standalone_mcp", "limits"}
-            assert all(isinstance(guide[key], str) and guide[key] for key in guide.keys() - {"route"})
-            assert isinstance(guide["route"], list) and all(isinstance(step, str) for step in guide["route"])
-            route = " ".join(guide["route"])
-            assert all(tool in route for tool in ("clo_api_catalog", "clo_api_describe", "clo_api_call",
-                                                  "clo_ui_state", "clo_ui_action", "clo_ui_screenshot"))
+            await inspect_control_guide(session)
 
             limits = {"max_nodes": 1.0, "max_depth": 1}
             first = await json_result(session, "clo_ui_state", limits)
@@ -557,7 +575,7 @@ async def compare_desktop_observation():
                 assert width > 0 and height > 0
                 observation["screenshot"] = {"status": "PASS", "width": width, "height": height}
             summary[backend] = observation
-    print(json.dumps({"case": "desktop observation", "native_contract_count": len(expected),
+    print(json.dumps({"case": "desktop observation", "native_contract_count": native_contract_count,
                       "tools": ["clo_control_guide", "clo_ui_state", "clo_ui_action", "clo_ui_screenshot"],
                       "results": summary}))
     if summary["official"]["screenshot"]["status"] == "BLOCKED":
@@ -3371,6 +3389,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-desktop-observation", action="store_const", dest="comparison",
                              const=compare_desktop_observation,
                              help="compare desktop state bounds, stale actions and screenshot payloads")
+    comparisons.add_argument("--compare-control-guide", action="store_const", dest="comparison",
+                             const=compare_control_guide,
+                             help="compare control workflow guidance without a running CLO desktop")
     comparisons.add_argument("--compare-draft-option-semantics", action="store_const", dest="comparison",
                              const=compare_draft_option_semantics,
                              help="compare drafting fallbacks, ease and simulation parameter types")
