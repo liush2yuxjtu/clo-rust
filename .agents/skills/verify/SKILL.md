@@ -269,6 +269,12 @@ velocities, then run a positive step to verify overlap correction by the
 new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to also check
 the native avatar path through `scene_open`.
 
+Run `--verify-simulation-reset-quality` to compare arranged meshes before
+simulation and after reset. Exercise the public tools and corresponding
+`utility_api` calls, checking that both use the same quality setting,
+reset keeps the sewing and per-panel particle distance, and opening a
+saved scene in a fresh session can recover the saved quality before reset.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

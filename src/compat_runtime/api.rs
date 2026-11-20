@@ -1398,7 +1398,7 @@ pub(super) fn invoke(
             state["runtime"]["ui"]["zoom"] = json!(zoom.clamp(0.2,6.0));
             Ok(json!(true))
         }
-        "utility_api.Simulate" => domain("simulate", &json!({"steps":arg[0],"quality":state["runtime"]["quality"]}),state).map(|result| success(&result)),
+        "utility_api.Simulate" => domain("simulate", &json!({"steps":arg[0]}),state).map(|result| success(&result)),
         _ => Err(format!("Runtime API entry has no implementation: {name}")),
     }?;
     if returns_none(name) {

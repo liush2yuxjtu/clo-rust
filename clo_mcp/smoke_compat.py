@@ -1778,6 +1778,67 @@ async def verify_display_edits_keep_drape():
                       "native_pose_meshes_preserved": native_meshes}))
 
 
+async def verify_simulation_reset_quality():
+    with TemporaryDirectory(prefix="clo-reset-quality-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+
+            async def save(session, name):
+                path = root / f"{name}.clorust"
+                await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            async def api(name, *args):
+                return await successful(rust, "clo_api_call", {"name": f"utility_api.{name}", "args": list(args)})
+
+            for name, x in (("Front", 0), ("Back", 140)):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 45, 70]],
+                })
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
+                                            "pattern_b": "Back", "line_b": 0})
+            await api("SetSimulationQuality", 2)
+            await json_result(rust, "simulate", {"steps": 0, "particle_distance": 50})
+            _, initialized = await save(rust, "initial")
+            assert initialized["simulation"]["quality"] == 2
+            await api("Simulate", 3)
+            _, settled = await save(rust, "settled")
+            assert settled["simulation"]["steps"] == 3
+            assert settled["simulation"]["meshes"] != initialized["simulation"]["meshes"]
+            await api("ResetClothArrangement")
+            _, reset = await save(rust, "api-reset")
+            assert reset["simulation"] is None and reset["seams"] == initialized["seams"]
+            await json_result(rust, "simulate", {"steps": 0})
+            _, rebuilt = await save(rust, "after-api-reset")
+            assert rebuilt["patterns"] == initialized["patterns"]
+            assert rebuilt["simulation"]["meshes"] == initialized["simulation"]["meshes"]
+            assert rebuilt["simulation"]["steps"] == 0 and rebuilt["simulation"]["quality"] == 2
+
+            await json_result(rust, "simulate", {"steps": 1, "quality": 1})
+            persisted, _ = await save(rust, "persisted")
+            await json_result(rust, "simulation_reset")
+            await api("Simulate", 0)
+            _, after_public = await save(rust, "after-public-reset")
+            assert after_public["simulation"] == rebuilt["simulation"] | {"quality": 1}
+            denied = await rust.call_tool("simulate", {"steps": 0, "quality": 3})
+            assert denied.isError
+            await api("Simulate", 0)
+            _, after_denied = await save(rust, "after-denied")
+            assert after_denied["simulation"]["quality"] == 1
+            async with open_backend("rust", environment) as fresh:
+                await json_result(fresh, "scene_open", {"path": str(persisted)})
+                await json_result(fresh, "simulation_reset")
+                await json_result(fresh, "simulate", {"steps": 0})
+                _, reopened = await save(fresh, "fresh-reset")
+                assert reopened["simulation"] == after_public["simulation"]
+    print(json.dumps({"tools": ["simulate", "simulation_reset", "clo_api_call", "scene_open"],
+                      "case": "reset arrangement without changing solver quality",
+                      "quality_api_to_mcp": 2, "quality_mcp_to_api_and_reopen": 1,
+                      "arranged_mesh_restored": True, "unsupported_quality_preserves_setting": True}))
+
+
 async def verify_avatar_changes_keep_drape():
     with TemporaryDirectory(prefix="clo-avatar-drape-") as directory:
         root = Path(directory)
@@ -2590,6 +2651,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-avatar-changes-keep-drape", action="store_const", dest="comparison",
                              const=verify_avatar_changes_keep_drape,
                              help="verify avatar changes preserve cloth, with updated collision on resume")
+    comparisons.add_argument("--verify-simulation-reset-quality", action="store_const", dest="comparison",
+                             const=verify_simulation_reset_quality,
+                             help="verify reset keeps shared and persisted solver settings")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2610,7 +2674,7 @@ if __name__ == "__main__":
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
                                 verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape,
-                                verify_avatar_changes_keep_drape)
+                                verify_avatar_changes_keep_drape, verify_simulation_reset_quality)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -37,6 +37,9 @@ pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Result<Va
         "garment_last_spec" => Ok(draft::last_spec(state)),
         "simulate" => solver::simulate(args, state),
         "simulation_reset" => {
+            if state["runtime"]["quality"].is_null() && state["simulation"]["quality"].is_number() {
+                state["runtime"]["quality"] = state["simulation"]["quality"].clone();
+            }
             state["simulation"] = Value::Null;
             Ok(json!({"ok": true}))
         }

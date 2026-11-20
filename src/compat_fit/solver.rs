@@ -1399,7 +1399,12 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         "particle_distance",
         number(existing, "particle_distance", 20.0),
     );
-    let quality = unsigned("quality", existing["quality"].as_u64().unwrap_or(0))?;
+    let quality = unsigned(
+        "quality",
+        state["runtime"]["quality"].as_u64()
+            .or_else(|| existing["quality"].as_u64())
+            .unwrap_or(0),
+    )?;
     if steps > 3000 || !(3.0..=500.0).contains(&distance) || quality > 3 {
         return Err(
             "simulation accepts 0..3000 steps, particle_distance 3..500 mm, and quality 0..3"
@@ -1670,6 +1675,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
     }
     state["simulation"] = next;
+    state["runtime"]["quality"] = json!(quality);
     if use_native {
         state["simulation"]["source"] = json!(RUST_NATIVE_REST);
         state["simulation"]["texcoords_units"] = json!("mm");
