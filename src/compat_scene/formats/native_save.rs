@@ -711,8 +711,7 @@ fn rebind_project_avatars(state: &mut Value, path: &Path) -> Result<(), String> 
 
 fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec<u8>, TextureAssets), String> {
     let mut receiver = open_archive(Cursor::new(raw), ZPAC)?;
-    let mut asset_names = receiver.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
-        .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())?;
+    let mut asset_names = archive_names(&receiver)?;
     let mut images = TextureAssets::default();
     let mut total_bytes = raw.len() as u64;
     for source in parts {
@@ -722,7 +721,9 @@ fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec
         if pac.len() + incoming.len() > 256 * 1024 * 1024 {
             return Err("native composition PAC payload exceeds 256 MiB".into());
         }
-        pac = native_compose::join(&pac, &incoming)?;
+        let incoming_names = archive_names(&archive)?;
+        let mut renamed = HashMap::new();
+        let mut labels = None;
         for index in 0..archive.len() {
             let file = archive.by_index(index).map_err(|error| error.to_string())?;
             let name = file.name().map_err(|error| error.to_string())?.into_owned();
@@ -735,35 +736,69 @@ fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec
             }
             let mut contents = Vec::new();
             file.take(64 * 1024 * 1024 + 1).read_to_end(&mut contents).map_err(|error| error.to_string())?;
-            let matches = match receiver.by_name(&name) {
-                Ok(mut previous) => {
-                    let mut other = Vec::new();
-                    (&mut previous).take(contents.len() as u64 + 1).read_to_end(&mut other).map_err(|error| error.to_string())?;
-                    contents == other
-                }
-                Err(zip::result::ZipError::FileNotFound) => {
-                    if let Some(previous) = images.added.get(&name) {
-                        contents == *previous
-                    } else {
-                        if !asset_names.insert(lower) {
-                            return Err("native composition asset names differ only in case".into());
-                        }
-                        total_bytes += contents.len() as u64;
-                        if total_bytes > ARCHIVE_LIMIT {
-                            return Err("native composition assets exceed 512 MiB".into());
-                        }
-                        images.added.insert(name, contents);
-                        true
+            let target = if let Some(previous) = asset_names.get(&lower) {
+                let matches = if let Some(stored) = images.added.get(previous) {
+                    *stored == contents
+                } else {
+                    let mut entry = receiver.by_name(previous).map_err(|error| error.to_string())?;
+                    let mut stored = Vec::new();
+                    (&mut entry).take(contents.len() as u64 + 1).read_to_end(&mut stored)
+                        .map_err(|error| error.to_string())?;
+                    stored == contents
+                };
+                if matches {
+                    if *previous != name {
+                        renamed.insert(lower, previous.clone());
                     }
+                    continue;
                 }
-                Err(error) => return Err(error.to_string()),
+                if labels.is_none() {
+                    labels = Some(native_textures::archive_texture_labels(&incoming)?);
+                }
+                let label = labels.as_ref().and_then(|labels| labels.get(&lower))
+                    .ok_or_else(|| format!("native composition cannot relink conflicting asset {name:?}"))?;
+                available_texture_name(&name, label, &asset_names, &incoming_names)?
+            } else {
+                name.clone()
             };
-            if !matches {
-                return Err("native composition has different assets with the same name".into());
+            if target != name {
+                renamed.insert(lower, target.clone());
             }
+            total_bytes += contents.len() as u64;
+            if total_bytes > ARCHIVE_LIMIT {
+                return Err("native composition assets exceed 512 MiB".into());
+            }
+            asset_names.insert(target.to_ascii_lowercase(), target.clone());
+            images.added.insert(target, contents);
         }
+        let updated = native_textures::remap_archive_textures(&incoming, &renamed)?;
+        pac = native_compose::join(&pac, updated.as_deref().unwrap_or(&incoming))?;
     }
     Ok((pac, images))
+}
+
+fn archive_names<R: Read + std::io::Seek>(archive: &zip::ZipArchive<R>) -> Result<HashMap<String, String>, String> {
+    let mut names = HashMap::new();
+    for name in archive.file_names() {
+        let name = name.map_err(|error| error.to_string())?.into_owned();
+        if names.insert(name.to_ascii_lowercase(), name).is_some() {
+            return Err("native composition has ambiguous archive filenames".into());
+        }
+    }
+    Ok(names)
+}
+
+fn available_texture_name(
+    name: &str, label: &str, occupied: &HashMap<String, String>, incoming: &HashMap<String, String>,
+) -> Result<String, String> {
+    let path = Path::new(name);
+    let extension = path.extension().and_then(|part| part.to_str()).ok_or("conflicting asset has no extension")?;
+    // CLO removes the final numeric suffix when displaying the texture label.
+    (1_000_001..=1_004_096).map(|index| format!("{label}_{index}.{extension}"))
+        .find(|candidate| {
+            let folded = candidate.to_ascii_lowercase();
+            !occupied.contains_key(&folded) && !incoming.contains_key(&folded)
+        }).ok_or_else(|| "native composition could not allocate a distinct asset filename".into())
 }
 
 pub(in crate::compat_scene) fn save(

@@ -6539,6 +6539,125 @@ async def compare_live_composed_zprj():
     print(json.dumps({"tool": "scene_save", "format": "ZPRJ", "cases": reports, "result": "pass"}))
 
 
+async def compare_live_texture_collisions():
+    from PIL import Image
+
+    source = Path(os.environ["CLO_TEXTURE_COLLISION_FIXTURE"])
+    root = Path(os.environ["CLO_MCP_STATE"])
+    names = ("colorway-base-0.png", "colorway-base-1.png")
+    incoming = root / "same-filenames.zpac"
+    assert source.is_file() and root.is_dir() and not incoming.exists()
+
+    def rgba(data):
+        with Image.open(BytesIO(data)) as image:
+            return image.size, image.convert("RGBA").tobytes()
+
+    def texture_members(file):
+        with zipfile.ZipFile(file) as archive:
+            return {name: archive.read(name) for name in archive.namelist()
+                    if Path(name).name.startswith("colorway-base-") and name.endswith(".png")}
+
+    def saved_images(file):
+        if file.suffix == ".zpac":
+            return texture_members(file)
+        with zipfile.ZipFile(file) as project:
+            member = next(name for name in project.namelist() if name.endswith(".zpac"))
+            return texture_members(BytesIO(project.read(member)))
+
+    def visible_images(file):
+        model, binary = read_gltf_export(file)
+        result = []
+        for mesh in model["meshes"]:
+            for primitive in mesh["primitives"]:
+                pbr = model["materials"][primitive["material"]]["pbrMetallicRoughness"]
+                texture = model["textures"][pbr["baseColorTexture"]["index"]]
+                image = model["images"][texture["source"]]
+                view = model["bufferViews"][image["bufferView"]]
+                start = view.get("byteOffset", 0)
+                result.append(rgba(binary[start:start + view["byteLength"]]))
+        return result
+
+    baseline = texture_members(source)
+    assert set(baseline) == set(names)
+    modified = {}
+    for name, color in zip(names, [(255, 44, 7, 255), (8, 190, 48, 255)], strict=True):
+        image = BytesIO()
+        Image.new("RGBA", (16, 16), color).save(image, format="PNG")
+        modified[name] = image.getvalue()
+    output = BytesIO()
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as changed:
+        for member in original.namelist():
+            changed.writestr(member, modified[member] if member in modified else original.read(member))
+    raw = source.read_bytes()
+    start, length = struct.unpack_from("<II", raw, 32)
+    assert start >= 40 and start + length == len(raw)
+    prefix = bytearray(raw[:start])
+    struct.pack_into("<I", prefix, 36, len(output.getvalue()))
+    incoming.write_bytes(prefix + output.getvalue())
+
+    reference_project = root / "texture-collision-source.zprj"
+    assert not reference_project.exists()
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        backends = (("official", clo), ("rust", rust))
+        try:
+            await json_result(clo, "scene_clear", {"keep_avatar": False})
+            await json_result(clo, "scene_open", {"path": str(source)})
+            await json_result(clo, "scene_save", {"path": str(reference_project), "thumbnail": False})
+            assert set(saved_images(reference_project).values()) == set(baseline.values())
+            for label, initial, appended, expected, extension in (
+                ("same", source, source, baseline, ".zpac"),
+                ("collision", source, incoming, modified, ".zpac"),
+                ("project", reference_project, incoming, modified, ".zprj"),
+            ):
+                reads = 0
+                outputs = {}
+                for writer, session in backends:
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    await json_result(session, "scene_open", {"path": str(initial)})
+                    await json_result(session, "scene_open", {"path": str(appended), "mode": "append"})
+                    before = await read_composed_archive(session)
+                    assert [panel["fabric_index"] for panel in before["patterns"]] == [0, 0, 1, 1]
+                    target = root / f"{label}-{writer}{extension}"
+                    tool = "scene_save" if extension == ".zprj" else "scene_export"
+                    args = {"path": str(target)}
+                    if tool == "scene_save":
+                        args["thumbnail"] = False
+                    assert await json_result(session, tool, args) == {"path": str(target)}
+                    assert await read_composed_archive(session) == before
+                    packed = saved_images(target)
+                    assert set(packed.values()) == set(baseline.values()) | set(expected.values())
+                    assert all(packed[name] == baseline[name] for name in names)
+                    outputs[writer] = target
+
+                reference = None
+                for writer, file in outputs.items():
+                    for reader, session in backends:
+                        await json_result(session, "scene_open", {"path": str(file)})
+                        reopened = await read_composed_archive(session)
+                        if reference is None:
+                            reference = reopened
+                        assert reopened == reference, (label, writer, reader, {
+                            key: (value, reference[key]) for key, value in reopened.items() if value != reference[key]})
+                        for colorway, name in enumerate(names):
+                            await composed_archive_api(session, "utility_api.SetCurrentColorwayIndex", colorway)
+                            glb = root / f"{label}-{writer}-{reader}-{colorway}.glb"
+                            await json_result(session, "scene_export", {"path": str(glb)})
+                            expected_binding = [rgba(baseline[name])] * 2 + [rgba(expected[name])] * 2
+                            assert visible_images(glb) == expected_binding, (label, writer, reader, colorway)
+                            reads += 1
+                reports.append({"case": label, "colorway_reads": reads, "file_hashes_exact": True})
+        finally:
+            if original not in ("NULL", "", None):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "scene_export", "case": "colliding native texture filenames",
+                      "tests": reports, "result": "pass"}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -6977,6 +7096,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-composed-zprj", action="store_const", dest="comparison",
                              const=compare_live_composed_zprj,
                              help="verify composed project saves and checkpoints with both backends")
+    comparisons.add_argument("--compare-live-texture-collisions", action="store_const", dest="comparison",
+                             const=compare_live_texture_collisions,
+                             help="verify conflicting texture payloads and their colorway bindings")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")

@@ -1024,6 +1024,14 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-texture-collisions` with Pillow installed, a fresh
+`CLO_MCP_STATE`, and `CLO_TEXTURE_COLLISION_FIXTURE` set to
+`multi-colorway-textured.zpac`. The verifier makes an incoming copy
+with different PNG contents under the same archive filenames. Compare
+identical-input ZPAC append, conflicting ZPAC append, and conflicting
+append to a native ZPRJ. Check the archive payloads, the full fabric
+readback, and the RGBA image bound to each of the four exported GLB
+primitives in both colorways after cross-opening each writer's output.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.

@@ -68,6 +68,91 @@ fn filename<'a>(texture: &Fields<'a>) -> Result<&'a str, String> {
     Ok(name)
 }
 
+fn edit_archive_texture_records(
+    pac: &[u8],
+    edit: &mut impl FnMut(&Fields<'_>, &str) -> Result<Option<Vec<u8>>, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    fn visit(
+        record: &Fields<'_>,
+        edit: &mut impl FnMut(&Fields<'_>, &str) -> Result<Option<Vec<u8>>, String>,
+        depth: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        if depth == 0 {
+            return Err("native texture references are too deeply nested".into());
+        }
+        if record.get(b"enImageType", 4).is_ok() {
+            if let Ok(name) = filename(record) {
+                return edit(record, name);
+            }
+        }
+        let mut changed = false;
+        let mut fields = Vec::new();
+        for (key, kind, bytes) in record.fields() {
+            let updated = match kind {
+                MAP_TYPE => visit(&Fields::read(bytes)?, edit, depth - 1)?,
+                LIST_TYPE if bytes.get(4) == Some(&MAP_TYPE) => {
+                    let mut changed_list = false;
+                    let children = map_list(bytes, 65_536)?.into_iter().map(|child| {
+                        Ok(match visit(&child, edit, depth - 1)? {
+                            Some(updated) => {
+                                changed_list = true;
+                                Cow::Owned(updated)
+                            }
+                            None => Cow::Borrowed(child.encoded()),
+                        })
+                    }).collect::<Result<Vec<_>, String>>()?;
+                    changed_list.then(|| encoded_list(&children)).transpose()?
+                }
+                _ => None,
+            };
+            changed |= updated.is_some();
+            fields.push((key, kind, updated.map_or(Cow::Borrowed(bytes), Cow::Owned)));
+        }
+        changed.then(|| {
+            let fields = fields.iter().map(|(key, kind, value)| (*key, *kind, value.as_ref()))
+                .collect::<Vec<_>>();
+            encode_map(&fields)
+        }).transpose()
+    }
+    visit(&Fields::read(pac)?, edit, 64)
+}
+
+pub(super) fn archive_texture_labels(pac: &[u8]) -> Result<HashMap<String, String>, String> {
+    let mut labels = HashMap::new();
+    edit_archive_texture_records(pac, &mut |record, name| {
+        if let Some(label) = texture_label(record) {
+            labels.entry(name.to_ascii_lowercase()).or_insert_with(|| label.to_owned());
+        }
+        Ok(None)
+    })?;
+    Ok(labels)
+}
+
+pub(super) fn remap_archive_textures(
+    pac: &[u8], names: &HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let mut found = HashSet::new();
+    let updated = edit_archive_texture_records(pac, &mut |record, name| {
+        let key = name.to_ascii_lowercase();
+        let Some(target) = names.get(&key) else {
+            return Ok(None);
+        };
+        found.insert(key);
+        // Keep the original filename shown in the fabric editor.
+        let updated = record.set(b"qsUniqueFileName", BYTE_TYPE, target.as_bytes())?;
+        Ok(Some(Fields::read(&updated)?.set(
+            b"qsUniqueFileNameUTF8", BYTE_TYPE, target.as_bytes(),
+        )?))
+    })?;
+    if let Some(unmatched) = names.keys().find(|name| !found.contains(*name)) {
+        return Err(format!("native composition cannot relink conflicting asset {unmatched:?}"));
+    }
+    Ok(updated)
+}
+
 fn textures<'a>(face: &Fields<'a>) -> Result<Vec<Fields<'a>>, String> {
     map_list(face.get(b"listTexture", LIST_TYPE)?, 64)
 }
