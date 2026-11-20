@@ -13,3 +13,6 @@ jpeg-decoder = { version = "0.3.2", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ufbx = "0.11.5"
+
+[target.'cfg(any(unix, windows))'.dependencies]
+libc = "0.2"

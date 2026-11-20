@@ -383,14 +383,18 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
     Ok(open_reply(state, path))
 }
 
-fn saved(path: &Path, state: &Value) -> Result<(), String> {
+fn scene_document(state: &Value) -> Result<Value, String> {
     let _ = validate_garment(state)?;
     let mut project = state.clone();
     if let Some(object) = project.as_object_mut() {
         object.remove("runtime");
         object.remove(formats::native_save::SOURCE);
     }
-    formats::write_json(path, &json!({"format": SCENE_FORMAT, "scene": project}))
+    Ok(json!({"format": SCENE_FORMAT, "scene": project}))
+}
+
+fn saved(path: &Path, state: &Value) -> Result<(), String> {
+    formats::write_json(path, &scene_document(state)?)
 }
 
 pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
@@ -473,6 +477,10 @@ fn calendar(time: SystemTime) -> [u64; 6] {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    #[cfg(any(unix, windows))]
+    if let Some(local) = local_calendar(seconds) {
+        return local;
+    }
     let day = seconds / 86400 + 719468;
     let era = day / 146097;
     let doe = day % 146097;
@@ -490,18 +498,53 @@ fn calendar(time: SystemTime) -> [u64; 6] {
     ]
 }
 
+#[cfg(any(unix, windows))]
+fn local_calendar(seconds: u64) -> Option<[u64; 6]> {
+    let time = libc::time_t::try_from(seconds).ok()?;
+    let mut result = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // Both system calls fill the caller-owned buffer when they succeed.
+    #[cfg(unix)]
+    let ok = unsafe { !libc::localtime_r(&time, result.as_mut_ptr()).is_null() };
+    #[cfg(windows)]
+    let ok = unsafe { libc::localtime_s(result.as_mut_ptr(), &time) == 0 };
+    if !ok {
+        return None;
+    }
+    let result = unsafe { result.assume_init() };
+    let fields = [
+        result.tm_year.checked_add(1900)?,
+        result.tm_mon + 1,
+        result.tm_mday,
+        result.tm_hour,
+        result.tm_min,
+        result.tm_sec,
+    ];
+    fields.iter().all(|&value| value >= 0).then(|| fields.map(|value| value as u64))
+}
+
 pub(super) fn checkpoint_save(args: &Value, state: &mut Value) -> Reply {
-    let name = args["name"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            let [year, month, day, hour, min, sec] = calendar(SystemTime::now());
-            format!("cp_{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}")
-        });
-    let path = checkpoint_path(&name)?;
-    saved(&path, state)?;
-    Ok(json!({"name": name, "path": path}))
+    let mut document = scene_document(state)?;
+    if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
+        // Keep the original fingerprint and edit lists so undo doesn't
+        // remove the ability to re-export a still-compatible native scene.
+        document[formats::native_save::SOURCE] = source.clone();
+    }
+    if let Some(name) = args["name"].as_str().filter(|s| !s.is_empty()) {
+        let path = checkpoint_path(name)?;
+        formats::write_json(&path, &document)?;
+        return Ok(json!({"name": name, "path": path}));
+    }
+    let [year, month, day, hour, min, sec] = calendar(SystemTime::now());
+    let base = format!("cp_{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}");
+    let bytes = serde_json::to_vec_pretty(&document).map_err(|err| err.to_string())?;
+    for suffix in 0u64.. {
+        let name = if suffix == 0 { base.clone() } else { format!("{base}_{suffix}") };
+        let path = checkpoint_path(&name)?;
+        if formats::write_new(&path, &bytes)? {
+            return Ok(json!({"name": name, "path": path}));
+        }
+    }
+    unreachable!("checkpoint suffix range exhausted")
 }
 
 pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
@@ -510,7 +553,12 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     if !path.is_file() {
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
-    let restored = recognized_state(formats::read_json(&path)?)?;
+    let document = formats::read_json(&path)?;
+    let source = document.get(formats::native_save::SOURCE).filter(|v| v.is_object()).cloned();
+    let mut restored = recognized_state(document)?;
+    if let Some(source) = source {
+        restored[formats::native_save::SOURCE] = source;
+    }
     replace_scene(state, restored);
     Ok(open_reply(state, &path))
 }

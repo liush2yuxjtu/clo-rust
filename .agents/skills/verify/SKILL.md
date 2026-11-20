@@ -127,6 +127,16 @@ thumbnail camera direction and reopens the FBX. It rejects unsupported layout
 modes without writing the destination. Compare live reference export and
 argument behavior separately when the CLO bridge is available.
 
+Run `--verify-checkpoint-workflow` for automatic checkpoint names, newest-first
+ordering with local timestamps, state restore and malformed, missing or invalid names. Set
+`CLO_CHECKPOINT_FIXTURE=/path/to/saved.zprj` to check that checkpoint restore
+also preserves native re-export. Reopen the exported project and confirm the
+patterns and avatars. Check that changing or removing the source archive
+still allows checkpoint restore and stops native re-export.
+With the official stdio command configured, run `--compare-checkpoint-listing`
+to compare order and local timestamps using disposable directories without
+starting CLO.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

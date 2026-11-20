@@ -20,12 +20,29 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    publish(path, bytes, |temp| fs::rename(temp, path))
+        .map_err(|err| format!("{}: {err}", path.display()))
+}
+
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<bool, String> {
+    match publish(path, bytes, |temp| fs::hard_link(temp, path)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
+}
+
+fn publish(
+    path: &Path,
+    bytes: &[u8],
+    commit: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    fs::create_dir_all(parent)?;
     let (mut file, temp) = loop {
         let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
         let temp = parent.join(format!(".clo-rust-{}-{suffix}.tmp", std::process::id()));
@@ -36,16 +53,14 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         {
             Ok(file) => break (file, temp),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(format!("{}: {err}", temp.display())),
+            Err(err) => return Err(err),
         }
     };
     let result = file.write_all(bytes).and_then(|_| file.sync_all());
     drop(file);
-    let result = result.and_then(|_| fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(|err| format!("{}: {err}", path.display()))
+    let result = result.and_then(|_| commit(&temp));
+    let _ = fs::remove_file(&temp);
+    result
 }
 
 pub(super) fn read_json(path: &Path) -> Result<Value, String> {

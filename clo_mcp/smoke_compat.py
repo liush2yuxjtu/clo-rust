@@ -5,9 +5,11 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import struct
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,8 +20,10 @@ from .compat import CONTRACT
 
 
 @asynccontextmanager
-async def open_backend(backend):
+async def open_backend(backend, environment=None):
     env = os.environ.copy()
+    if environment:
+        env.update(environment)
     env["CLO_MCP_BACKEND"] = backend
     server = StdioServerParameters(command=sys.executable, args=["-m", "clo_mcp.server"], env=env)
     async with stdio_client(server) as (reader, writer):
@@ -863,6 +867,87 @@ async def verify_runtime_export_workflow():
                       "fbx_reopened": True, "invalid_mode_error": "pass"}))
 
 
+async def verify_checkpoint_workflow():
+    fixture = os.environ.get("CLO_CHECKPOINT_FIXTURE")
+    with TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        settings = {"CLO_RUST_CHECKPOINT_DIR": str(folder / "checkpoints")}
+        async with open_backend("rust", settings) as session:
+            await inspect_contract(session)
+            assert (await json_result(session, "checkpoint_list"))["checkpoints"] == []
+            points = [[0, 0], [160, 0], [130, 110]]
+            await json_result(session, "pattern_create", {"name": "before", "points": points})
+            original = await json_result(session, "scene_info")
+            first = await json_result(session, "checkpoint_save")
+            await json_result(session, "pattern_create", {"name": "after", "points": points})
+            changed = await json_result(session, "scene_info")
+            second = await json_result(session, "checkpoint_save")
+            assert first["name"] != second["name"]
+            listing = (await json_result(session, "checkpoint_list"))["checkpoints"]
+            assert [row["name"] for row in listing] == [second["name"], first["name"]]
+            for row in listing:
+                path = Path(row["path"])
+                assert path.is_file()
+                assert row["mtime"] == datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            for saved, expected in ((first, original), (second, changed)):
+                restored = await json_result(session, "checkpoint_restore", {"name": saved["name"]})
+                assert restored["ok"] and restored["path"] == saved["path"]
+                assert await json_result(session, "scene_info") == expected
+            bad = Path(second["path"]).with_stem("bad")
+            bad.write_text("{broken JSON")
+            for name in ("bad", "missing", "../outside"):
+                result = await session.call_tool("checkpoint_restore", {"name": name})
+                assert result.isError
+                assert await json_result(session, "scene_info") == changed
+            if fixture:
+                source = folder / Path(fixture).name
+                shutil.copy2(fixture, source)
+                await json_result(session, "scene_open", {"path": str(source)})
+                await json_result(session, "checkpoint_save", {"name": "native"})
+                native = await json_result(session, "scene_info")
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                await json_result(session, "checkpoint_restore", {"name": "native"})
+                assert await json_result(session, "scene_info") == native
+                target = folder / "restored.zprj"
+                await json_result(session, "scene_save", {"path": str(target), "thumbnail": False})
+                reopened = await json_result(session, "scene_open", {"path": str(target)})
+                assert reopened["pattern_count"] == native["pattern_count"]
+                assert reopened["avatars"] == native["avatars"]
+                source.unlink()
+                await json_result(session, "checkpoint_restore", {"name": "native"})
+                assert await json_result(session, "scene_info") == native
+                paths = folder / "missing-source.zprj"
+                rejected = await session.call_tool("scene_save", {"path": str(paths)})
+                assert rejected.isError and not paths.exists()
+    print(json.dumps({"tools": ["checkpoint_save", "checkpoint_list", "checkpoint_restore"],
+                      "named_restore": True, "distinct_automatic_names": True, "atomic_failures": True,
+                      "native_project_reexported": bool(fixture)}))
+
+
+async def compare_checkpoint_listing():
+    with TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        listings = {}
+        for backend, settings, folder, ext in (
+            ("official", {"CLO_MCP_STATE": scratch}, root / "checkpoints", "zprj"),
+            ("rust", {"CLO_RUST_CHECKPOINT_DIR": str(root / "rust")}, root / "rust", "clorust"),
+        ):
+            folder.mkdir()
+            names = ("first", "second")
+            for index, name in enumerate(names):
+                path = folder / f"{name}.{ext}"
+                path.touch()
+                timestamp = 1_764_900_000 + 3600 * index
+                os.utime(path, (timestamp, timestamp))
+            async with open_backend(backend, settings) as session:
+                rows = (await json_result(session, "checkpoint_list"))["checkpoints"]
+            assert [row["name"] for row in rows] == list(reversed(names))
+            assert all(Path(row["path"]).parent == folder for row in rows)
+            listings[backend] = [(row["name"], row["mtime"]) for row in rows]
+        assert listings["official"] == listings["rust"], listings
+    print(json.dumps({"tool": "checkpoint_list", "same_order_and_local_timestamps": listings["rust"]}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -917,8 +1002,14 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-runtime-export-workflow", action="store_const", dest="comparison",
                              const=verify_runtime_export_workflow,
                              help="verify Rust discovery and calls for the snapshot and FBX workflow")
+    comparisons.add_argument("--verify-checkpoint-workflow", action="store_const", dest="comparison",
+                             const=verify_checkpoint_workflow,
+                             help="verify Rust checkpoint ordering, restore, errors and optional native re-export")
+    comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
+                             const=compare_checkpoint_listing,
+                             help="compare offline checkpoint list ordering and local timestamps")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_runtime_export_workflow)
+    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
