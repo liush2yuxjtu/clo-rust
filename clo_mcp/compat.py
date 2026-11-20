@@ -17,6 +17,9 @@ from . import runtime
 
 CONTRACT = Path(__file__).with_name("clo_tool_contract.json")
 IMAGE_TOOLS = frozenset(("snapshot", "snapshot_2d", "garment_build", "garment_rebuild", "clo_ui_screenshot"))
+BUILD_SNAPSHOT_CAPTION = (
+    "Snapshots after simulation (judge fit, seams, drape; fix with garment_rebuild or pattern tools):"
+)
 
 
 class RustBackend:
@@ -102,6 +105,8 @@ def image_blocks(name, result):
         summary.pop("path", None)
     if summary and name != "clo_ui_screenshot":
         blocks.append(types.TextContent(type="text", text=json.dumps(summary, ensure_ascii=False)))
+    if result.get("images") and name in ("garment_build", "garment_rebuild"):
+        blocks.append(types.TextContent(type="text", text=BUILD_SNAPSHOT_CAPTION))
     for image in result.get("images", []):
         path = Path(image["path"])
         data = base64.b64encode(path.read_bytes()).decode("ascii")

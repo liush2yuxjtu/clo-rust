@@ -167,6 +167,14 @@ triangle incidence at the shared waist, surviving seam indices, elastic
 settings, reopening and resumed steps. Live CLO comparison requires the
 bridge and a disposable scene.
 
+Run `python -m clo_mcp.smoke_compat --verify-build-snapshot-workflow` to
+verify the Rust build and rebuild response through MCP. Check the summary,
+caption, and ordered PNG blocks for default, empty, explicit, and disabled
+views. Read the file bytes back and confirm that the mixed-case
+`Three-Quarter` alias uses the same camera as `3/4-right`. A capture error
+leaves the completed build available through `garment_last_spec` and scene
+save. A failed draft preserves the prior build.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

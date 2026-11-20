@@ -1412,20 +1412,20 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     };
     next["garment_spec"] = draft["spec"].clone();
     next["garment_piece_names"] = json!(names);
+    // A snapshot runs after the completed build and session record are published.
+    *state = next;
     let images = if boolean(args, "snapshots", true) {
-        let views = if rebuild || args["views"].is_null() {
+        let views = if rebuild || array(&args["views"]).is_empty() {
             json!(["front", "3/4-right", "back"])
         } else {
             args["views"].clone()
         };
-        render::snapshot(&json!({"views":views,"label":"build"}), &next, false)?["images"].clone()
+        render::snapshot(&json!({"views":views,"label":"build"}), state, false)?["images"].clone()
     } else {
         json!([])
     };
-    let result = json!({"spec":draft["spec"],"avatar":next["avatar"]["name"],"measurements":source,
+    Ok(json!({"spec":draft["spec"],"avatar":state["avatar"]["name"],"measurements":source,
         "pieces":summary,"seams":draft["seams"],"fabric":{"file":fabric["file"],"matched":fabric["matched"],"color":draft["fabric"]["color"]},
         "arrangement":[],"warnings":draft["warnings"],"notes":draft["notes"],"simulation":sim,"checkpoint_before_build":checkpoint,
-        "images":images});
-    *state = next;
-    Ok(result)
+        "images":images}))
 }

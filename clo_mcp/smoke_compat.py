@@ -935,6 +935,102 @@ async def verify_tiered_build_relaxation():
                       "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
 
 
+async def verify_build_snapshot_workflow():
+    defaults = ["front", "3/4-right", "back"]
+    caption = "Snapshots after simulation (judge fit, seams, drape; fix with garment_rebuild or pattern tools):"
+    with TemporaryDirectory(prefix="clo-build-capture-") as directory:
+        root = Path(directory)
+        output = root / "output"
+        environment = {
+            "CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+            "CLO_RUST_OUTPUT_DIR": str(output),
+            "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints"),
+        }
+
+        def check_images(blocks, views):
+            assert [block.type for block in blocks] == ["text", "image"] * len(views)
+            images = []
+            for view, text, image in zip(views, blocks[::2], blocks[1::2], strict=True):
+                prefix = f"[{view} view] "
+                assert text.text.startswith(prefix), text
+                path = Path(text.text.removeprefix(prefix))
+                assert path.parent == output.resolve() / "snapshots"
+                raw = base64.b64decode(image.data, validate=True)
+                assert image.mimeType == "image/png" and raw.startswith(b"\x89PNG\r\n\x1a\n")
+                assert raw == path.read_bytes()
+                images.append(raw)
+            return images
+
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            early = await rust.call_tool("garment_rebuild", {"changes": {}, "snapshots": False})
+            assert early.isError
+            assert await json_result(rust, "garment_last_spec") == {"spec": None, "pieces": []}
+
+            async def build(name, arguments, views):
+                response = await successful(rust, name, {"simulate_steps": 0} | arguments)
+                assert response.content[0].type == "text"
+                summary = json.loads(response.content[0].text)
+                assert summary["simulation"] is None
+                if views:
+                    assert response.content[1].type == "text"
+                    assert response.content[1].text == caption
+                    check_images(response.content[2:], views)
+                else:
+                    assert len(response.content) == 1
+                last = await json_result(rust, "garment_last_spec")
+                assert last["spec"] == summary["spec"]
+                assert set(last["pieces"]) == set(summary["pieces"])
+
+            spec = {"garment": "top", "length": "waist"}
+            await build("garment_build", {"spec": spec}, defaults)
+            await build("garment_build", {"spec": spec, "views": []}, defaults)
+            views = ["FRONT", "Three-Quarter", "3/4-LEFT"]
+            await build("garment_build", {"spec": spec, "views": views}, views)
+            await build("garment_rebuild", {"changes": {"length": "cropped"}}, defaults)
+            await build("garment_build", {"spec": spec, "views": ["ignored"], "snapshots": False}, [])
+
+            aliases = ["Three-Quarter", "3/4-right"]
+            captures = await successful(rust, "snapshot", {"views": aliases})
+            a, b = check_images(captures.content, aliases)
+            assert a == b, "the three-quarter alias must produce the same camera"
+
+            before = sorted((output / "snapshots").glob("*.png"))
+            invalid = await rust.call_tool("garment_build", {
+                "spec": spec | {"length": "cropped", "color": "navy"},
+                "simulate_steps": 0, "views": ["front", "unknown view"],
+            })
+            assert invalid.isError and "unknown snapshot view" in invalid.content[0].text
+            assert sorted((output / "snapshots").glob("*.png")) == before
+            last = await json_result(rust, "garment_last_spec")
+            assert last["spec"]["color"] == "navy" and last["spec"]["length"] == "cropped"
+            stored = root / "after-error.clorust"
+            await json_result(rust, "scene_save", {"path": str(stored), "thumbnail": False})
+            scene = json.loads(stored.read_text())["scene"]
+            assert [panel["name"] for panel in scene["patterns"]] == last["pieces"]
+            assert scene["fabrics"][-1]["color"] == [0.1, 0.16, 0.42]
+
+            failed_draft = await rust.call_tool("garment_rebuild", {
+                "changes": {"garment": "invalid"}, "snapshots": False,
+            })
+            assert failed_draft.isError
+            assert await json_result(rust, "garment_last_spec") == last
+
+            snapshot_folder = output / "snapshots"
+            snapshot_folder.rename(root / "prior-snapshots")
+            snapshot_folder.write_text("Block creation of the output directory")
+            failed_export = await rust.call_tool("garment_rebuild", {
+                "changes": {"color": "red"}, "simulate_steps": 0,
+            })
+            assert failed_export.isError
+            rebound = await json_result(rust, "garment_last_spec")
+            assert rebound["spec"] == last["spec"] | {"color": "red"}
+    print(json.dumps({"tools": ["garment_build", "garment_rebuild", "garment_last_spec", "snapshot"],
+                      "case": "build snapshot workflow", "default_views": defaults,
+                      "aliases_and_png_content": "pass", "capture_error_commits_build": "pass",
+                      "draft_error_preserves_previous_build": "pass"}))
+
+
 async def verify_one_piece_dress_merge():
     cases = [
         {"silhouette": "a-line", "length": "midi", "particle_distance": 80},
@@ -1406,6 +1502,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-one-piece-dress-merge", action="store_const", dest="comparison",
                              const=verify_one_piece_dress_merge,
                              help="verify welded waist topology, remapped seams and reopened drape")
+    comparisons.add_argument("--verify-build-snapshot-workflow", action="store_const", dest="comparison",
+                             const=verify_build_snapshot_workflow,
+                             help="verify build snapshot order, view aliases, images and error readback")
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
@@ -1427,7 +1526,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
-                                verify_one_piece_dress_merge)
+                                verify_one_piece_dress_merge, verify_build_snapshot_workflow)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

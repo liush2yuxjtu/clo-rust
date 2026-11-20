@@ -177,18 +177,19 @@ struct Camera {
 }
 
 fn camera(view: &str) -> Result<Camera, String> {
-    let angle = match view {
+    let name = view.to_ascii_lowercase();
+    let angle = match name.as_str() {
         "front" | "2d" => 0.0,
         "back" => 180.0,
         "left" => -90.0,
         "right" => 90.0,
-        "3/4-right" => 42.0,
+        "3/4-right" | "three-quarter" => 42.0,
         "3/4-left" => -42.0,
         "top" | "bottom" => 0.0,
         _ => return Err(format!("unknown snapshot view {view:?}")),
     };
-    if matches!(view, "top" | "bottom") {
-        let sign = if view == "top" { 1.0 } else { -1.0 };
+    if matches!(name.as_str(), "top" | "bottom") {
+        let sign = if name == "top" { 1.0 } else { -1.0 };
         return Ok(Camera {
             horizontal: [1.0, 0.0, 0.0],
             up: [0.0, 0.0, -sign],
@@ -454,7 +455,7 @@ fn make_image(
     flat: bool,
 ) -> Result<PathBuf, String> {
     let canvas = render_canvas(drawings, view, flat)?;
-    let shape = if flat { "2d" } else { view };
+    let shape = if flat { "2d".to_owned() } else { view.replace('/', "") };
     let label: String = label
         .chars()
         .take(60)
