@@ -4329,6 +4329,86 @@ async def verify_reordered_native_archives():
     print(json.dumps({"case": "reordered native PAC fields", "fixtures": checked}, ensure_ascii=False))
 
 
+async def verify_native_two_corner_archives():
+    source = Path(os.environ["CLO_NATIVE_TWO_CORNER_FIXTURES"]).resolve(strict=True)
+    native = json.loads((source / "reopen.json").read_text())
+    saved_outputs = os.environ.get("CLO_RUST_TWO_CORNER_OUTPUTS")
+    cases = {}
+
+    def mesh_samples(path):
+        model, binary = read_gltf_export(path)
+
+        def values(index, width):
+            accessor = model["accessors"][index]
+            view = model["bufferViews"][accessor["bufferView"]]
+            component = {5123: "H", 5125: "I", 5126: "f"}[accessor["componentType"]]
+            fmt = f"<{width}{component}"
+            offset = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+            stride = view.get("byteStride", struct.calcsize(fmt))
+            return [struct.unpack_from(fmt, binary, offset + i * stride) for i in range(accessor["count"])]
+
+        return [(values(p["attributes"]["POSITION"], 3), values(p["indices"], 1))
+                for mesh in model["meshes"] for p in mesh["primitives"]]
+
+    with TemporaryDirectory(prefix="clo-native-two-corner-") as directory:
+        root = Path(directory)
+        output = Path(saved_outputs) if saved_outputs else root
+        expected_meshes = mesh_samples(source / "two-corner-curve.glb")
+        async with open_backend("rust") as session:
+            for suffix in ("zprj", "zpac"):
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                fixture = source / f"two-corner-curve.{suffix}"
+                opened = await json_result(session, "scene_open", {"path": str(fixture), "mode": "replace"})
+                assert opened["pattern_count"] == 3 and opened["native_import"]["saved_pose_meshes"] == 3
+                state = await json_result(session, "scene_info")
+                reference = native[suffix]
+                scene_fields = ("project", "patterns", "avatars", "fabrics", "colorways", "current_colorway", "seam_groups")
+                for key in scene_fields:
+                    assert state[key] == reference["scene"][key], (suffix, key)
+                seams = await json_result(session, "seams_list")
+                fields = ("index", "name", "patterns")
+                assert [{key: group[key] for key in fields} for group in seams["groups"]] == reference["seams"]["groups"]
+                curve = await json_result(session, "pattern_info", {"pattern": "Curve Probe"})
+                actual = curve["line_info"]["lines"]
+                expected = reference["curve"]["line_info"]["lines"]
+                assert len(actual) == len(expected) == 2
+                for a, b in zip(actual, expected, strict=True):
+                    assert all(a[key] == b[key] for key in ("lineIndex", "start", "end"))
+                length_errors = [abs(a["length"] - b["length"]) for a, b in zip(actual, expected, strict=True)]
+                assert length_errors[1] < 0.001, length_errors
+
+                name = "Curve Readback" if suffix == "zprj" else "曲线 É"
+                renamed = await json_result(session, "clo_api_call", {
+                    "name": "pattern_api.SetPatternPieceName", "args": [2, name],
+                })
+                assert renamed["value"] is None
+                archive = output / f"two-corner-rust.{suffix}"
+                await json_result(session, "scene_save", {"path": str(archive), "thumbnail": False})
+                await json_result(session, "scene_open", {"path": str(archive), "mode": "replace"})
+                restored = await json_result(session, "pattern_info", {"pattern": name})
+                assert restored["line_info"]["lines"] == actual
+                assert await json_result(session, "seams_list") == seams
+                first = root / "before.clorust"
+                second = root / "after.clorust"
+                await json_result(session, "scene_save", {"path": str(first), "thumbnail": False})
+                result = await json_result(session, "simulate", {"steps": 0})
+                assert result["ok"] and result["steps"] == 0
+                await json_result(session, "scene_save", {"path": str(second), "thumbnail": False})
+                before = json.loads(first.read_text())["scene"]["simulation"]["meshes"]
+                after = json.loads(second.read_text())["scene"]["simulation"]["meshes"]
+                for old, new in zip(before, after, strict=True):
+                    assert all(old[key] == new[key] for key in ("name", "positions", "triangles", "texcoords"))
+                glb = root / f"two-corner-{suffix}.glb"
+                await json_result(session, "scene_export", {"path": str(glb), "colorways": False})
+                assert mesh_samples(glb) == expected_meshes
+                cases[suffix] = {"archived_curve_lines": 2, "length_errors_mm": length_errors,
+                                 "renamed_curve": name,
+                                 "saved_pose_unchanged_at_zero_steps": True, "glb_positions_and_indices_exact": True,
+                                 "glb_mesh_counts": [(len(positions), len(indices) // 3)
+                                                     for positions, indices in expected_meshes]}
+    print(json.dumps({"case": "native two-corner outline archives", "formats": cases}))
+
+
 async def verify_native_colorway_exports():
     fixture = Path(os.environ["CLO_REORDERED_ZPRJ"]).resolve(strict=True)
     expected_names = ("Original", "Alternate")
@@ -5234,6 +5314,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-reordered-native-archives", action="store_const", dest="comparison",
                              const=verify_reordered_native_archives,
                              help="verify the two native Boat colorway archives and saved poses")
+    comparisons.add_argument("--verify-native-two-corner-archives", action="store_const", dest="comparison",
+                             const=verify_native_two_corner_archives,
+                             help="reopen and export two-corner native project and garment archives")
     comparisons.add_argument("--verify-native-colorway-exports", action="store_const", dest="comparison",
                              const=verify_native_colorway_exports,
                              help="reopen all mesh formats exported from a native two-colorway archive")
@@ -5259,7 +5342,7 @@ if __name__ == "__main__":
     if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_recolor_opacity, verify_fabric_texture_clear,
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
-                                verify_native_colorway_exports, verify_native_colorway_textures,
+                                verify_native_colorway_exports, verify_native_colorway_textures, verify_native_two_corner_archives,
                                 verify_native_colorway_normals, verify_native_colorway_refresh,
                                 verify_native_texture_transforms,
                                 verify_tiered_build_relaxation,

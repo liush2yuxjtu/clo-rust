@@ -263,6 +263,27 @@ pub(in crate::compat_scene) fn mark_texture(state: &mut Value, index: u64, map: 
     }
 }
 
+fn legacy_panel_name(name: &str) -> Vec<u8> {
+    // The Windows CLO reference writes a Windows-1252 mirror of qsNameUTF8.
+    const EXTENDED: &str = "€\0‚ƒ„…†‡ˆ‰Š‹Œ\0Ž\0\0‘’“”•–—˜™š›œ\0žŸ";
+    name.chars().map(|ch| match ch as u32 {
+        byte @ (0..=0x7f | 0xa0..=0xff) => byte as u8,
+        _ => EXTENDED.chars().position(|candidate| candidate == ch)
+            .map_or(b'?', |i| 0x80 + i as u8),
+    }).collect()
+}
+
+fn rename_fields(record: &Fields<'_>, utf8: &[u8], legacy: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let mut updated = match record.get(utf8, BYTE_TYPE) {
+        Ok(_) => record.replace(utf8, BYTE_TYPE, name.as_bytes())?,
+        Err(_) => record.encoded().to_vec(),
+    };
+    if record.get(legacy, BYTE_TYPE).is_ok() {
+        updated = Fields::read(&updated)?.replace(legacy, BYTE_TYPE, &legacy_panel_name(name))?;
+    }
+    Ok(updated)
+}
+
 fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
     let root = Fields::read(pac)?;
     let editor = root.map(b"mapPatternEditor")?;
@@ -297,12 +318,20 @@ fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
         {
             return Err("native panel names must be 1 to 255 UTF-8 bytes without control characters or PAC field markers".into());
         }
-        let element = element.replace(b"qsNameUTF8", BYTE_TYPE, name.as_bytes())?;
-        bytes.push(Cow::Owned(record.replace(
-            b"mapElement",
-            MAP_TYPE,
-            &element,
-        )?));
+        let element = rename_fields(&element, b"qsNameUTF8", b"qsName", name)?;
+        let mut updated = record.replace(b"mapElement", MAP_TYPE, &element)?;
+        if let Ok(shape) = record.map(b"mapFabricShape2D") {
+            if let Ok(element) = shape.map(b"mapElement") {
+                let element = rename_fields(&element, b"qsNameUTF8", b"qsName", name)?;
+                let shape = shape.replace(b"mapElement", MAP_TYPE, &element)?;
+                updated = Fields::read(&updated)?.replace(b"mapFabricShape2D", MAP_TYPE, &shape)?;
+            }
+        }
+        if let Ok(annotation) = record.map(b"mapAnnoForPatternName") {
+            let annotation = rename_fields(&annotation, b"qsTextUTF8", b"qsText", name)?;
+            updated = Fields::read(&updated)?.replace(b"mapAnnoForPatternName", MAP_TYPE, &annotation)?;
+        }
+        bytes.push(Cow::Owned(updated));
         edited = true;
     }
     if current != names.len() {

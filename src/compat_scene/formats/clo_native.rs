@@ -345,8 +345,8 @@ fn outline_boundary(
 ) -> Result<(Vec<Value>, usize), String> {
     let mut cursor = 0;
     let (lines, count) = sized_list(boundary, &mut cursor, LIST_TYPE, 65536)?;
-    if count < 3 {
-        return Err("native PAC boundary has fewer than three edges".into());
+    if count < 2 {
+        return Err("native PAC boundary has fewer than two edges".into());
     }
     let (mut first, mut expected) = (None, None);
     let mut points = Vec::new();
@@ -385,6 +385,9 @@ fn outline_boundary(
     }
     if first != expected {
         return Err("native PAC boundary does not close".into());
+    }
+    if points.len() < 3 {
+        return Err("native PAC boundary has fewer than three physical samples".into());
     }
     Ok((points, positions.len() / 8))
 }

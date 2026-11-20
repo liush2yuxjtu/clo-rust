@@ -499,6 +499,18 @@ a simulated mesh. A native attempt with three coincident points may open a
 remeshing dialog on the dedicated desktop, so verify its eventual reply in a
 manual case.
 
+Run `--verify-native-two-corner-archives` with
+`CLO_NATIVE_TWO_CORNER_FIXTURES` set to the native capture directory. It
+contains `two-corner-curve.zprj`, `two-corner-curve.zpac`, the official GLB,
+and `reopen.json` with the `scene`, `curve` and `seams` readback for each
+suffix. Compare outline endpoints and record the curve length delta.
+Rename the curve, save and reopen each native format, then run simulation
+at zero steps. The saved positions, topology and UV coordinates should stay
+intact. Compare GLB positions and triangle indices to the official export.
+Set `CLO_RUST_TWO_CORNER_OUTPUTS` to a writable directory to retain the Rust
+archives for re-opening in native CLO. Confirm the renamed curve, native
+curve metrics and original seam group.
+
 Run `--verify-portable-append-keeps-drape` to append two simulated
 `.clorust` projects with overlapping panel IDs and nonconsecutive
 material indices. Reopen and verify that seams, fabrics and saved
