@@ -758,6 +758,38 @@ async def compare_gathered_draft_preview():
                       "comparisons": results, "last_spec_unchanged": True, "zero_tiers_error": "pass"}))
 
 
+async def compare_curved_skirt_preview():
+    cases = (
+        {"garment": "skirt", "silhouette": "full-circle", "length": "midi"},
+        {"garment": "skirt", "silhouette": "half-circle", "length": "mini", "fit": "bodycon"},
+        {"garment": "skirt", "skirt": "quarter-circle", "waist": "drop", "length": "midi"},
+        {"garment": "skirt", "skirt": "three-quarter-circle", "length": "ankle"},
+        {"silhouette": "skater", "length": "mini", "sleeve": "short"},
+        {"silhouette": "ball gown", "length": "floor", "neckline": "sweetheart", "straps": "wide"},
+        {"silhouette": "mermaid", "length": "floor"},
+        {"garment": "skirt", "skirt": "trumpet", "length": "ankle"},
+    )
+    results = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        for session in (clo, rust):
+            await inspect_contract(session)
+        for spec in cases:
+            args = {"spec": spec, "use_scene_measurements": False}
+            expected = await json_result(clo, "garment_plan_preview", args)
+            observed = await json_result(rust, "garment_plan_preview", args)
+            assert expected.keys() == observed.keys(), spec
+            for key in expected:
+                assert expected[key] == observed[key], (spec, key, expected[key], observed[key])
+            results.append({
+                "style": spec.get("skirt", spec.get("silhouette")),
+                "pieces": len(observed["pieces"]), "seams": len(observed["seams"]),
+            })
+        for session in (clo, rust):
+            assert await json_result(session, "garment_last_spec") == {"spec": None, "pieces": []}
+    print(json.dumps({"tool": "garment_plan_preview", "case": "circle and mermaid skirts",
+                      "comparisons": results, "last_spec_unchanged": True}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -806,6 +838,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-gathered-draft-preview", action="store_const", dest="comparison",
                              const=compare_gathered_draft_preview,
                              help="compare offline gathered and tiered garment draft previews")
+    comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
+                             const=compare_curved_skirt_preview,
+                             help="compare offline circular and mermaid skirt draft previews")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

@@ -113,6 +113,12 @@ length mismatches, seam directions, waist elastic, warnings and simulation defau
 Build the tiered skirt in a disposable Rust scene and read back its layers,
 seam flags and first-tier elastic before checking one simulation step.
 
+Use `--compare-curved-skirt-preview` for quarter-, half-, three-quarter- and
+full-circle skirts, skater dresses, ball gowns, mermaid dresses and trumpet
+skirts. Compare the complete preview, including radial seam order, the four
+waist joins on dresses and standalone waist elastic. Build a skirt and dress
+through Rust, read back the stored sewing and check one simulation step.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

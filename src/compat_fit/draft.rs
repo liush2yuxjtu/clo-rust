@@ -30,6 +30,14 @@ impl Panel {
         edge_length(edge, next)
     }
 
+    fn named_length(&self, name: &str) -> Result<f64, String> {
+        self.edges
+            .iter()
+            .position(|edge| edge.name == name)
+            .map(|index| self.line_length(index))
+            .ok_or_else(|| format!("unknown drafting edge {name}"))
+    }
+
     fn json(&self, offset: f64) -> Value {
         let mut points = Vec::new();
         let mut edges = Vec::new();
@@ -66,7 +74,9 @@ fn edge_length(edge: &Edge, end: [f64; 2]) -> f64 {
 }
 
 fn rounded_mm(value: f64) -> f64 {
-    (value * 10.0).round_ties_even() / 10.0
+    // Decimal rounding must use the original float, before scaling can
+    // turn a value adjacent to a half-tenth into an exact tie.
+    format!("{value:.1}").parse().expect("formatted millimetres")
 }
 
 fn rounded(value: f64) -> f64 {
@@ -193,6 +203,8 @@ struct Measurements {
     standard_waist_y: f64,
     waist_y: f64,
     hip_y: f64,
+    knee_y: f64,
+    knee_width: f64,
 }
 
 fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
@@ -221,6 +233,8 @@ fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
         underbust_y: underbust,
         standard_waist_y: standard_waist,
         hip_y: number(body, "h_hip", 879.0),
+        knee_y: number(body, "h_knee", 483.0),
+        knee_width: (number(body, "knee_circ", 343.0) * 2.0 + 80.0) / 4.0 + 20.0,
     })
 }
 
@@ -416,6 +430,7 @@ fn body_panel(
     front: bool,
     straps: Option<&str>,
     strapless: bool,
+    split_bottom: bool,
 ) -> Result<Panel, String> {
     let kind = string(
         spec,
@@ -537,7 +552,18 @@ fn body_panel(
             armhole(a1, [m.shoulder, m.shoulder_y], [bust, underarm_y], true),
         ]);
     }
-    edges.extend([side_edge(l1, &stations, false), hem, side_edge(l2, &stations, true)]);
+    edges.push(side_edge(l1, &stations, false));
+    if split_bottom {
+        let (first, second) = if front {
+            ("hem_L_half", "hem_R_half")
+        } else {
+            ("hem_R_half", "hem_L_half")
+        };
+        edges.extend([edge(first, bottom_width, bottom), edge(second, 0.0, bottom)]);
+    } else {
+        edges.push(hem);
+    }
+    edges.push(side_edge(l2, &stations, true));
     if open_top {
         edges.push(edge(if front {"top_side_R"} else {"top_side_L"}, -bust, underarm_y));
     } else {
@@ -566,14 +592,13 @@ fn skirt_panel(
     kind: &str,
     bottom: f64,
     front: bool,
-    waist_half_width: Option<f64>,
+    w: f64,
     lower: Option<f64>,
 ) -> Result<Panel, String> {
     if bottom > m.waist_y - 30.0 {
         return Err("skirt hem must fall below the waist".into());
     }
     let length = m.waist_y - bottom;
-    let w = waist_half_width.unwrap_or(m.waist);
     let flare = match kind {
         "straight" => 0.02,
         "pencil" => -0.05,
@@ -583,8 +608,6 @@ fn skirt_panel(
         "trumpet" => 0.50,
         "mermaid" => 0.55,
         "tulip" => 0.15,
-        "half-circle" => 1.50,
-        "full-circle" => 2.25,
         _ => {
             return Err(format!(
                 "Rust drafting for skirt shape {kind:?} is not implemented"
@@ -593,7 +616,7 @@ fn skirt_panel(
     };
     let hem_width = lower.unwrap_or((m.hip + flare * length / 2.0).max(m.hip * 0.80));
     let curve = hem_width > m.hip + 25.0 && (lower.is_none() || bottom < m.hip_y - 60.0);
-    let (hem, side) = if curve {
+    let (mut hem, side) = if curve {
         let (radius, at) = if lower.is_some() {
             (m.hip, m.hip_y)
         } else {
@@ -608,6 +631,17 @@ fn skirt_panel(
         stations.push([m.hip, m.hip_y]);
     }
     stations.push([hem_width, side]);
+    if matches!(kind, "mermaid" | "trumpet") && lower.is_none() {
+        let hem_width = hem_width + 60.0;
+        stations = vec![
+            [w, m.waist_y],
+            [m.hip, m.hip_y],
+            [m.knee_width, m.knee_y + 40.0],
+            [m.knee_width + 20.0, m.knee_y - 60.0],
+            [hem_width, bottom],
+        ];
+        hem = edge("hem", hem_width, bottom);
+    }
     let (name, role, arrange, l, r) = if front {
         (
             if lower.is_some() {
@@ -658,12 +692,90 @@ fn drafted_number(spec: &Value, key: &str, default: f64) -> Result<f64, String> 
     }
 }
 
+fn skirt_waist_width(body: &Value, spec: &Value, m: &Measurements) -> Result<f64, String> {
+    let (_, ease, _) = fit_ease(spec)?;
+    let (girth, ease) = if m.waist_y < m.standard_waist_y - 40.0 {
+        (number(body, "high_hip", 805.0), ease.max(20.0))
+    } else if m.waist_y > m.underbust_y - 30.0 {
+        (number(body, "underbust", 662.0), ease.max(30.0))
+    } else {
+        (number(body, "waist", 608.0), ease.max(20.0))
+    };
+    Ok((girth + ease) / 4.0)
+}
+
+fn circular_skirt(
+    quarter_waist: f64,
+    top: f64,
+    hem: f64,
+    fraction: f64,
+) -> Result<(Vec<Value>, Vec<Value>), String> {
+    if hem >= top || quarter_waist <= 0.0 {
+        return Err("circle skirt requires positive waist and skirt length".into());
+    }
+    let sector = 90.0 * fraction;
+    let waist_radius = quarter_waist / sector.to_radians();
+    let hem_radius = waist_radius + top - hem;
+    let center_y = top + waist_radius;
+    let start = -90.0 - sector / 2.0;
+    let end = -90.0 + sector / 2.0;
+    let at = |r: f64, angle: f64| {
+        let theta = angle.to_radians();
+        [r * theta.cos(), center_y + r * theta.sin()]
+    };
+    let arc = |name, r, from, to, count| {
+        let samples = (1..=count)
+            .map(|i| {
+                let [x, y] = at(r, from + (to - from) * (i as f64 / (count + 1) as f64));
+                [x, y, 2.0]
+            })
+            .collect();
+        edge_with_points(name, at(r, from), samples)
+    };
+    let samples = ((sector / 12.0) as usize).max(3);
+    let [wr_x, wr_y] = at(waist_radius, end);
+    let [hl_x, hl_y] = at(hem_radius, start);
+    let mut pieces = Vec::new();
+    for (name, front, offset) in [
+        ("Skirt_Front_R", true, -900.0),
+        ("Skirt_Front_L", true, -300.0),
+        ("Skirt_Back_R", false, 900.0),
+        ("Skirt_Back_L", false, 300.0),
+    ] {
+        let (role, arrange) = if front {
+            ("skirt_front", "Leg_Skirt_Front")
+        } else {
+            ("skirt_back", "Leg_Skirt_Back")
+        };
+        pieces.push(Panel {
+            name,
+            role,
+            arrange,
+            elastic: vec![],
+            edges: vec![
+                arc("waist", waist_radius, start, end, samples),
+                edge("edge_right", wr_x, wr_y),
+                arc("hem", hem_radius, end, start, samples * 2),
+                edge("edge_left", hl_x, hl_y),
+            ],
+        }.json(offset));
+    }
+    let seams = [
+        (0, "edge_right", 1, "edge_left"),
+        (2, "edge_left", 3, "edge_right"),
+        (1, "edge_right", 3, "edge_left"),
+        (0, "edge_left", 2, "edge_right"),
+    ].into_iter()
+        .map(|(a, ea, b, eb)| seam(&pieces, a, ea, b, eb, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((pieces, seams))
+}
+
 fn gathered_skirt(
-    body: &Value,
     spec: &Value,
     m: &Measurements,
     hem: f64,
-    waist_half_width: Option<f64>,
+    mut width: f64,
     tiered: bool,
 ) -> Result<(Vec<Value>, Vec<Value>), String> {
     if hem >= m.waist_y {
@@ -682,15 +794,6 @@ fn gathered_skirt(
     } else {
         1
     };
-    let (_, ease, _) = fit_ease(spec)?;
-    let (girth, ease) = if m.waist_y < m.standard_waist_y - 40.0 {
-        (number(body, "high_hip", 805.0), ease.max(20.0))
-    } else if m.waist_y > m.underbust_y - 30.0 {
-        (number(body, "underbust", 662.0), ease.max(30.0))
-    } else {
-        (number(body, "waist", 608.0), ease.max(20.0))
-    };
-    let mut width = waist_half_width.unwrap_or((girth + ease) / 4.0);
     let step = (m.waist_y - hem) / tiers as f64;
     let mut pieces = Vec::with_capacity(tiers * 2);
     let mut seams = Vec::new();
@@ -926,6 +1029,18 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     let one_piece = boolean(&spec, "one_piece", true);
     let split = has_bodice && one_piece && hem < m.standard_waist_y - 150.0;
     let has_skirt = garment == "skirt" || (has_bodice && !one_piece);
+    let style = string(&spec, "skirt", "a-line").to_lowercase().replace('_', "-");
+    let circle = if has_skirt {
+        match style.as_str() {
+            "quarter-circle" => Some(0.25),
+            "half-circle" => Some(0.5),
+            "three-quarter-circle" => Some(0.75),
+            "full-circle" | "circle" => Some(1.0),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let straps = spec["straps"].as_str().filter(|s| *s != "none");
     let strapless = straps.is_none() && boolean(&spec, "strapless", false);
     let sleeves = has_bodice && straps.is_none() && !strapless && spec["sleeve"] != "none";
@@ -934,6 +1049,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     let mut merges = Vec::<Value>::new();
     let mut notes = Vec::<Value>::new();
     let mut armhole_length = 0.0;
+    let mut circular_bodice_waist = None;
     let hem_half_width = |panel: &Value| {
         array(&panel["edges"])
             .iter()
@@ -964,17 +1080,20 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
         } else {
             hem
         };
-        let front = body_panel(&m, &spec, bodice_hem, draft_hem, true, straps, strapless)?;
-        let back = body_panel(&m, &spec, bodice_hem, draft_hem, false, straps, strapless)?;
+        let front = body_panel(&m, &spec, bodice_hem, draft_hem, true, straps, strapless, circle.is_some())?;
+        let back = body_panel(&m, &spec, bodice_hem, draft_hem, false, straps, strapless, circle.is_some())?;
         if sleeves {
-            armhole_length = front.line_length(1) + back.line_length(5);
+            armhole_length = front.named_length("armhole_L")? + back.named_length("armhole_L")?;
+        }
+        if circle.is_some() {
+            circular_bodice_waist = Some((front.named_length("hem_L_half")? + front.named_length("hem_R_half")?) / 2.0);
         }
         pieces.extend([front.json(-520.0), back.json(520.0)]);
         if split {
             m.waist_y = m.standard_waist_y;
             pieces.extend([
-                skirt_panel(&m, "a-line", hem, true, Some(hem_half_width(&pieces[0])), draft_hem)?.json(-520.0),
-                skirt_panel(&m, "a-line", hem, false, Some(hem_half_width(&pieces[1])), draft_hem)?.json(520.0),
+                skirt_panel(&m, "a-line", hem, true, hem_half_width(&pieces[0]), draft_hem)?.json(-520.0),
+                skirt_panel(&m, "a-line", hem, false, hem_half_width(&pieces[1]), draft_hem)?.json(520.0),
             ]);
             for edge in ["side_L", "side_R"] {
                 seams.push(seam(&pieces, 2, edge, 3, edge, true)?);
@@ -1027,34 +1146,51 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             seams.extend([front, back]);
         }
     }
-    let style = string(&spec, "skirt", "a-line").to_lowercase().replace('_', "-");
     let tiered = has_skirt && style == "tiered";
     let gathered = matches!(style.as_str(), "gathered" | "dirndl" | "full" | "pleated" | "tiered");
     if has_skirt {
         let i = pieces.len();
-        let w = has_bodice.then(|| hem_half_width(&pieces[0]));
-        if gathered {
-            let (skirts, joins) = gathered_skirt(body, &spec, &m, hem, w, tiered)?;
+        let waist = if has_bodice {
+            circular_bodice_waist.unwrap_or_else(|| hem_half_width(&pieces[0]))
+        } else {
+            skirt_waist_width(body, &spec, &m)?
+        };
+        if let Some(fraction) = circle {
+            let (skirts, joins) = circular_skirt(waist, m.waist_y, hem, fraction)?;
+            pieces.extend(skirts);
+            seams.extend(joins);
+        } else if gathered {
+            let (skirts, joins) = gathered_skirt(&spec, &m, hem, waist, tiered)?;
             pieces.extend(skirts);
             seams.extend(joins);
         } else {
             pieces.extend([
-                skirt_panel(&m, &style, hem, true, w, None)?.json(-520.0),
-                skirt_panel(&m, &style, hem, false, w, None)?.json(520.0),
+                skirt_panel(&m, &style, hem, true, waist, None)?.json(-520.0),
+                skirt_panel(&m, &style, hem, false, waist, None)?.json(520.0),
             ]);
             for edge in ["side_L", "side_R"] {
                 seams.push(seam(&pieces, i, edge, i + 1, edge, true)?);
             }
         }
         if has_bodice {
-            for bodice in 0..2 {
-                let mut join = seam(&pieces, bodice, "hem", i + bodice, "waist", !tiered)?;
-                join["gather"] = json!(gathered);
-                seams.push(join);
+            if circle.is_some() {
+                for (skirt, body, edge) in [
+                    (1, 0, "hem_L_half"), (0, 0, "hem_R_half"),
+                    (3, 1, "hem_L_half"), (2, 1, "hem_R_half"),
+                ] {
+                    seams.push(seam(&pieces, i + skirt, "waist", body, edge, true)?);
+                }
+            } else {
+                for bodice in 0..2 {
+                    let mut join = seam(&pieces, bodice, "hem", i + bodice, "waist", !tiered)?;
+                    join["gather"] = json!(gathered);
+                    seams.push(join);
+                }
             }
         } else {
-            let elastic = (number(body, "waist", 608.0) - 25.0) / 2.0;
-            for piece in &mut pieces[i..i + 2] {
+            let at_waist = if circle.is_some() { 4 } else { 2 };
+            let elastic = (number(body, "waist", 608.0) - 25.0) / f64::from(at_waist);
+            for piece in &mut pieces[i..i + at_waist as usize] {
                 piece["elastic"] = json!([{"line": 0, "total_length": elastic}]);
             }
             notes.push(json!("standalone skirt: the waist edge is held by elastic so it stays on the body"));
