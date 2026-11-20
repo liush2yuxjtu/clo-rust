@@ -1355,6 +1355,79 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_portable_append_keeps_drape():
+    with TemporaryDirectory(prefix="clo-portable-append-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())
+
+            async def make_scene(name, avatar, color, steps, distance):
+                await json_result(rust, "scene_clear", {"keep_avatar": False})
+                await json_result(rust, "avatar_load", {"name_or_path": avatar})
+                for panel in ("Front", "Back"):
+                    await json_result(rust, "pattern_create", {
+                        "name": panel, "points": [[0, 0], [110, 0], [55, 90]],
+                        "arrangement": panel,
+                    })
+                await json_result(rust, "fabric_apply", {"fabric": "cotton", "color": color})
+                await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
+                                                "pattern_b": "Back", "line_b": 0})
+                await json_result(rust, "simulate", {"steps": steps, "particle_distance": distance})
+                return await save(name)
+
+            original, destination = await make_scene("first", "mia", "red", 3, 50)
+            imported, source = await make_scene("second", "luka", "navy", 2, 80)
+            left, right = destination["scene"], source["scene"]
+            right["fabrics"][0]["index"] = 12
+            for record in right["patterns"] + right["simulation"]["meshes"]:
+                record["fabric_index"] = 12
+            imported.write_text(json.dumps(source))
+            await json_result(rust, "scene_open", {"path": str(original)})
+            opened = await json_result(rust, "scene_open", {"path": str(imported), "mode": "append"})
+            assert opened["pattern_count"] == 4 and len(opened["avatars"]) == 2
+            path, appended = await save("appended")
+            combined = appended["scene"]
+            assert combined["patterns"][:2] == left["patterns"]
+            panel_ids = [p["id"] for p in combined["patterns"]]
+            assert len(set(panel_ids)) == 4
+            assert combined["seams"][0] == left["seams"][0]
+            assert [combined["seams"][1][key] for key in ("pattern_a", "pattern_b")] == panel_ids[2:]
+            assert combined["fabrics"][0] == left["fabrics"][0]
+            new_fabric = combined["fabrics"][1]
+            assert new_fabric["color"] == [0.1, 0.16, 0.42] and new_fabric["index"] != left["fabrics"][0]["index"]
+            assert all(p["fabric_index"] == new_fabric["index"] for p in combined["patterns"][2:])
+            expected = left["simulation"]["meshes"] + [
+                mesh | {"id": panel, "fabric_index": new_fabric["index"]}
+                for mesh, panel in zip(right["simulation"]["meshes"], panel_ids[2:], strict=True)
+            ]
+            assert combined["simulation"]["meshes"] == expected
+            wrong = root / "broken.clorust"
+            right["simulation"]["meshes"][0]["id"] = "no corresponding panel"
+            wrong.write_text(json.dumps(source))
+            refused = await rust.call_tool("scene_open", {"path": str(wrong), "mode": "append"})
+            assert refused.isError
+            _, after_error = await save("after-error")
+            for key in combined.keys() - {"project", "project_path"}:
+                assert after_error["scene"][key] == combined[key], key
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 0})
+            _, resumed = await save("zero")
+            assert resumed["scene"]["simulation"]["meshes"] == expected
+            assert resumed["scene"]["simulation"]["steps"] == 3
+            await json_result(rust, "simulate", {"steps": 1})
+            _, advanced = await save("continued")
+            assert advanced["scene"]["simulation"]["steps"] == 4
+    print(json.dumps({"tools": ["scene_open", "scene_save", "simulate"],
+                      "case": "append saved Rust scenes", "panels": 4, "fabrics": 2, "avatars": 2,
+                      "seams": 2, "preserved_meshes": len(expected), "continued_step": 4,
+                      "invalid_mesh_rejected_atomically": True}))
+
+
 async def verify_new_panels_keep_drape():
     with TemporaryDirectory(prefix="clo-add-panel-drape-") as directory:
         root = Path(directory)
@@ -2323,6 +2396,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-new-panels-keep-drape", action="store_const", dest="comparison",
                              const=verify_new_panels_keep_drape,
                              help="verify newly created or copied panels can join settled cloth")
+    comparisons.add_argument("--verify-portable-append-keeps-drape", action="store_const", dest="comparison",
+                             const=verify_portable_append_keeps_drape,
+                             help="verify append remaps persisted panels, materials and simulation meshes")
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
@@ -2344,7 +2420,7 @@ if __name__ == "__main__":
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
-                                verify_geometry_edits_rebuild_one_panel)
+                                verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

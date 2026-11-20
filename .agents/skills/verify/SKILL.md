@@ -238,6 +238,13 @@ placed panels, then reopen and assemble the new meshes at zero steps.
 Check the original mesh, velocities and step count, then resume simulation.
 Set `CLO_DISPLAY_FIXTURE` to also verify a new panel beside archived meshes.
 
+Run `--verify-portable-append-keeps-drape` to append two simulated
+`.clorust` projects with overlapping panel IDs and nonconsecutive
+material indices. Reopen and verify that seams, fabrics and saved
+meshes reference the remapped panels, both avatars are present, and
+zero steps preserve both sets of positions and velocities. The receiving
+scene's step count continues. An unknown saved mesh ID rejects the append.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Save and reopen after each edit. At zero steps, rebuild the edited panel

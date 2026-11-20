@@ -304,6 +304,92 @@ fn append_native_pose(
     Some(mixed)
 }
 
+fn append_portable(state: &mut Value, mut loaded: Value) -> Result<(), String> {
+    let mut next = state.clone();
+    let mut material_ids = HashMap::new();
+    let max_material_id = array(state, "fabrics")
+        .iter()
+        .enumerate()
+        .map(|(i, material)| material["index"].as_u64().unwrap_or(i as u64))
+        .chain(array(state, "patterns").iter().map(|panel| panel["fabric_index"].as_u64().unwrap_or(0)))
+        .chain(array(state, "imported_meshes").iter().filter_map(|mesh| mesh["fabric_index"].as_u64()))
+        .max();
+    let mut last = max_material_id;
+    let mut remap_material = |old| -> Result<Value, String> {
+        if let Some(id) = material_ids.get(&old) {
+            return Ok(json!(id));
+        }
+        let id = last.map_or(Some(0), |id| id.checked_add(1))
+            .ok_or("material index space exhausted")?;
+        last = Some(id);
+        material_ids.insert(old, id);
+        Ok(json!(id))
+    };
+    for (i, material) in vec_mut(&mut loaded, "fabrics").iter_mut().enumerate() {
+        material["index"] = remap_material(material["index"].as_u64().unwrap_or(i as u64))?;
+    }
+    for field in ["patterns", "imported_meshes"] {
+        for piece in vec_mut(&mut loaded, field) {
+            if let Some(id) = piece["fabric_index"].as_u64().or_else(|| (field == "patterns").then_some(0)) {
+                piece["fabric_index"] = remap_material(id)?;
+            }
+        }
+    }
+    let prior_count = array(state, "patterns").len();
+    merge(&mut next, &loaded, true)?;
+    let mut meshes = portable_pose_meshes(state, &array(state, "patterns")[..prior_count])?;
+    let keep_previous_clock = !meshes.is_empty();
+    meshes.extend(portable_pose_meshes(&loaded, &array(&next, "patterns")[prior_count..])?);
+    if !meshes.is_empty() {
+        let clock = if keep_previous_clock { &state["simulation"] } else { &loaded["simulation"] };
+        let mut pose = json!({"source": "mixed_saved_pose", "meshes": meshes});
+        for field in ["steps", "quality", "particle_distance", "mesh_refinement"] {
+            if let Some(value) = clock.get(field) {
+                pose[field] = value.clone();
+            }
+        }
+        next["simulation"] = pose;
+    }
+    for field in ["fabrics", "imported_meshes"] {
+        vec_mut(&mut next, field).append(vec_mut(&mut loaded, field));
+    }
+    let avatar = loaded["avatar"].take();
+    if !avatar.is_null() {
+        if next["avatar"].is_null() {
+            next["avatar"] = avatar;
+        } else {
+            vec_mut(&mut next, "additional_avatars").push(avatar);
+        }
+    }
+    vec_mut(&mut next, "additional_avatars").append(vec_mut(&mut loaded, "additional_avatars"));
+    *state = next;
+    Ok(())
+}
+
+fn portable_pose_meshes(source: &Value, mapped: &[Value]) -> Result<Vec<Value>, String> {
+    let mut by_id = HashMap::new();
+    for mesh in array(&source["simulation"], "meshes") {
+        if by_id.insert(&mesh["id"], mesh).is_some() {
+            return Err("duplicate saved pose mesh for a panel".into());
+        }
+    }
+    let mut meshes = Vec::new();
+    for (old, new) in array(source, "patterns").iter().zip(mapped) {
+        let Some(saved) = by_id.remove(&old["id"]) else { continue };
+        let mut mesh = saved.clone();
+        mesh["id"] = new["id"].clone();
+        mesh["fabric_index"] = new["fabric_index"].clone();
+        if crate::compat_fit::mesh_uses_rest_mm(source, saved) {
+            mesh["texcoords_units"] = json!("mm");
+        }
+        meshes.push(mesh);
+    }
+    if !by_id.is_empty() {
+        return Err("saved pose mesh refers to an unknown panel".into());
+    }
+    Ok(meshes)
+}
+
 pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     if !path.is_file() {
@@ -321,7 +407,7 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                 Some(SCENE_FORMAT) => {
                     let loaded = recognized_state(content)?;
                     if append {
-                        merge(state, &loaded, true)?;
+                        append_portable(state, loaded)?;
                     } else {
                         replace_scene(state, loaded);
                         set_project(state, path);
