@@ -963,7 +963,14 @@ Verify both backends reject a missing avatar and an invalid refresh argument.
 Seed a measurement record for Mia with three known millimetre values. Both
 backends must return the same cached response, bypass it on forced refresh,
 and return it again without changing the file. The verifier removes that
-record. Verify a real Avatar Editor reading and cache creation separately.
+record.
+
+For the real cache, load Mia in the test CLO scene, then open Avatar Editor. With a
+fresh shared `CLO_MCP_STATE`, run `--compare-live-avatar-editor-cache`.
+Force an exact Mia reading through official MCP, verify it creates a cache
+with millimetre records, then compare the full cached response with Rust.
+Keep the cache SHA-256 in the evidence. Independent Rust computation of
+the exact Avatar Editor values requires a separate comparison.
 
 For mesh-based avatar girth estimates, run
 `cargo test --locked avatar_tape_excludes_disconnected_arms`. Compare the

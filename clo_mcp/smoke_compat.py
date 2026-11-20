@@ -4048,6 +4048,38 @@ async def compare_live_avatar_measurements():
                       "missing_avatar_and_invalid_refresh": "pass", "result": "pass"}))
 
 
+async def compare_live_avatar_editor_cache():
+    directory = Path(os.environ["CLO_MCP_STATE"]) / "measurements"
+    assert not any(directory.glob("*.json")), directory
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        try:
+            assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+            assert original["avatars"] == ["Mara_09_eye_Joint"], "load Mia and open Avatar Editor in CLO first"
+            for session in (clo, rust):
+                await inspect_contract(session)
+            await json_result(rust, "avatar_load")
+            exact = await json_result(clo, "avatar_measurements", {"refresh": True})
+            assert exact["source"] == "CLO avatar measurements", exact["source"]
+            cache = directory / f'{exact["avatar"]}.json'
+            payload = cache.read_bytes()
+            records = json.loads(payload)["measurements"]
+            assert len(records) >= 32 and all(row["unit"] == "mm" for row in records.values())
+            cached = await json_result(clo, "avatar_measurements")
+            assert cached["source"] == f"cached CLO measurements ({cache.name})"
+            assert exact["body"] == cached["body"] and len(exact["body"]) == 33
+            assert await json_result(rust, "avatar_measurements") == cached
+            assert cache.read_bytes() == payload
+        finally:
+            if original["project_path"]:
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "avatar_measurements", "avatar": exact["avatar"],
+                      "native_cache_records": len(records), "matched_numeric_fields": 32,
+                      "cache_sha256": hashlib.sha256(payload).hexdigest(), "result": "pass"}))
+
+
 async def verify_avatar_changes_keep_drape():
     with TemporaryDirectory(prefix="clo-avatar-drape-") as directory:
         root = Path(directory)
@@ -6089,6 +6121,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
+    comparisons.add_argument("--compare-live-avatar-editor-cache", action="store_const", dest="comparison",
+                             const=compare_live_avatar_editor_cache,
+                             help="compare an actual native Avatar Editor cache with Rust")
     comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
                              const=compare_live_avatar_measurements,
                              help="compare live avatar mesh measurements and shared measurement cache behavior")
