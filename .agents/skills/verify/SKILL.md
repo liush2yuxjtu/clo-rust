@@ -97,6 +97,16 @@ to include the official backend smoke. Run it with the CLO 3D bridge connected.
 `tools/list` is checked against the contract, including input and output schemas.
 The Rust fixtures also exercise selected scene, image, export, failure, and session flows.
 
+Run `python -m clo_mcp.smoke_compat --compare-desktop-observation` with
+`CLO_MCP_OFFICIAL_COMMAND` set and the CLO desktop available to the MCP host.
+The case checks the native server's `tools/list` directly against the pinned
+48-tool contract. It then compares the guide fields, tree limits and parent links,
+stale snapshot rejection, and PNG response framing across both adapters. It
+exercises read-only queries and a rejected action, so it needs no live CLO Python
+bridge and does not activate the CLO window. Window titles, node counts, snapshot
+IDs, and image dimensions can differ by backend. Use a separate disposable scene
+case to verify effects of successful actions.
+
 For behavior verification, use the comparison recipes below and record one verdict
 per tool after reviewing all applicable cases. Use a disposable CLO scene for tests
 that change state, preserve the exact requests and both results, and reopen exported

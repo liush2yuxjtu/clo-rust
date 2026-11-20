@@ -18,7 +18,7 @@ from tempfile import TemporaryDirectory
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .compat import CONTRACT
+from .compat import CONTRACT, official_parameters
 
 
 @asynccontextmanager
@@ -279,6 +279,70 @@ async def smoke_official():
         invalid = await session.call_tool("garment_plan_preview", {})
         assert invalid.isError
     print("Official MCP: 48 contracts and 11 diagnostics listed. Live CLO status, preview and input error passed")
+
+
+async def compare_desktop_observation():
+    expected = {entry["name"]: entry for entry in json.loads(CONTRACT.read_text())}
+    async with stdio_client(official_parameters()) as (reader, writer):
+        async with ClientSession(reader, writer) as native:
+            await native.initialize()
+            advertised = (await native.list_tools()).tools
+            actual = {tool.name: tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                      for tool in advertised}
+            assert len(advertised) == len(expected) == 48
+            assert actual == expected, sorted(name for name in actual.keys() | expected.keys()
+                                              if actual.get(name) != expected.get(name))
+
+    summary = {}
+    invalid_limits = ({"max_nodes": -1}, {"max_nodes": 0}, {"max_nodes": 5001},
+                      {"max_depth": -1}, {"max_depth": 0}, {"max_depth": 31})
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+            guide = await json_result(session, "clo_control_guide")
+            assert guide.keys() == {"route", "codex_desktop", "standalone_mcp", "limits"}
+            assert all(isinstance(guide[key], str) and guide[key] for key in guide.keys() - {"route"})
+            assert isinstance(guide["route"], list) and all(isinstance(step, str) for step in guide["route"])
+            route = " ".join(guide["route"])
+            assert all(tool in route for tool in ("clo_api_catalog", "clo_api_describe", "clo_api_call",
+                                                  "clo_ui_state", "clo_ui_action", "clo_ui_screenshot"))
+
+            limits = {"max_nodes": 1.0, "max_depth": 1}
+            first = await json_result(session, "clo_ui_state", limits)
+            root, = first["nodes"]
+            assert root["parent"] is None and root["AXRole"] == "AXApplication"
+            assert first["truncated"] is True
+            second = await json_result(session, "clo_ui_state", {"max_nodes": 24, "max_depth": 2})
+            assert first["snapshot"] and second["snapshot"] and first["snapshot"] != second["snapshot"]
+            assert first["pid"] == second["pid"] > 0 and second["coordinate_system"]
+            assert 1 < len(second["nodes"]) <= 24
+            depths = {}
+            for node in second["nodes"]:
+                parent = node["parent"]
+                assert node["id"] not in depths and isinstance(node["actions"], list)
+                depths[node["id"]] = 0 if parent is None else depths[parent] + 1
+            assert max(depths.values()) <= 2
+            assert any(window["bounds"]["Width"] > 0 and window["bounds"]["Height"] > 0
+                       for window in second["windows"])
+
+            stale = await session.call_tool("clo_ui_action", {
+                "snapshot": first["snapshot"], "action": "press", "element": root["id"],
+            })
+            assert stale.isError
+            for args in invalid_limits:
+                result = await session.call_tool("clo_ui_state", args)
+                assert result.isError, (backend, args, "invalid UI limits accepted")
+            png, = (await successful(session, "clo_ui_screenshot")).content
+            assert png.type == "image" and png.mimeType == "image/png"
+            payload = base64.b64decode(png.data, validate=True)
+            assert payload[:8] == b"\x89PNG\r\n\x1a\n" and payload[12:16] == b"IHDR"
+            width, height = struct.unpack_from(">II", payload, 16)
+            assert width > 0 and height > 0
+            summary[backend] = {"nodes": len(second["nodes"]), "width": width, "height": height,
+                                "invalid_limits_rejected": len(invalid_limits), "stale_token_rejected": True}
+    print(json.dumps({"case": "desktop observation", "native_contract_count": len(expected),
+                      "tools": ["clo_control_guide", "clo_ui_state", "clo_ui_action", "clo_ui_screenshot"],
+                      "results": summary}))
 
 
 async def compare_fabric_library():
@@ -2588,6 +2652,9 @@ async def verify_mixed_native_append():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--compare-desktop-observation", action="store_const", dest="comparison",
+                             const=compare_desktop_observation,
+                             help="compare desktop state bounds, stale actions and screenshot payloads")
     comparisons.add_argument("--compare-fabric-library", action="store_const", dest="comparison",
                              const=compare_fabric_library,
                         help="compare both live backends against the same CLO fabric library")

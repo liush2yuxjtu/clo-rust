@@ -205,11 +205,15 @@ fn nodes(state: &Value, max_depth: u64) -> Vec<Value> {
 
 pub(super) fn state(args: &Value, state: &mut Value) -> ToolResult {
     validate_window(state)?;
-    let max_nodes = args["max_nodes"].as_u64().unwrap_or(1500);
-    let max_depth = args["max_depth"].as_u64().unwrap_or(16);
-    if !(1..=5000).contains(&max_nodes) || !(1..=30).contains(&max_depth) {
-        return Err("max_nodes 1..5000 and max_depth 1..30 required".into());
-    }
+    let limit = |name, default, maximum| {
+        args.get(name)
+            .map_or(Some(default), Value::as_f64)
+            .filter(|value| (1.0..=maximum).contains(value) && value.fract() == 0.0)
+            .map(|value| value as u64)
+            .ok_or("max_nodes 1..5000 and max_depth 1..30 required")
+    };
+    let max_nodes = limit("max_nodes", 1500.0, 5000.0)?;
+    let max_depth = limit("max_depth", 16.0, 30.0)?;
     let mut nodes = nodes(state, max_depth);
     let truncated = nodes.len() > max_nodes as usize
         || max_depth < 2
