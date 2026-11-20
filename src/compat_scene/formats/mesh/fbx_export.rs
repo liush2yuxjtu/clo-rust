@@ -447,15 +447,19 @@ fn write_scene<'a>(
                     .unwrap_or("Default");
                 objects.push(material(material_id, name, fabric));
                 if let Some(fabric) = fabric.filter(|_| textured) {
-                    for (map, property) in [("base", "DiffuseColor"), ("normal", "NormalMap")] {
+                    for (map, property) in [
+                        ("base", "DiffuseColor"),
+                        ("normal", "NormalMap"),
+                        ("opacity", "TransparentColor"),
+                    ] {
                         if let Some(source) = fabric["texture_maps"][map]
                             .as_str()
                             .filter(|path| !path.is_empty())
                         {
                             let desaturated = map == "base" && fabric["base_texture_desaturated"] == true;
-                            let filename = if named_sidecars && map == "base" {
+                            let filename = if named_sidecars {
                                 let png = crate::compat_fit::png_for_export(Path::new(source), desaturated)?;
-                                super::write_colorway_image(path, fabric, &png)?
+                                super::write_colorway_image(path, fabric, map, &png)?
                             } else {
                                 write_texture(path, source, desaturated, files)?
                             };

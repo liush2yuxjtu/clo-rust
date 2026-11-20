@@ -48,14 +48,8 @@ fn write_bundle(
             .fabric_index
             .as_u64()
             .and_then(|id| fabric_by_index.get(&id));
-        let texture = fabric.and_then(|fabric| {
-            let path = fabric["texture_maps"]["base"].as_str()?;
-            (has_uv && !path.is_empty()).then_some((fabric, path))
-        });
-        let key = (
-            fabric.and_then(|fabric| fabric["index"].as_u64()),
-            texture.is_some(),
-        );
+        let textured = fabric.copied().filter(|_| has_uv);
+        let key = (fabric.and_then(|fabric| fabric["index"].as_u64()), textured.is_some());
         let id = if let Some(id) = materials.get(&key) {
             *id
         } else {
@@ -65,24 +59,37 @@ fn write_bundle(
                 mtl,
                 "newmtl material_{id}\nKd {r} {g} {b}\nd {alpha}\nillum 1"
             );
-            if let Some((fabric, source)) = texture {
-                let png = crate::compat_fit::png_for_export(
-                    Path::new(source), fabric["base_texture_desaturated"] == true,
-                )?;
-                let name = if named_sidecar {
-                    super::write_colorway_image(path, fabric, &png)?
-                } else {
-                    let name = format!("{stem}-{id}.png");
-                    let target = mtl_path.with_file_name(&name);
-                    let mut file = File::create_new(&target)
-                        .map_err(|error| format!("{}: {error}", target.display()))?;
-                    created.push(target);
-                    file.write_all(&png)
-                        .and_then(|_| file.sync_all())
-                        .map_err(|error| format!("write OBJ texture {name}: {error}"))?;
-                    name
-                };
-                let _ = writeln!(mtl, "map_Kd {name}");
+            if let Some(fabric) = textured {
+                for (kind, attribute) in [("base", "map_Kd"), ("normal", "map_bump")] {
+                    let Some(source) = super::texture_map(fabric, kind) else { continue };
+                    let png = crate::compat_fit::png_for_export(
+                        Path::new(source), kind == "base" && fabric["base_texture_desaturated"] == true,
+                    )?;
+                    let name = if named_sidecar {
+                        super::write_colorway_image(path, fabric, kind, &png)?
+                    } else {
+                        let name = if kind == "base" { format!("{stem}-{id}.png") }
+                            else { format!("{stem}-{id}-{kind}.png") };
+                        let target = mtl_path.with_file_name(&name);
+                        let mut file = File::create_new(&target)
+                            .map_err(|error| format!("{}: {error}", target.display()))?;
+                        created.push(target);
+                        file.write_all(&png)
+                            .and_then(|_| file.sync_all())
+                            .map_err(|error| format!("write OBJ texture {name}: {error}"))?;
+                        name
+                    };
+                    let _ = writeln!(mtl, "{attribute} {name}");
+                }
+                if named_sidecar {
+                    // CLO includes these source maps alongside the bundle without binding them in MTL.
+                    for kind in ["roughness", "opacity"] {
+                        if let Some(source) = super::texture_map(fabric, kind) {
+                            let png = crate::compat_fit::png_for_export(Path::new(source), false)?;
+                            super::write_colorway_image(path, fabric, kind, &png)?;
+                        }
+                    }
+                }
             }
             mtl.push('\n');
             materials.insert(key, id);

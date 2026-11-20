@@ -381,11 +381,11 @@ fn fabric_base_color(fabric: &Value) -> [f64; 4] {
     [rgb[0], rgb[1], rgb[2], alpha].map(|value| value.clamp(0.0, 1.0))
 }
 
-fn write_colorway_image(path: &Path, fabric: &Value, png: &[u8]) -> Result<String, String> {
-    let label = fabric["info"]["catalog"]["Texture"].as_str()
+fn write_colorway_image(path: &Path, fabric: &Value, kind: &str, png: &[u8]) -> Result<String, String> {
+    let label = fabric["native_texture_names"][kind].as_str()
         .filter(|name| !name.is_empty() && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '#'])
             && !name.chars().any(char::is_control))
-        .unwrap_or("base-color");
+        .unwrap_or(kind);
     for index in 0.. {
         let name = if index == 0 { format!("{label}.png") } else { format!("{label}-{index}.png") };
         let target = path.with_file_name(&name);
@@ -467,10 +467,9 @@ fn gltf_export(
             .as_u64()
             .and_then(|id| fabric_by_index.get(&id).map(|fabric| (id, *fabric)))
         {
-            let texture_path = fabric["texture_maps"]["base"]
-                .as_str()
-                .filter(|path| !path.is_empty() && !mesh.texcoords.is_empty());
-            let key = (id, texture_path.is_some(), mesh.rest_mm_uv);
+            let kinds = ["base", "normal"];
+            let paths = kinds.map(|kind| texture_map(fabric, kind).filter(|_| !mesh.texcoords.is_empty()));
+            let key = (id, paths.map(|path| path.is_some()), mesh.rest_mm_uv);
             let material_index = if let Some(index) = material_indices.get(&key) {
                 *index
             } else {
@@ -483,15 +482,16 @@ fn gltf_export(
                 }
                 let mut pbr = json!({"baseColorFactor": color, "metallicFactor": 0.0});
                 let mut material = json!({"name": fabric["name"].as_str().unwrap_or("Fabric"), "doubleSided": true});
-                if color[3] < 1.0 || texture_path.is_some() {
+                if color[3] < 1.0 || paths[0].is_some() {
                     material["alphaMode"] = json!("BLEND");
                 }
-                if let Some(path) = texture_path {
+                for (kind, path) in kinds.into_iter().zip(paths) {
+                    let Some(path) = path else { continue };
                     let png = crate::compat_fit::png_for_export(
-                        Path::new(path), fabric["base_texture_desaturated"] == true,
+                        Path::new(path), kind == "base" && fabric["base_texture_desaturated"] == true,
                     )?;
                     let image = if let Some(output) = external_images {
-                        json!({"uri": write_colorway_image(output, fabric, &png)?})
+                        json!({"uri": write_colorway_image(output, fabric, kind, &png)?})
                     } else {
                         let start = bin.len();
                         bin.extend_from_slice(&png);
@@ -501,13 +501,20 @@ fn gltf_export(
                         json!({"bufferView": view, "mimeType": "image/png"})
                     };
                     images.push(image);
-                    pbr["baseColorTexture"] = json!({"index": textures.len()});
-                    if let Some(scale) = base_texture_scale(fabric).filter(|_| mesh.rest_mm_uv) {
-                        pbr["baseColorTexture"]["extensions"] =
-                            json!({"KHR_texture_transform": {"scale": scale}});
+                    let mut reference = json!({"index": textures.len()});
+                    if let Some(scale) = texture_scale(fabric, kind).filter(|_| mesh.rest_mm_uv) {
+                        reference["extensions"] = json!({"KHR_texture_transform": {"scale": scale}});
                         texture_transform = true;
                     }
                     textures.push(json!({"source": images.len() - 1}));
+                    if kind == "normal" {
+                        if let Some(strength) = fabric["native_normal_strength"].as_f64() {
+                            reference["scale"] = json!(strength);
+                        }
+                        material["normalTexture"] = reference;
+                    } else {
+                        pbr["baseColorTexture"] = reference;
+                    }
                 }
                 material["pbrMetallicRoughness"] = pbr;
                 let index = materials.len();
@@ -671,9 +678,15 @@ fn export_geometry(state: &Value, include_avatar: bool) -> Result<(Vec<Mesh>, us
     Ok((meshes, garment_mesh_count))
 }
 
-fn base_texture_scale(fabric: &Value) -> Option<[f64; 2]> {
-    fabric["texture_maps"]["base"].as_str().filter(|path| !path.is_empty())?;
-    let scale: [f64; 2] = serde_json::from_value(fabric["native_base_texture_size_mm"].clone()).ok()?;
+fn texture_map<'a>(fabric: &'a Value, kind: &str) -> Option<&'a str> {
+    fabric["texture_maps"][kind].as_str().filter(|path| !path.is_empty())
+}
+
+fn texture_scale(fabric: &Value, kind: &str) -> Option<[f64; 2]> {
+    texture_map(fabric, kind)?;
+    let size = fabric["native_texture_sizes_mm"].get(kind)
+        .or_else(|| (kind == "base").then(|| &fabric["native_base_texture_size_mm"]))?;
+    let scale: [f64; 2] = serde_json::from_value(size.clone()).ok()?;
     scale.iter().all(|n| n.is_finite() && *n > 0.0).then(|| scale.map(f64::recip))
 }
 
@@ -684,7 +697,7 @@ fn export_uvs<'a>(meshes: &'a [Mesh], fabrics: &[Value], use_gltf: bool) -> Cow<
     let mut prepared = meshes.to_vec();
     for mesh in prepared.iter_mut().filter(|mesh| mesh.rest_mm_uv) {
         let scale = fabrics.iter().find(|fabric| fabric["index"] == mesh.fabric_index)
-            .and_then(base_texture_scale);
+            .and_then(|fabric| texture_scale(fabric, "base").or_else(|| texture_scale(fabric, "normal")));
         if let Some([su, sv]) = scale.filter(|_| !mesh.texcoords.is_empty()) {
             let center = std::array::from_fn::<_, 2, _>(|axis| {
                 let values = mesh.texcoords.iter().map(|point| point[axis]);

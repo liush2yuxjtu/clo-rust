@@ -457,6 +457,14 @@ folder. After saving and reopening, compare both RGBA pixel grids and
 effective UV bounds for OBJ, FBX, GLB and glTF. Inspect external PNG naming
 for OBJ, FBX and glTF and verify that GLB embeds the images.
 
+Run `--verify-native-colorway-normals` with `CLO_NATIVE_NORMAL_EXPORTS` set
+to the Boat normal-map capture. Check the two normal maps in OBJ's MTL,
+FBX material bindings, and glTF/GLB's `normalTexture`, including strength and
+repeat scale. Set `CLO_NATIVE_PBR_EXPORTS` to the capture with roughness and
+opacity as well to compare OBJ sidecar names and pixels, and FBX opacity
+texture binding. Record the official glTF file list separately because
+the tested CLO session returned both single-file and per-colorway results.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.

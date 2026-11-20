@@ -60,19 +60,17 @@ pub(super) fn base_texture_label<'a>(face: &Fields<'a>) -> Option<&'a str> {
         .ok()?
         .into_iter()
         .find(|texture| integer(texture, b"enType") == Ok(0))?;
-    let original = std::str::from_utf8(texture.get(b"qsFileNameUTF8", BYTE_TYPE).ok()?).ok()?;
-    Path::new(original.rsplit(['/', '\\']).next()?)
-        .file_stem()?
-        .to_str()
+    texture_label(&texture)
 }
 
-fn base_texture_size_mm(material: &Fields<'_>) -> Option<[f64; 2]> {
-    let (faces, legacy) = face_records(material).ok()?;
-    let (_, face) = faces.iter().enumerate()
-        .find(|(index, face)| face_type(face, *index, legacy) == Ok(0))?;
-    let texture = textures(face).ok()?.into_iter().find(|texture| integer(texture, b"enType") == Ok(0))?;
+fn texture_label<'a>(texture: &Fields<'a>) -> Option<&'a str> {
+    let original = std::str::from_utf8(texture.get(b"qsFileNameUTF8", BYTE_TYPE).ok()?).ok()?;
+    Path::new(original.rsplit(['/', '\\']).next()?).file_stem()?.to_str()
+}
+
+fn texture_size_mm(texture: &Fields<'_>) -> Option<[f64; 2]> {
     // The recorded straight, untranslated mapping uses a physical repeat size in millimetres.
-    if integer(&texture, b"enMappingType") != Ok(0)
+    if integer(texture, b"enMappingType") != Ok(0)
         || texture.get(b"fSignedAngle", 6).ok()? != 0f32.to_le_bytes()
         || texture.get(b"v2Translation", 10).ok()? != [0; 8]
     {
@@ -153,7 +151,9 @@ fn load_image<R: Read + Seek>(archive: &mut ZipArchive<R>, name: &str) -> Result
     cache_image(&bytes)
 }
 
-fn front_texture_refs<'a>(material: &Fields<'a>) -> Result<Vec<(&'static str, &'a str)>, String> {
+fn front_texture_refs<'a>(
+    material: &Fields<'a>,
+) -> Result<Vec<(&'static str, &'a str, Fields<'a>)>, String> {
     let (faces, legacy_front) = face_records(material)?;
     let mut refs = Vec::new();
     for (index, face) in faces.iter().enumerate() {
@@ -164,7 +164,7 @@ fn front_texture_refs<'a>(material: &Fields<'a>) -> Result<Vec<(&'static str, &'
             let kind = integer(&texture, b"enType")?;
             if let Some((key, _)) = TYPES.iter().find(|(_, type_id)| *type_id == kind) {
                 if let Ok(name) = filename(&texture) {
-                    refs.push((*key, name));
+                    refs.push((*key, name, texture));
                 }
             }
         }
@@ -179,7 +179,7 @@ pub(super) fn fabric_maps<R: Read + Seek>(
     let mut maps = json!({});
     let mut warnings = Vec::new();
     let mut total = 0u64;
-    for (key, name) in front_texture_refs(material)? {
+    for (key, name, _) in front_texture_refs(material)? {
         let size = archive.by_name(name).map_or(0, |file| file.size());
         if total.saturating_add(size) > 256 * 1024 * 1024 {
             return Err("fabric texture cache exceeded 256 MiB".into());
@@ -209,13 +209,18 @@ pub(super) fn hydrate<R: Read + Seek>(
     let mut totals = 0u64;
     let mut warnings = Vec::new();
     let mut hydrate = |entry: &mut Value, material: &Fields<'_>| -> Result<(), String> {
-        if let Some(size) = base_texture_size_mm(material) {
-            entry["native_base_texture_size_mm"] = json!(size);
+        let (faces, legacy) = face_records(material)?;
+        if let Some((_, face)) = faces.iter().enumerate()
+            .find(|(index, face)| face_type(face, *index, legacy) == Ok(0))
+        {
+            if let Ok(intensity) = integer(face, b"iNormalIntensityInPercentage") {
+                entry["native_normal_strength"] = json!(f64::from(intensity) / 100.0);
+            }
         }
         if front_desaturated(material)? {
             entry["base_texture_desaturated"] = json!(true);
         }
-        for (key, name) in front_texture_refs(material)? {
+        for (key, name, texture) in front_texture_refs(material)? {
             let cached = if let Some(path) = cache.get(name) {
                 path.clone()
             } else {
@@ -238,6 +243,12 @@ pub(super) fn hydrate<R: Read + Seek>(
                 }
             };
             entry["texture_maps"][key] = json!(cached);
+            if let Some(label) = texture_label(&texture) {
+                entry["native_texture_names"][key] = json!(label);
+            }
+            if let Some(size) = texture_size_mm(&texture) {
+                entry["native_texture_sizes_mm"][key] = json!(size);
+            }
         }
         Ok(())
     };

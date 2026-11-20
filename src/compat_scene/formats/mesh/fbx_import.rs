@@ -105,6 +105,7 @@ fn fabric(material: &Material, id: usize, directory: &Path, warnings: &mut Vec<S
     for (kind, map) in [
         ("base", &material.pbr.base_color),
         ("normal", &material.pbr.normal_map),
+        ("opacity", &material.fbx.transparency_color),
     ] {
         if let Some(texture) = &map.texture {
             if let Some(path) = external_image(directory, texture) {

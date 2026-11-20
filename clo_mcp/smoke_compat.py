@@ -3957,6 +3957,96 @@ async def verify_native_colorway_textures():
     print(json.dumps({"case": "native multi-colorway base textures", "formats": checked}))
 
 
+async def verify_native_colorway_normals():
+    from io import BytesIO
+    from PIL import Image
+
+    reference = Path(os.environ["CLO_NATIVE_NORMAL_EXPORTS"]).resolve(strict=True)
+    fixture = reference / "multi-colorway-normal.zpac"
+    pbr_capture = os.environ.get("CLO_NATIVE_PBR_EXPORTS")
+    names = ("Original", "Alternate")
+
+    def pixels(data):
+        with Image.open(BytesIO(data)) as image:
+            return image.size, image.convert("RGBA").tobytes()
+
+    def gltf_normal(path):
+        model, binary = read_gltf_export(path)
+        normal = model["materials"][0]["normalTexture"]
+        image = model["images"][model["textures"][normal["index"]]["source"]]
+        if "uri" in image:
+            data = path.with_name(image["uri"]).read_bytes()
+        else:
+            view = model["bufferViews"][image["bufferView"]]
+            start = view.get("byteOffset", 0)
+            data = binary[start:start + view["byteLength"]]
+        return pixels(data), normal["scale"], normal["extensions"]["KHR_texture_transform"]["scale"]
+
+    with TemporaryDirectory(prefix="clo-colorway-normal-") as directory:
+        root = Path(directory)
+
+        async def read_fbx_map(path, kind):
+            async with open_backend("rust") as session:
+                await json_result(session, "scene_open", {"path": str(path)})
+                copy = root / "copied.clorust"
+                await json_result(session, "scene_save", {"path": str(copy), "thumbnail": False})
+                scene = json.loads(copy.read_text())["scene"]
+                return pixels(Path(scene["fabrics"][0]["texture_maps"][kind]).read_bytes())
+
+        async with open_backend("rust") as session:
+            await json_result(session, "scene_open", {"path": str(fixture)})
+            before = await json_result(session, "scene_info")
+            expected = [pixels((reference / "normal-obj" / f"pbr-normal-{i}.png").read_bytes())
+                        for i in range(2)]
+            assert expected[0] != expected[1]
+            for ext in ("obj", "fbx", "glb", "gltf"):
+                base = root / ext / f"channels.{ext}"
+                await json_result(session, "scene_export", {"path": str(base), "colorways": True})
+                for index, colorway in enumerate(names):
+                    output = base.with_stem(f"channels_{colorway}")
+                    if ext == "obj":
+                        line = next(line for line in output.with_suffix(".mtl").read_text().splitlines()
+                                    if line.startswith("map_bump "))
+                        assert line.split(maxsplit=1)[1] == f"pbr-normal-{index}.png"
+                        result = pixels(output.with_name(f"pbr-normal-{index}.png").read_bytes())
+                    elif ext == "fbx":
+                        result = await read_fbx_map(output, "normal")
+                        assert result == await read_fbx_map(reference / "normal-fbx" / output.name, "normal")
+                    else:
+                        if ext == "gltf" and index == 1:
+                            native = reference / "normal-gltf" / "channels.gltf"
+                        else:
+                            native = reference / "pbr-glb" / f"normal-control-0_{colorway}.glb"
+                        result, strength, uv_scale = gltf_normal(output)
+                        native_pixels, native_strength, native_scale = gltf_normal(native)
+                        assert result == native_pixels
+                        assert abs(strength - native_strength) < 1e-6
+                        assert all(abs(a - b) < 1e-6 for a, b in zip(uv_scale, native_scale, strict=True))
+                    assert result == expected[index], (ext, colorway)
+            assert await json_result(session, "scene_info") == before
+
+            if pbr_capture:
+                capture = Path(pbr_capture).resolve(strict=True)
+                fixture = capture / "multi-colorway-pbr.zpac"
+                await json_result(session, "scene_open", {"path": str(fixture)})
+                for ext in ("obj", "fbx"):
+                    base = root / f"pbr-{ext}" / f"channels.{ext}"
+                    await json_result(session, "scene_export", {"path": str(base), "colorways": True})
+                    official = capture / f"pbr-{ext}"
+                    assert {p.name for p in base.parent.iterdir()} == {p.name for p in official.iterdir()}
+                    for image in base.parent.glob("*.png"):
+                        assert pixels(image.read_bytes()) == pixels((official / image.name).read_bytes())
+                    if ext == "fbx":
+                        for colorway in names:
+                            output = base.with_stem(f"channels_{colorway}")
+                            assert await read_fbx_map(output, "opacity") == await read_fbx_map(
+                                official / output.name, "opacity",
+                            )
+    print(json.dumps({"case": "native normal maps", "formats": ["obj", "fbx", "glb", "gltf"],
+                      "colorways": 2, "pixel_exact": True, "gltf_normal_strength_and_scale": True,
+                      "scene_unchanged": True, "obj_and_fbx_pbr_sidecars": bool(pbr_capture)}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -4312,6 +4402,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-colorway-textures", action="store_const", dest="comparison",
                              const=verify_native_colorway_textures,
                              help="verify textured native exports against a Boat reference capture")
+    comparisons.add_argument("--verify-native-colorway-normals", action="store_const", dest="comparison",
+                             const=verify_native_colorway_normals,
+                             help="compare exported normal maps with the Boat reference")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
@@ -4323,6 +4416,7 @@ if __name__ == "__main__":
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
                                 verify_native_colorway_exports, verify_native_colorway_textures,
+                                verify_native_colorway_normals,
                                 verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,
