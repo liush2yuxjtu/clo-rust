@@ -55,7 +55,8 @@ impl Panel {
             let length = edge_length(edge, next);
             low = low.min(y);
             high = high.max(y);
-            edges.push(json!({"name":edge.name,"line":line,"length":rounded_mm(length)}));
+            edges.push(json!({"name":edge.name,"line":line,"length":rounded_mm(length),
+                "raw_length":length}));
         }
         json!({"name":self.name,"role":self.role,"points":points,"edges":edges,
             "arrangement":self.arrange,"x_percent":50,"offset_mm":30,"centre_height":rounded_mm((low+high)/2.0),
@@ -290,30 +291,20 @@ fn hem_height(body: &Value, spec: &Value) -> Result<f64, String> {
     Ok(height)
 }
 
-fn neck_shape(kind: &str, front: bool) -> Result<(f64, f64, bool), String> {
-    let curve = match (kind, front) {
-        ("round", true) => (85.0, 5.0, true),
-        ("round", false) => (25.0, 0.0, true),
-        ("crew", _) => (70.0, 0.0, true),
-        ("scoop", true) => (135.0, 10.0, true),
-        ("scoop", false) => (90.0, 10.0, true),
-        ("v", true) => (170.0, 5.0, false),
-        ("v", false) => (150.0, 5.0, false),
-        ("deep-v", true) => (250.0, 8.0, false),
-        ("deep-v", false) => (260.0, 8.0, false),
-        ("square", _) => (if front { 130.0 } else { 60.0 }, 25.0, false),
-        ("sweetheart", true) => (150.0, 30.0, true),
-        ("boat", _) => (40.0, 55.0, true),
-        ("high", true) => (35.0, 0.0, true),
-        ("high", false) => (15.0, 0.0, true),
-        ("open", false) => (330.0, 0.0, true),
-        _ => {
-            return Err(format!(
-                "Rust drafting for neckline {kind:?} is not implemented"
-            ))
-        }
-    };
-    Ok(curve)
+fn front_neck_shape(kind: &str) -> (f64, f64) {
+    match kind {
+        "crew" => (70.0, 0.0),
+        "scoop" => (135.0, 10.0),
+        "v" => (170.0, 5.0),
+        "deep-v" => (250.0, 8.0),
+        "square" => (130.0, 25.0),
+        "sweetheart" => (150.0, 30.0),
+        "boat" => (40.0, 55.0),
+        "high" => (35.0, 0.0),
+        "off-shoulder" => (200.0, 90.0),
+        "halter" => (120.0, -20.0),
+        _ => (85.0, 5.0),
+    }
 }
 
 fn edge_with_points(name: &'static str, start: [f64; 2], intermediate: Vec<[f64; 3]>) -> Edge {
@@ -371,13 +362,26 @@ fn armhole(name: &'static str, a: [f64; 2], b: [f64; 2], downward: bool) -> Edge
     edge_with_points(name, a, cp)
 }
 
-fn neckline(kind: &str, front: bool, w: f64, hps: f64) -> Result<Edge, String> {
-    let (depth, _, _) = neck_shape(kind, front)?;
+fn neckline(kind: &str, front: bool, w: f64, hps: f64) -> Edge {
+    let depth = if front {
+        front_neck_shape(kind).0
+    } else {
+        match kind {
+            "scoop" => 90.0,
+            "v" => 150.0,
+            "deep-v" => 260.0,
+            "open" => 330.0,
+            "high" => 15.0,
+            "square" => 60.0,
+            _ => 25.0,
+        }
+    };
     let y = hps - depth;
     let cp = match kind {
-        "v" | "deep-v" | "halter" => vec![[0.0, y, 0.0]],
+        "v" | "deep-v" => vec![[0.0, y, 0.0]],
+        "halter" if front => vec![[0.0, y, 0.0]],
         "square" => vec![[-w, y, 0.0], [w, y, 0.0]],
-        "sweetheart" => vec![
+        "sweetheart" if front => vec![
             [-w - 5.0, y + 45.0, 2.0],
             [-w * 0.5, y - 5.0, 2.0],
             [0.0, y + 35.0, 0.0],
@@ -402,7 +406,7 @@ fn neckline(kind: &str, front: bool, w: f64, hps: f64) -> Result<Edge, String> {
             [w * 0.6, hps - depth * 0.85, 2.0],
         ],
     };
-    Ok(edge_with_points("neckline", [-w, hps], cp))
+    edge_with_points("neckline", [-w, hps], cp)
 }
 
 fn curved_hem(hip_width: f64, hip_y: f64, hem_width: f64, hem_y: f64) -> (Edge, f64) {
@@ -545,7 +549,7 @@ fn body_panel(
     if open_top {
         edges.push(edge(if front {"top_side_L"} else {"top_side_R"}, bust - 6.0, top_y));
     } else {
-        let (_, extra_width, _) = neck_shape(string(spec, "neckline", "round"), true)?;
+        let (_, extra_width) = front_neck_shape(string(spec, "neckline", "round"));
         let neck = (m.neck + extra_width).min(m.shoulder - 85.0);
         edges.extend([
             edge(s1, neck, m.top_y),
@@ -571,7 +575,7 @@ fn body_panel(
         edges.extend([
             armhole(a2, [-bust, underarm_y], [-m.shoulder, m.shoulder_y], false),
             edge(s2, -m.shoulder, m.shoulder_y),
-            neckline(kind, front, neck, m.top_y)?,
+            neckline(kind, front, neck, m.top_y),
         ]);
     }
     let mut panel = Panel {
@@ -1196,30 +1200,48 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             notes.push(json!("standalone skirt: the waist edge is held by elastic so it stays on the body"));
         }
     }
-    let mut warnings: Vec<_> = seams
-        .iter()
-        .filter_map(|s| {
-            let a = number(s, "len_a", 0.0);
-            let b = number(s, "len_b", 0.0);
-            (!boolean(s, "gather", false) && a.min(b) > 0.0 && a.max(b) / a.min(b) > 1.08).then(
-                || {
-                    format!(
-                        "seam {:?} to {:?} differs by {:.0}%",
-                        s["piece_a"],
-                        s["piece_b"],
-                        100.0 * (a.max(b) / a.min(b) - 1.0)
-                    )
-                },
-            )
-        })
-        .collect();
-    if tiered && has_bodice {
-        let joins = [
-            "seam Front.hem <-> Tier1_Front.waist: landmark tokens do not match (waist_L->waist_R vs t0_R->t0_L); assuming same direction",
-            "seam Back.hem <-> Tier1_Back.waist: landmark tokens do not match (waist_R->waist_L vs t0_L->t0_R); assuming same direction",
-        ];
-        // The reference planner reports these joins at plan creation and again at readback.
-        warnings.extend(joins.into_iter().chain(joins).map(str::to_owned));
+    let mut warnings = Vec::new();
+    let tiered_waist_warnings = [
+        "seam Front.hem <-> Tier1_Front.waist: landmark tokens do not match (waist_L->waist_R vs t0_R->t0_L); assuming same direction",
+        "seam Back.hem <-> Tier1_Back.waist: landmark tokens do not match (waist_R->waist_L vs t0_L->t0_R); assuming same direction",
+    ];
+    for join in &seams {
+        if tiered && has_bodice {
+            if join["piece_a"] == "Front" && join["piece_b"] == "Tier1_Front" {
+                warnings.push(tiered_waist_warnings[0].to_owned());
+            } else if join["piece_a"] == "Back" && join["piece_b"] == "Tier1_Back" {
+                warnings.push(tiered_waist_warnings[1].to_owned());
+            }
+        }
+        if join["gather"] == true {
+            continue;
+        }
+        let find_edge = |piece: &str, line: &str| {
+            let panel = pieces.iter().find(|panel| panel["name"] == join[piece]).unwrap();
+            &panel["edges"][join[line].as_u64().unwrap() as usize]
+        };
+        let edge_a = find_edge("piece_a", "line_a");
+        let edge_b = find_edge("piece_b", "line_b");
+        let a = edge_a["raw_length"].as_f64().unwrap();
+        let b = edge_b["raw_length"].as_f64().unwrap();
+        let ratio = if a.min(b) > 0.0 { a.max(b) / a.min(b) } else { 99.0 };
+        if ratio > 1.08 {
+            warnings.push(format!(
+                "seam {}.{} ({a:.0}mm) <-> {}.{} ({b:.0}mm) differs by {:.0}%",
+                join["piece_a"].as_str().unwrap(),
+                edge_a["name"].as_str().unwrap(),
+                join["piece_b"].as_str().unwrap(),
+                edge_b["name"].as_str().unwrap(),
+                100.0 * (ratio - 1.0)
+            ));
+        }
+    }
+    // The reference resolves seams during plan creation and when producing its response.
+    warnings.extend_from_within(..);
+    for panel in &mut pieces {
+        for edge in array_mut(panel, "edges") {
+            edge.as_object_mut().unwrap().remove("raw_length");
+        }
     }
     let mut material = assets::selected_material(string(&spec, "fabric", ""))?;
     material["color"] = json!(assets::parse_color(&spec["color"])?);

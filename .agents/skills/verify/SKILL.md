@@ -122,6 +122,13 @@ readback. The split-dress notes record a known post-simulation join difference.
 For the Rust build path, build a strapless top, check elastic constraints in
 `simulate`, and repeat with straps to verify that the top-edge elastic is absent.
 
+Use `--compare-neckline-and-sleeve-preview` for eight standard-measurement tops.
+The test compares every response field for off-shoulder and halter necklines,
+unknown neckline fallback, and bishop, flutter, bell, and puff sleeve previews.
+It includes seam warning text, order, and counts and checks that invalid input
+is rejected and `garment_last_spec` remains empty. This comparison uses both
+MCP backends without needing the CLO bridge.
+
 Use `--compare-gathered-draft-preview` for standalone gathered skirts,
 tiered skirts and dresses, empire, babydoll, drop-waist, smock, dirndl and wrap
 presets. Compare complete preview results, including tier layers, intentional

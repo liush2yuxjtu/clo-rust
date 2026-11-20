@@ -725,6 +725,38 @@ async def compare_strapped_draft_preview():
                       "last_spec_unchanged": True, "invalid_spec_error": "pass"}))
 
 
+async def compare_neckline_and_sleeve_preview():
+    fixture = {"garment": "top", "length": "waist"}
+    cases = [
+        {"neckline": "off-shoulder"},
+        {"neckline": "halter"},
+        {"neckline": "off-shoulder", "back_neckline": "boat"},
+        {"neckline": "custom neckline", "back_neckline": "custom back"},
+        {"sleeve": "long", "sleeve_style": "bishop"},
+        {"sleeve": "long", "sleeve_style": "flutter"},
+        {"sleeve": "long", "sleeve_style": "bell"},
+        {"sleeve": "long", "sleeve_style": "puff"},
+    ]
+    report = []
+    async with open_backend("official") as official, open_backend("rust") as rust:
+        for session in (official, rust):
+            await inspect_contract(session)
+        for changes in cases:
+            request = {"spec": fixture | changes, "use_scene_measurements": False}
+            expected = await json_result(official, "garment_plan_preview", request)
+            observed = await json_result(rust, "garment_plan_preview", request)
+            assert expected.keys() == observed.keys(), changes
+            for key in expected:
+                assert expected[key] == observed[key], (changes, key, expected[key], observed[key])
+            report.append(changes | {"pieces": len(observed["pieces"]), "warnings": len(observed["warnings"])})
+        for session in (official, rust):
+            bad = await session.call_tool("garment_plan_preview", {"spec": []})
+            assert bad.isError
+            assert await json_result(session, "garment_last_spec") == {"spec": None, "pieces": []}
+    print(json.dumps({"tool": "garment_plan_preview", "case": "necklines and sleeve seam warnings",
+                      "comparisons": report, "last_spec_unchanged": True, "invalid_spec_error": "pass"}))
+
+
 async def compare_gathered_draft_preview():
     cases = (
         {"garment": "skirt", "silhouette": "tiered", "tiers": 4, "gather_ratio": 1.25, "length": "midi"},
@@ -1127,6 +1159,10 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-strapped-draft-preview", action="store_const", dest="comparison",
                              const=compare_strapped_draft_preview,
                              help="compare offline strapless and strap garment draft previews")
+    comparisons.add_argument("--compare-neckline-and-sleeve-preview",
+                             action="store_const", dest="comparison",
+                             const=compare_neckline_and_sleeve_preview,
+                             help="compare neckline fallbacks and sleeve seam warnings")
     comparisons.add_argument("--compare-gathered-draft-preview", action="store_const", dest="comparison",
                              const=compare_gathered_draft_preview,
                              help="compare offline gathered and tiered garment draft previews")
