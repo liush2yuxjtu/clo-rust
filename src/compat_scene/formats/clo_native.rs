@@ -10,6 +10,7 @@ use zip::ZipArchive;
 
 pub(super) const ZPRJ: &[u8] = b" ZPRJ       CLO ";
 pub(super) const ZPAC: &[u8; 16] = b" ZPAC       CLO ";
+pub(super) const AVT: &[u8; 16] = b" AVT        CLO ";
 const NAME: &[u8] = b"qsNameUTF8";
 const CATEGORY: &[u8] = b"qsCategoryForDXFUTF8";
 const DYNAMICS: &[u8] = b"mapPatternDynamics";
@@ -75,7 +76,7 @@ pub(super) fn open_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Resu
     Ok(archive)
 }
 
-fn optional_member<R: Read + Seek>(
+pub(super) fn optional_member<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     extension: &str,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
@@ -100,6 +101,14 @@ fn optional_member<R: Read + Seek>(
         }
         i
     };
+    archive_member(archive, index, &suffix).map(Some)
+}
+
+fn archive_member<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    index: usize,
+    suffix: &str,
+) -> Result<(String, Vec<u8>), String> {
     let entry = archive
         .by_index(index)
         .map_err(|e| format!("open native {suffix} member: {e}"))?;
@@ -121,7 +130,7 @@ fn optional_member<R: Read + Seek>(
     if bytes.len() != expected {
         return Err(format!("unexpected native {suffix} payload length"));
     }
-    Ok(Some((name, bytes)))
+    Ok((name, bytes))
 }
 
 pub(super) fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &str) -> Result<Vec<u8>, String> {
@@ -130,21 +139,40 @@ pub(super) fn member<R: Read + Seek>(archive: &mut ZipArchive<R>, extension: &st
         .ok_or_else(|| format!("missing .{extension} payload in native CLO archive"))
 }
 
+pub(super) fn avatar_members<R: Read + Seek>(archive: &ZipArchive<R>) -> Result<Vec<usize>, String> {
+    let indices: Vec<_> = archive.file_names_raw().enumerate()
+        .filter_map(|(index, name)| name.get(name.len().saturating_sub(4)..)
+            .filter(|tail| tail.eq_ignore_ascii_case(b".avt")).map(|_| index))
+        .collect();
+    if indices.len() > 32 {
+        return Err("native project has more than 32 embedded avatars".into());
+    }
+    Ok(indices)
+}
+
+pub(super) fn avatar_payload<R: Read + Seek>(
+    archive: &mut ZipArchive<R>, index: usize,
+) -> Result<(String, Vec<u8>), String> {
+    archive_member(archive, index, ".avt")
+}
+
 pub(in crate::compat_scene) fn read_project_avatar_dan(
     path: &Path,
-) -> Result<Option<(String, Vec<u8>)>, String> {
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut project = open_archive(bounded_file(path)?, ZPRJ)?;
-    let Some((member_name, avatar)) = optional_member(&mut project, "avt")? else {
-        return Ok(None);
-    };
-    let base_name = member_name.rsplit(['/', '\\']).next().unwrap_or("avatar");
-    let name = Path::new(base_name)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("avatar")
-        .to_owned();
-    let mut archive = open_archive(Cursor::new(avatar), b" AVT        CLO ")?;
-    Ok(Some((name, member(&mut archive, "dan")?)))
+    let mut avatars = Vec::new();
+    let mut payload_bytes = 0u64;
+    for index in avatar_members(&project)? {
+        let (name, avatar) = avatar_payload(&mut project, index)?;
+        let mut archive = open_archive(Cursor::new(avatar), AVT)?;
+        let dan = member(&mut archive, "dan")?;
+        payload_bytes += dan.len() as u64;
+        if payload_bytes > ARCHIVE_LIMIT {
+            return Err("embedded avatar payloads exceed 512 MiB".into());
+        }
+        avatars.push((name, dan));
+    }
+    Ok(avatars)
 }
 
 pub(super) fn bounded_file(path: &Path) -> Result<std::io::BufReader<File>, String> {

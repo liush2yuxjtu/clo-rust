@@ -3,6 +3,7 @@ mod dxf;
 mod mesh;
 mod native_materials;
 mod native_compose;
+mod native_avatar_ids;
 pub(super) mod native_fabric;
 mod native_pose;
 mod native_recolor;

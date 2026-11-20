@@ -39,6 +39,7 @@ pub(super) struct ColorwayTextureEdit {
 pub(super) struct TextureAssets {
     pub replaced: HashMap<String, Vec<u8>>,
     pub added: BTreeMap<String, Vec<u8>>,
+    pub removed: HashSet<String>,
 }
 
 fn integer(field: &Fields<'_>, key: &[u8]) -> Result<i32, String> {

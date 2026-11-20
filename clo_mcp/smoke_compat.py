@@ -12,6 +12,7 @@ import shutil
 import struct
 import sys
 import zipfile
+from io import BytesIO
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -6411,18 +6412,36 @@ async def compare_live_composed_zprj():
     assert root.is_dir()
     cases = (("sparse", project, [0, 0, 2, 2], [0, 0, 1, 1]),
              ("avatar", avatar_project, [1, 0, 2, 2], [1, 0, 2, 2]))
+    new_avatar = os.environ.get("CLO_ZPRJ_AVATAR_FIXTURE")
+    replacement = os.environ.get("CLO_ZPRJ_REPLACEMENT_AVATAR")
+    if new_avatar:
+        assert Path(new_avatar).is_file()
+        cases += (("avatar_add", project, [0, 0, 1, 1], [0, 0, 1, 1]),
+                  ("avatar_append_textures", project, [0, 0, 2, 1], [0, 0, 2, 1]),
+                  ("avatar_append", avatar_project, [1, 0, 3, 2], [1, 0, 3, 2]))
+    if replacement:
+        assert Path(replacement).is_file()
+        cases += (("avatar_replace", avatar_project, [1, 0, 2, 2], [1, 0, 2, 2]),)
     if selected := os.environ.get("CLO_COMPOSED_ZPRJ_CASE"):
         cases = tuple(case for case in cases if case[0] == selected)
         assert cases, f"unknown composed ZPRJ case {selected}"
 
     async def identity(session, path, avatars):
         scene = await json_result(session, "scene_info")
-        assert (scene["project_path"], scene["avatars"]) == (str(path), avatars)
+        assert (scene["project_path"], scene["avatars"]) == (str(path), avatars), (
+            str(path), avatars, scene["project_path"], scene["avatars"])
 
     def embedded_avatars(path):
         with zipfile.ZipFile(path) as archive:
             return [hashlib.sha256(archive.read(name)).hexdigest()
                     for name in archive.namelist() if name.lower().endswith(".avt")]
+
+    def embedded_textures(path):
+        with zipfile.ZipFile(path) as archive:
+            garment_member = next(name for name in archive.namelist() if name.lower().endswith(".zpac"))
+            with zipfile.ZipFile(BytesIO(archive.read(garment_member))) as clothes:
+                return {name: hashlib.sha256(clothes.read(name)).hexdigest()
+                        for name in clothes.namelist() if name.startswith("Woven_Denim_")}
 
     reports = []
     async with open_backend("official") as clo, open_backend("rust") as rust:
@@ -6435,11 +6454,15 @@ async def compare_live_composed_zprj():
                 for backend, session in backends:
                     await json_result(session, "scene_clear", {"keep_avatar": False})
                     await json_result(session, "scene_open", {"path": str(initial)})
-                    avatars = (await json_result(session, "scene_info"))["avatars"]
-                    assert bool(avatars) == (label == "avatar")
                     if label == "sparse":
                         assert await composed_archive_api(session, "fabric_api.AddFabric", unused) == 1
-                    await json_result(session, "scene_open", {"path": str(garment), "mode": "append"})
+                    if label in ("avatar_add", "avatar_replace"):
+                        path = new_avatar if label == "avatar_add" else replacement
+                        await json_result(session, "scene_open", {"path": path, "mode": "replace"})
+                    appended = avatar_project if label in ("avatar_append", "avatar_append_textures") else garment
+                    await json_result(session, "scene_open", {"path": str(appended), "mode": "append"})
+                    avatars = (await json_result(session, "scene_info"))["avatars"]
+                    assert len(avatars) == (2 if label == "avatar_append" else int(label != "sparse"))
                     before = await read_composed_archive(session)
                     assert [panel["fabric_index"] for panel in before["patterns"]] == live_indices
                     target = root / f"{label}-{backend}.zprj"
@@ -6453,7 +6476,19 @@ async def compare_live_composed_zprj():
                         assert await read_composed_archive(session) == before
                     assert target.is_file()
                     if backend == "rust":
-                        assert embedded_avatars(target) == embedded_avatars(initial)
+                        avatar_payloads = embedded_avatars(initial)
+                        if label in ("avatar_add", "avatar_replace"):
+                            avatar_payloads = [hashlib.sha256(Path(path).read_bytes()).hexdigest()]
+                        if label == "avatar_append":
+                            saved_avatars = embedded_avatars(target)
+                            assert len(saved_avatars) == 2 and saved_avatars[0] == avatar_payloads[0]
+                            assert saved_avatars[1] != saved_avatars[0]
+                            avatar_payloads = saved_avatars
+                        if label == "avatar_append_textures":
+                            avatar_payloads = embedded_avatars(avatar_project)
+                            textures = embedded_textures(avatar_project)
+                            assert textures and embedded_textures(target) == textures
+                        assert embedded_avatars(target) == avatar_payloads
 
                     name = f"{root.name}-{label}-{backend}"
                     checkpoint = await json_result(session, "checkpoint_save", {"name": name})
@@ -6484,8 +6519,12 @@ async def compare_live_composed_zprj():
                             assert reopened == expected, (label, backend, reader, reopened, expected)
                             cross_opens += 1
                             if reader == "rust":
-                                pose = await snapshot_composed_archive(session, root / "composed-readback.clorust")
+                                portable = root / "composed-readback.clorust"
+                                pose = await snapshot_composed_archive(session, portable)
                                 assert len(pose[0]) == len(saved_indices)
+                                if label == "avatar_append" and backend == "rust":
+                                    saved = json.loads(portable.read_text())["scene"]
+                                    assert saved["avatar"]["mesh"] == saved["additional_avatars"][0]["mesh"]
                                 if geometry is None:
                                     geometry = pose
                                 assert pose == geometry, (label, backend, reader, file)

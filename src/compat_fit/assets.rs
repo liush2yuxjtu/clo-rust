@@ -383,9 +383,15 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("avatar");
     if extension == "avt" {
+        let stamp = crate::compat_scene::native_avatar_stamp(&path)?;
         let mut rest = avt::read(&path)?;
         let scene_name = rest.scene_name.take();
-        return avatar_from_avt(scene_name.as_deref().unwrap_or(name), Some(&path), rest);
+        let mut avatar = avatar_from_avt(scene_name.as_deref().unwrap_or(name), Some(&path), rest)?;
+        if crate::compat_scene::native_avatar_stamp(&path)? != stamp {
+            return Err("native avatar changed during import".into());
+        }
+        avatar["native_archive"] = json!({"path": path, "stamp": stamp});
+        return Ok(avatar);
     }
     let (points, faces) = match extension.as_str() {
         "obj" => avatar_obj(&path)?,
@@ -403,13 +409,22 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
     avatar_from_mesh(name, Some(&path), points, faces, None)
 }
 
-pub(crate) fn project_avatar(path: &Path) -> Result<Option<Value>, String> {
-    let Some((name, rest)) = avt::read_project(path)? else {
-        return Ok(None);
-    };
-    let mut avatar = avatar_from_avt(&name, None, rest)?;
-    avatar["source_project"] = json!(path);
-    Ok(Some(avatar))
+pub(crate) fn project_avatar(path: &Path) -> Result<Vec<Value>, String> {
+    let stamp = crate::compat_scene::native_avatar_stamp(path)?;
+    let records = avt::read_project(path)?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let source = path.canonicalize().map_err(|error| error.to_string())?;
+    if crate::compat_scene::native_avatar_stamp(&source)? != stamp {
+        return Err("native project changed during avatar import".into());
+    }
+    records.into_iter().map(|(name, member, rest)| {
+        let mut avatar = avatar_from_avt(&name, None, rest)?;
+        avatar["source_project"] = json!(path);
+        avatar["native_archive"] = json!({"path": source, "stamp": stamp, "member": member});
+        Ok(avatar)
+    }).collect()
 }
 
 fn avatar_from_avt(name: &str, path: Option<&Path>, rest: avt::RestMesh) -> Result<Value, String> {

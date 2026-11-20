@@ -146,8 +146,12 @@ pub(crate) fn read_native_archive_member(
 
 pub(crate) fn read_project_avatar_dan(
     path: &std::path::Path,
-) -> Result<Option<(String, Vec<u8>)>, String> {
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     formats::clo_native::read_project_avatar_dan(path)
+}
+
+pub(crate) fn native_avatar_stamp(path: &std::path::Path) -> Result<Value, String> {
+    formats::native_save::stamp(path)
 }
 
 pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64, clear_opacity: bool) {

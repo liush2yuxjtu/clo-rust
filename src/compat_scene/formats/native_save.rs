@@ -1,9 +1,9 @@
 //! Preserve proprietary scene payloads while updating verified editable fields.
 
 use super::{
-    clo_native::{member, open_archive, ARCHIVE_LIMIT, ZPAC, ZPRJ},
+    clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
     native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_compose, native_materials, native_recolor, native_textures, write,
+    native_avatar_ids::AvatarIdentities, native_compose, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use native_textures::{ColorwayTextureEdit, TextureAssets};
@@ -18,7 +18,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 pub(in crate::compat_scene) const SOURCE: &str = "native_archive_source";
 
-fn stamp(path: &Path) -> Result<Value, String> {
+pub(in crate::compat_scene) fn stamp(path: &Path) -> Result<Value, String> {
     let meta = fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if !meta.is_file() || meta.len() > ARCHIVE_LIMIT {
         return Err("native source must be a file no larger than 512 MiB".into());
@@ -461,19 +461,23 @@ fn replace_member(
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     zip.set_raw_comment(source.comment().into())
         .map_err(|error| error.to_string())?;
+    let added_names: HashSet<_> = assets.added.keys().map(|name| name.to_ascii_lowercase()).collect();
     let mut replaced = false;
     for index in 0..source.len() {
         let mut file = source.by_index(index).map_err(|error| error.to_string())?;
         let name = file.name_raw();
-        if !assets.added.is_empty()
-            && assets.added.contains_key(&file.name().map_err(|error| error.to_string())?.to_ascii_lowercase())
+        if std::str::from_utf8(name).is_ok_and(|name| assets.removed.contains(name)) {
+            continue;
+        }
+        if !added_names.is_empty()
+            && added_names.contains(&file.name().map_err(|error| error.to_string())?.to_ascii_lowercase())
         {
             return Err("native texture asset name already exists in the archive".into());
         }
         let asset = std::str::from_utf8(name)
             .ok()
             .and_then(|name| assets.replaced.remove(name));
-        let manifest = if name == b"clofiles.json" && !assets.added.is_empty() {
+        let manifest = if name == b"clofiles.json" && (!assets.added.is_empty() || !assets.removed.is_empty()) {
             let mut data = Vec::new();
             (&mut file).take(4 * 1024 * 1024 + 1).read_to_end(&mut data)
                 .map_err(|error| error.to_string())?;
@@ -482,6 +486,9 @@ fn replace_member(
             }
             let mut entries: serde_json::Map<String, Value> = serde_json::from_slice(&data)
                 .map_err(|error| format!("invalid native file manifest: {error}"))?;
+            for name in &assets.removed {
+                entries.remove(name);
+            }
             for name in assets.added.keys() {
                 entries.insert(name.clone(), json!(name));
             }
@@ -604,8 +611,108 @@ fn garment_archive(original: Vec<u8>, project: bool) -> Result<Vec<u8>, String> 
     }
 }
 
+fn read_avatar_source(avatar: &Value) -> Result<Vec<u8>, String> {
+    let source = &avatar["native_archive"];
+    if !source.is_object() {
+        return Err("native ZPRJ requires a saved AVT source for each avatar".into());
+    }
+    let data = read_source(source)?;
+    let data = if let Some(member) = source["member"].as_str() {
+        let mut project = open_archive(Cursor::new(data), ZPRJ)?;
+        let index = project.file_names().position(|name| name.is_ok_and(|name| name == member))
+            .ok_or("native avatar source member is missing")?;
+        avatar_payload(&mut project, index)?.1
+    } else {
+        data
+    };
+    member(&mut open_archive(Cursor::new(&data), AVT)?, "dan")?;
+    Ok(data)
+}
+
+fn project_avatar_edits(input: &[u8], state: &Value) -> Result<TextureAssets, String> {
+    let mut outer = open_archive(Cursor::new(input), ZPRJ)?;
+    let mut changes = TextureAssets::default();
+    for index in avatar_members(&outer)? {
+        let file = outer.by_index(index).map_err(|error| error.to_string())?;
+        changes.removed.insert(file.name().map_err(|error| error.to_string())?.into_owned());
+    }
+    let primary = match state["avatar"].as_array() {
+        Some(values) => values.as_slice(),
+        None if state["avatar"].is_null() => &[],
+        None => std::slice::from_ref(&state["avatar"]),
+    };
+    let additional = super::super::array(state, "additional_avatars");
+    if primary.len() + additional.len() > 32 {
+        return Err("native project has more than 32 avatars".into());
+    }
+    let mut bytes = 0u64;
+    let mut identities = AvatarIdentities::default();
+    for (index, avatar) in primary.iter().chain(additional).enumerate() {
+        let mut data = read_avatar_source(avatar)?;
+        if primary.len() + additional.len() > 1 {
+            let mut archive = open_archive(Cursor::new(&data), AVT)?;
+            let dan = member(&mut archive, "dan")?;
+            if let Some(updated) = identities.separate(&dan)? {
+                data = replace_member(&data, AVT, b".dan", &updated, TextureAssets::default())?;
+            }
+        }
+        bytes += data.len() as u64;
+        if bytes > ARCHIVE_LIMIT {
+            return Err("embedded avatar archives exceed 512 MiB".into());
+        }
+        changes.added.insert(format!("avatar_{index:02}.avt"), data);
+    }
+    let (name, workspace) = optional_member(&mut outer, "osw")?
+        .ok_or("native project has no workspace avatar table")?;
+    let count = (changes.added.len() as u32).to_le_bytes();
+    let mut paths = count.to_vec();
+    if !changes.added.is_empty() {
+        paths.push(BYTE_TYPE);
+        for name in changes.added.keys() {
+            paths.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        }
+        for name in changes.added.keys() {
+            paths.extend_from_slice(name.as_bytes());
+        }
+    }
+    let workspace = Fields::read(&workspace)?.replace(b"listAvatarFilePath", LIST_TYPE, &paths)?;
+    let workspace = Fields::read(&workspace)?.replace(b"uiAvatarCount", 5, &count)?;
+    changes.replaced.insert(name, workspace);
+    Ok(changes)
+}
+
+fn rebind_project_avatars(state: &mut Value, path: &Path) -> Result<(), String> {
+    let source = path.canonicalize().map_err(|error| error.to_string())?;
+    let stamp = stamp(&source)?;
+    let mut archive = open_archive(bounded_file(&source)?, ZPRJ)?;
+    let names = avatar_members(&archive)?.iter().map(|&index| {
+        let file = archive.by_index(index).map_err(|error| error.to_string())?;
+        Ok::<_, String>(file.name().map_err(|error| error.to_string())?.into_owned())
+    }).collect::<Result<Vec<_>, String>>()?;
+    if names.len() != super::super::avatar_names(state).len() {
+        return Ok(());
+    }
+    let mut members = names.into_iter();
+    let mut rebind = |avatar: &mut Value| {
+        if let Some(member) = members.next() {
+            avatar["native_archive"] = json!({"path": source, "stamp": stamp, "member": member});
+        }
+    };
+    if let Some(avatars) = state["avatar"].as_array_mut() {
+        avatars.iter_mut().for_each(&mut rebind);
+    } else if state["avatar"].is_object() {
+        rebind(&mut state["avatar"]);
+    }
+    if let Some(avatars) = state["additional_avatars"].as_array_mut() {
+        avatars.iter_mut().for_each(rebind);
+    }
+    Ok(())
+}
+
 fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec<u8>, TextureAssets), String> {
     let mut receiver = open_archive(Cursor::new(raw), ZPAC)?;
+    let mut asset_names = receiver.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
+        .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())?;
     let mut images = TextureAssets::default();
     let mut total_bytes = raw.len() as u64;
     for source in parts {
@@ -635,17 +742,17 @@ fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec
                     contents == other
                 }
                 Err(zip::result::ZipError::FileNotFound) => {
-                    if lower != name {
-                        return Err("new native composition asset has an unsupported case-sensitive name".into());
-                    }
-                    if let Some(previous) = images.added.get(&lower) {
+                    if let Some(previous) = images.added.get(&name) {
                         contents == *previous
                     } else {
+                        if !asset_names.insert(lower) {
+                            return Err("native composition asset names differ only in case".into());
+                        }
                         total_bytes += contents.len() as u64;
                         if total_bytes > ARCHIVE_LIMIT {
                             return Err("native composition assets exceed 512 MiB".into());
                         }
-                        images.added.insert(lower, contents);
+                        images.added.insert(name, contents);
                         true
                     }
                 }
@@ -687,6 +794,7 @@ pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &P
     let compacted = source["compacted_fabrics"] == true
         || !super::super::array(source, "appended").is_empty()
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
+    let _ = rebind_project_avatars(state, path);
     remember(state, path, true);
     if compacted && state[SOURCE].is_object() {
         state[SOURCE]["compacted_fabrics"] = json!(true);
@@ -728,7 +836,6 @@ pub(in crate::compat_scene) fn encode(
     };
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
         || !can_save_materials
-        || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
     {
         return Err("native save supports the loaded scene, pattern renames, verified fabric edits and archived colorway edits. Save other edits as .clorust".into());
     }
@@ -803,8 +910,14 @@ pub(in crate::compat_scene) fn encode(
         None => garment,
     };
     let output = if project {
-        let project_bytes = if has_edits {
-            replace_member(&original, ZPRJ, b".zpac", &garment, TextureAssets::default())?
+        let avatar_changed = source["avatars"].as_u64() != Some(avatar_fingerprint(state));
+        let avatar_assets = if avatar_changed {
+            project_avatar_edits(&original, state)?
+        } else {
+            TextureAssets::default()
+        };
+        let project_bytes = if has_edits || avatar_changed {
+            replace_member(&original, ZPRJ, b".zpac", &garment, avatar_assets)?
         } else {
             original
         };

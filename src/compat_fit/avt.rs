@@ -315,14 +315,17 @@ pub(super) fn read(path: &Path) -> Result<RestMesh, String> {
     decode(&dan)
 }
 
-pub(super) fn read_project(path: &Path) -> Result<Option<(String, RestMesh)>, String> {
+pub(super) fn read_project(path: &Path) -> Result<Vec<(String, String, RestMesh)>, String> {
     crate::compat_scene::read_project_avatar_dan(path)?
-        .map(|(name, dan)| {
+        .into_iter().map(|(member, dan)| {
             let mut mesh = decode(&dan)?;
-            let name = mesh.scene_name.take().unwrap_or(name);
-            Ok((name, mesh))
+            let name = mesh.scene_name.take().unwrap_or_else(|| {
+                let basename = member.rsplit(['/', '\\']).next().unwrap_or("avatar");
+                Path::new(basename).file_stem().and_then(|stem| stem.to_str()).unwrap_or("avatar").to_owned()
+            });
+            Ok((name, member, mesh))
         })
-        .transpose()
+        .collect()
 }
 
 #[cfg(test)]

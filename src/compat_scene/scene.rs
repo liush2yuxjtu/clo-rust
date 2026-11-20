@@ -480,12 +480,12 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
     Ok(reply)
 }
 
-fn import_project_avatar(state: &mut Value, avatar: Option<Value>, append: bool) {
+fn import_project_avatar(state: &mut Value, avatars: Vec<Value>, append: bool) {
     if !append {
         state["additional_avatars"] = json!([]);
         state["avatar"] = Value::Null;
     }
-    if let Some(avatar) = avatar {
+    for avatar in avatars {
         if state["avatar"].is_null() {
             state["avatar"] = avatar;
         } else {
@@ -595,11 +595,11 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             if is_project && load_avatar {
                 match crate::compat_fit::project_avatar(path) {
                     Ok(avatar) => {
-                        embedded_avatar = avatar.is_some();
+                        embedded_avatar = !avatar.is_empty();
                         import_project_avatar(state, avatar, append);
                     }
                     Err(error) => {
-                        import_project_avatar(state, None, append);
+                        import_project_avatar(state, Vec::new(), append);
                         avatar_error = Some(error);
                     }
                 }

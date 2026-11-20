@@ -1008,6 +1008,22 @@ by name. Reopen both writers' saves and checkpoints in both backends.
 Compare catalog, colorways, sewing endpoints and stored meshes. For the
 avatar case, compare the embedded AVT bytes in the Rust output against
 the receiving ZPRJ and confirm that official CLO can reopen it.
+Set `CLO_ZPRJ_AVATAR_FIXTURE` to `scene-clear-avatar.avt` and
+`CLO_ZPRJ_REPLACEMENT_AVATAR` to `MV2.1_Luka.avt` to extend the same
+comparison to adding an AVT, replacing a different embedded avatar,
+and appending a project that contributes a second avatar. Compare the
+reopened avatar names and their order. Verify original AVT bytes for
+unique avatars. When a second instance reuses the first avatar archive,
+check that the packed instance has a distinct identity and equal mesh
+positions and triangles. Include the textured avatar project as an
+append source and verify its case-sensitive texture names and digests
+after writing the destination project.
+For the Rust source-file guard, load a disposable AVT copy into the
+avatar-free ZPRJ. Change the AVT copy before saving over another disposable
+ZPRJ and confirm the error preserves both the target bytes and the live
+scene. Reload an intact AVT copy and save successfully. Remove the loose
+AVT copy, save the resulting embedded project again, then append a
+second AVT-bearing project and verify both avatars after reopening.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.
