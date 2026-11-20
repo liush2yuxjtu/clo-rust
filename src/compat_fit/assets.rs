@@ -383,7 +383,9 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("avatar");
     if extension == "avt" {
-        return avatar_from_avt(name, Some(&path), avt::read(&path)?);
+        let mut rest = avt::read(&path)?;
+        let scene_name = rest.scene_name.take();
+        return avatar_from_avt(scene_name.as_deref().unwrap_or(name), Some(&path), rest);
     }
     let (points, faces) = match extension.as_str() {
         "obj" => avatar_obj(&path)?,
@@ -739,20 +741,16 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     } else {
         return Err(format!("no avatar matching {reference:?}"));
     };
-    let mut result =
-        json!({"ok":true,"avatar":avatar["name"],"path":avatar["path"],"source":avatar["source"]});
-    if avatar["source"] == "clo_avt_rest" {
-        result["rest_geometry"] = avatar["rest_geometry"].clone();
-        result["warnings"] = avatar["warnings"].clone();
-    }
-    if boolean(args, "replace", true) || state["avatar"].is_null() {
+    // The native MCP uses default ImportAvatar options, which replace the
+    // current avatar for AVT files even when the bridge skips its explicit delete.
+    let native_avt = avatar["source"] == "clo_avt_rest";
+    if boolean(args, "replace", true) || native_avt || state["avatar"].is_null() {
         state["avatar"] = avatar;
         state["additional_avatars"] = json!([]);
     } else {
         array_mut(state, "additional_avatars").push(avatar);
     }
-    result["avatars"] = json!(crate::compat_scene::avatar_names(state));
-    Ok(result)
+    Ok(json!({"ok":true,"avatars":crate::compat_scene::avatar_names(state)}))
 }
 
 pub(super) fn body_measurements(avatar: &Value, refresh: bool) -> (Value, String) {

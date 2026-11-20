@@ -76,6 +76,26 @@ Rust 打开各 ZPAC，经同一工具重新导出。每种格式的 52 条 UV �
 此批对照覆盖原生归档已有的正面平面映射。
 复跑见 [Verify 技能](../../.agents/skills/verify/SKILL.md#compare-native-planar-texture-transforms)。
 
+## Boat 原生人台加载与排布点
+
+在官方 CLO 2026.1.382 和独立 Rust 会话打开同一份双裁片 ZPRJ。
+`--compare-live-avatar-workflow` 比较两端 `avatar_load` 的完整
+`{"ok":true,"avatars":[…]}`，再用 `scene_info` 和 `avatar_list`
+验证状态。Mia 和 Luka 的场景名称取自 AVT 内部记录。原生
+`replace=false` 在本例也只留下新载入的人台。两个后端的 6 个库路径、
+12 个别名、110 个排布点名称及顺序一致。五种加载请求和两个参数错误
+都读回了纸样、缝组、面料和活动配色。清场后人台列表为空，排布点为 0。
+通过 `scene_open` 以两种模式打开同一个 Luka 文件时，也替换人台并保留服装。
+
+| AVT | 场景名称 | SHA-256 |
+| --- | --- | --- |
+| `FV2.1_Mia.avt` | `Mara_09_eye_Joint` | `b0ff1e31bcbcd44ca97930c09b278b07cba38eec1d4d9906859256dee0741d8a` |
+| `MV2.1_Luka.avt` | `MV2_Thomas_1_eye_Joint` | `95c9711f0a21bc84d2dc137ed27389c269e34eedf6686ccbbdcc3abcdaa51ba7` |
+
+原生测量探查使用单独的空缓存，Mia 和 Luka 在 `refresh=false` 和
+`refresh=true` 时各返回相同的 33 个 OBJ 估算字段。当前证据覆盖
+原生回退路径。双端数值、Avatar Editor 精确测量和缓存仍待验证。
+
 ## Boat 纸样 API 工作流
 
 在 Boat 官方 CLO 2026.1.382 和独立 Rust 会话打开同一份
@@ -301,15 +321,15 @@ CLO 2026.1.382 和 Rust 打开同一五步变形归档
 | `clo_api_doc` | 双端纸样短名和限定名一致，缺失短名返回空候选，缺失限定名返回错误。9 条导出与路径文档首行匹配原生留档 | 双端名称歧义和完整重载文档 |
 | `scene_info` | 双端同一双配色工程、清场后及重建第一片纸样的字段通过；历史 Carlita 对照匹配 10 个工程字段 | 更多人台、导入网格与工程切换 |
 | `scene_clear` | 双端默认／显式清理、重置、重复清场和错误后的状态通过。Rust 验证旧 UI 快照拒绝与保留最后规格 | 导入网格和更多有状态场景 |
-| `scene_open` | Rust 实测原生工程与 DXF 追加。默认打开纸样 JSON、OBJ、FBX 和 AVT 保留已有场景。两角点 ZPRJ、ZPAC 均读回 3 片、缝组和原网格 | 双端现场追加、损坏文件和更多工程布局 |
+| `scene_open` | Rust 实测原生工程与 DXF 追加。默认打开纸样 JSON、OBJ、FBX 保留已有场景。Boat 双端 `scene_open` 两种模式打开 Luka AVT，替换人台并保留服装。两角点 ZPRJ、ZPAC 均读回 3 片、缝组和原网格 | 双端现场追加、损坏文件和更多工程布局 |
 | `scene_save` | Rust 工程保存重开，目标是目录时拒绝并保留原状态。带两角点曲线的 ZPRJ 与 ZPAC 改名后，官方重开分别保留英文和中英混合名称、曲线及缝组。配色切换归档也经官方重开通过 | 更多原生修改、缩略图和原生 SDK 失败路径 |
 | `scene_export` | 双配色工程的 OBJ、FBX、GLB、glTF 文件与附属文件顺序匹配官方返回，Rust 回读两套颜色。基础贴图像素和 UV 边界，以及六例正面平面贴图变换已与官方文件对照。DXF、纸样 JSON 的 Rust 输出与 3D 标志无关，失败保留已有文件和场景 | 双端单位、其他贴图映射、人台、复杂配色结果和纸样 JSON 导出条件 |
 | `snapshot` | 同一变形归档双端九个视角、默认顺序、别名、无选区聚焦和缩略图读回；无效首项保留相机，后续无效项保留已生成文件 | 选区聚焦、顶部及斜视角的投影和渲染细节 |
 | `snapshot_2d` | 双端校验两片轮廓、透明 PNG、弯曲内线与空场景；Rust 的公开工具、直接 API 和 Python 导出一致 | 原生打印范围、多页和复杂装饰 |
-| `avatar_list` | 历史 6 个库文件、12 个别名及场景读回对照 | 新版本同一人台库和追加后的清单 |
-| `avatar_load` | Rust 原生库别名优先约定目录，追加、替换及脚本删除保留布料姿态 | 双端别名、文件路径、追加、替换及缺失项 |
-| `avatar_measurements` | Rust 与原生保存数据对照的独立记录 | 同一现场人台的刷新和缓存策略 |
-| `arrangement_points` | Carlita 110 个名称及底层完整排布记录与原生留档逐字段一致 | 双端更换人台、多人台和空场景 |
+| `avatar_list` | Boat 同一套 6 个 AVT 文件、12 个别名以及 5 例加载、清场和错误后的清单完全一致 | 其他库版本和多个人台由其他入口导入后的清单 |
+| `avatar_load` | Boat 双端默认值、混合大小写别名、文件名和两种 `replace` 参数共 5 例。返回对象和场景中的原生人台名称一致，保留纸样、缝组、面料和当前配色。缺失和非法类型拒绝后状态保持 | 双端绝对路径、损坏 AVT 和其他人台 |
+| `avatar_measurements` | Boat 原生 Mia 和 Luka 的 `refresh=false/true` 均读回 OBJ 的 33 个字段，已保留值与来源。另有 Rust 与保存数据对照 | 双端测量值与来源、Avatar Editor 实测及缓存策略 |
+| `arrangement_points` | Boat 双端 Mia 和 Luka 的 110 个名称顺序一致，清场后均为 0。Carlita 底层完整排布记录与原生留档逐字段一致 | 其他人台和多人台由其他入口导入后的排布点 |
 | `pattern_list` | 历史 42 片的轮廓、设置和子形状对照，本轮编辑后详略列表及纸样索引一致 | 更多子形状、编辑及列表场景 |
 | `pattern_info` | 历史 322 条外边、520 条子形状边及缺失裁片对照，本轮七组曲线量测与移动端点后全字段读回 | 更多编辑操作和自定义缝份基线 |
 | `pattern_create` | 双端自动名称规则、重名、活动面料、两角点曲线、非法类型和排布失败的状态通过。Rust 验证曲线保存重开、网格生成及旧快照行为 | 其他复杂轮廓与原生对话框交互 |

@@ -718,14 +718,33 @@ Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the
 new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to verify append
-and default `scene_open` mode, direct typed `ImportAvatar`, and the equivalent
-Python call. All four add an avatar and leave panels, fabrics, and drape intact.
+and default `scene_open` mode. Both modes replace the AVT in the scene, as
+do a default typed `ImportAvatar` call and its Python equivalent.
+Compare panels, fabrics, positions and velocities after these operations.
 Verify an import of a missing AVT preserves the avatar list.
 Delete the primary avatar from Python and check that the remaining avatar is
 promoted and the saved positions and velocities stay identical. Verify an
 invalid batch leaves the avatars intact. Set `CLO_AVATAR_LIBRARY_FIXTURE` to an
 `Avatar` folder containing `Female/FV2.1_Mia.avt` to check that alias resolution
 prefers the standard library location over a same-name backup.
+
+Run `python -m clo_mcp.smoke_compat --compare-live-avatar-workflow` with a live
+CLO bridge, the configured official MCP command, `CLO_AVATAR_PROJECT_FIXTURE`
+pointing to the shared two-panel `multi-colorway-colored.zprj`, and
+`CLO_RUST_AVATAR_DIR` pointing to the same Avatar library path as official CLO.
+On Boat, both MCP processes can resolve that library and the project under
+the same Wine `C:/` mapping. The verifier calls `avatar_load` with its defaults,
+a mixed-case alias, a file name, and both values of `replace`. It compares
+the whole response, the ordered library and alias lists, and the active
+names in both `scene_info` and `avatar_list`. It checks 110 ordered
+`arrangement_points` names for Mia and Luka and reads back the panels,
+sewing, fabrics, and current colorway. The native AVT import leaves one
+avatar even with `replace=false` in this fixture. Separately reopen Luka by
+the shared file path via `scene_open` in both modes and check the same
+avatar replacement with the garment intact. A missing avatar and a
+non-string argument leave all tracked state unchanged. Clearing the scene
+returns zero names and points. Record absolute paths, other avatars, and
+measurement source and value comparisons as separate cases.
 
 Run `--verify-simulation-reset-quality` to compare arranged meshes before
 simulation and after reset. Exercise the public tools and corresponding

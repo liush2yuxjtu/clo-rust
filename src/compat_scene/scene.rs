@@ -456,7 +456,7 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
         let appended = open_json(path, append, state)?;
         (open_reply(state, path), appended)
     } else {
-        // CLO's generic mesh and avatar importers do not receive a replace option.
+        // Standalone avatar and generic mesh imports keep the rest of the scene.
         let append = append || matches!(ext.as_str(), "obj" | "fbx" | "avt");
         (open_path(path, &ext, append, load_avatar, state)?, append)
     };
@@ -617,7 +617,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             return Ok(reply);
         }
         "avt" => {
-            let loaded = crate::compat_fit::dispatch(
+            crate::compat_fit::dispatch(
                 "avatar_load",
                 &json!({"name_or_path": path, "replace": false}),
                 state,
@@ -625,8 +625,8 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             .ok_or("Rust avatar loader unavailable")??;
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);
-            reply["rest_geometry"] = loaded["rest_geometry"].clone();
-            reply["warnings"] = loaded["warnings"].clone();
+            reply["rest_geometry"] = state["avatar"]["rest_geometry"].clone();
+            reply["warnings"] = state["avatar"]["warnings"].clone();
             return Ok(reply);
         }
         ext => return Err(format!("unsupported import extension {ext:?}")),

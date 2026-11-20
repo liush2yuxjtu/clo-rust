@@ -24,7 +24,7 @@ pub(super) struct RestMesh {
     pub arrangements: Vec<Value>,
     pub body_faces: Option<Range<usize>>,
     pub regions: Vec<RegionFace>,
-    scene_name: Option<String>,
+    pub(super) scene_name: Option<String>,
 }
 
 struct Field<'a> {
@@ -445,15 +445,17 @@ mod tests {
         let mut state = json!({});
         let mut call = |name, args| dispatch(name, &args, &mut state).unwrap();
         let response = call("avatar_load", json!({"name_or_path":path})).unwrap();
-        assert_eq!(response["source"], "clo_avt_rest");
+        assert_eq!(response, json!({"ok":true,"avatars":["rest"]}));
+        let avatar = super::super::assets::avatar_from_path(&path).unwrap();
+        assert_eq!(avatar["source"], "clo_avt_rest");
         assert_eq!(
-            response["rest_geometry"],
+            avatar["rest_geometry"],
             json!({
                 "parts":2, "vertices":7, "triangles":3,
                 "bounds_mm":[[-86.25,20.5,-55.0],[121.0,1650.0,90.0]]
             })
         );
-        assert!(response["warnings"][0]
+        assert!(avatar["warnings"][0]
             .as_str()
             .unwrap()
             .contains("rest geometry only"));

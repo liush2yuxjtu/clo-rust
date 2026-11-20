@@ -3905,6 +3905,79 @@ async def verify_simulation_reset_quality():
                       "failed_distance_preserves_mesh": True, "seconds_resolution": 0.01}))
 
 
+async def compare_live_avatar_workflow():
+    fixture = os.environ["CLO_AVATAR_PROJECT_FIXTURE"]
+    assert Path(fixture).is_file(), fixture
+    root = Path(os.environ["CLO_RUST_AVATAR_DIR"])
+    cases = (
+        ("default", {}, "Mara_09_eye_Joint"),
+        ("normalized alias", {"name_or_path": " FeMaLe "}, "Mara_09_eye_Joint"),
+        ("native import with replace=false", {"name_or_path": "luka", "replace": False},
+         "MV2_Thomas_1_eye_Joint"),
+        ("file name with replace=false", {"name_or_path": "MV2.1_Luka.avt", "replace": False},
+         "MV2_Thomas_1_eye_Joint"),
+        ("explicit replace", {"name_or_path": "mia", "replace": True}, "Mara_09_eye_Joint"),
+    )
+    garment_keys = ("pattern_count", "patterns", "seam_groups", "fabrics", "current_colorway")
+
+    async def read(session):
+        listing = await json_result(session, "avatar_list")
+        scene = await json_result(session, "scene_info")
+        assert scene["avatars"] == listing["in_scene"]
+        points = await json_result(session, "arrangement_points")
+        return listing, {key: scene[key] for key in garment_keys}, points
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+                await json_result(session, "scene_open", {"path": fixture})
+                assert (await json_result(session, "scene_info"))["pattern_count"] > 0
+            native_baseline, rust_baseline = await read(clo), await read(rust)
+            libraries = [baseline[0]["library"] for baseline in (native_baseline, rust_baseline)]
+            assert libraries[0] == libraries[1] and len(libraries[0]) >= 2
+            assert str(root / "Female/FV2.1_Mia.avt") in libraries[0]
+            assert str(root / "Male/MV2.1_Luka.avt") in libraries[0]
+            results = []
+            for label, args, name in cases:
+                expected = {"ok": True, "avatars": [name]}
+                assert await json_result(clo, "avatar_load", args) == expected
+                assert await json_result(rust, "avatar_load", args) == expected
+                native, independent = await read(clo), await read(rust)
+                assert native[0] == independent[0]
+                assert native[2] == independent[2] and native[2]["count"] == 110
+                assert native[1] == native_baseline[1] and independent[1] == rust_baseline[1]
+                results.append({"case": label, "in_scene": [name], "ordered_arrangement_points": native[2]["count"]})
+            for mode in ("append", "replace"):
+                args = {"path": str(root / "Male/MV2.1_Luka.avt"), "mode": mode}
+                for session, baseline in ((clo, native_baseline), (rust, rust_baseline)):
+                    await json_result(session, "avatar_load")
+                    opened = await json_result(session, "scene_open", args)
+                    assert opened["ok"] is True and opened["avatars"] == ["MV2_Thomas_1_eye_Joint"]
+                    _, garment, points = await read(session)
+                    assert garment == baseline[1] and points["count"] == 110
+
+            for session in (clo, rust):
+                before = await read(session)
+                missing = await session.call_tool("avatar_load", {"name_or_path": "absent-avatar-for-parity-404"})
+                assert missing.isError and await read(session) == before
+                invalid = await session.call_tool("avatar_load", {"name_or_path": []})
+                assert invalid.isError and await read(session) == before
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                listing, _, points = await read(session)
+                assert listing["in_scene"] == [] and points == {"count": 0, "names": []}
+        finally:
+            if original["project_path"]:
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tools": ["avatar_load", "avatar_list", "arrangement_points"],
+                      "native_assets": len(libraries[0]), "cases": results, "success_shape": "exact",
+                      "missing_and_invalid_preserved_state": True, "garment_preserved": True,
+                      "native_scene_open_modes": ["append", "replace"], "empty_scene": True, "result": "pass"}))
+
+
 async def verify_avatar_changes_keep_drape():
     with TemporaryDirectory(prefix="clo-avatar-drape-") as directory:
         root = Path(directory)
@@ -3965,10 +4038,11 @@ async def verify_avatar_changes_keep_drape():
             native_append = None
             if fixture := os.environ.get("CLO_AVATAR_FIXTURE"):
                 opened = await json_result(rust, "scene_open", {"path": fixture, "mode": "append"})
-                assert len(opened["avatars"]) == 2 and opened["avatars"][0] == "luka"
-                name = opened["avatars"][-1]
+                name, = opened["avatars"]
+                assert opened["rest_geometry"]["triangles"] > 0
                 default_open = await json_result(rust, "scene_open", {"path": fixture})
-                assert default_open["avatars"] == ["luka", name, name]
+                assert default_open["avatars"] == [name]
+                assert default_open["rest_geometry"] == opened["rest_geometry"]
                 function = "import_api.ImportAvatar"
                 description = await json_result(rust, "clo_api_describe", {"name": function})
                 assert description["doc"] == "ImportAvatar(arg0: str, arg1: Marvelous::ImportExportOption) -> bool"
@@ -3978,7 +4052,7 @@ async def verify_avatar_changes_keep_drape():
                 assert result["value"] is True
                 code = f"import_api.ImportAvatar({fixture!r}, ApiTypes.ImportExportOption())"
                 assert (await json_result(rust, "clo_run_python", {"code": code}))["value"] is True
-                assert (await json_result(rust, "avatar_list"))["in_scene"] == ["luka", name, name, name, name]
+                assert (await json_result(rust, "avatar_list"))["in_scene"] == [name]
                 _, with_native = await save("native")
                 assert with_native["simulation"] == continued["simulation"]
                 assert with_native["patterns"] == continued["patterns"]
@@ -3987,9 +4061,10 @@ async def verify_avatar_changes_keep_drape():
                     "name": function, "args": [str(root / "missing.avt"), {"$type": "ApiTypes.ImportExportOption"}],
                 })
                 assert invalid.isError
-                assert (await json_result(rust, "avatar_list"))["in_scene"] == ["luka", name, name, name, name]
-                native_append = {"scene_open_modes": ["append", "default"],
-                                 "typed_call_and_python": "pass", "missing_import_preserved_avatars": True}
+                assert (await json_result(rust, "avatar_list"))["in_scene"] == [name]
+                native_append = {"scene_open_modes_replace_avatars": ["append", "default"],
+                                 "default_typed_and_python_import_replaced_avatars": True,
+                                 "missing_import_preserved_avatars": True}
         alias_directory = None
         if library := os.environ.get("CLO_AVATAR_LIBRARY_FIXTURE"):
             relative = Path("Female/FV2.1_Mia.avt")
@@ -4004,8 +4079,10 @@ async def verify_avatar_changes_keep_drape():
                 assert (await json_result(rust, "avatar_list"))["library"] == [str(shadow), str(original)]
                 loaded = await json_result(rust, "avatar_load", {"name_or_path": " FeMaLe "})
                 direct = await json_result(rust, "avatar_load", {"name_or_path": str(original)})
-                assert loaded["path"] == direct["path"] == str(original)
-                assert loaded["avatars"] == direct["avatars"] and loaded["rest_geometry"] == direct["rest_geometry"]
+                assert loaded == direct
+                portable = root / "resolved-avatar.clorust"
+                await json_result(rust, "scene_save", {"path": str(portable)})
+                assert json.loads(portable.read_text())["scene"]["avatar"]["path"] == str(original)
                 alias_directory = relative.as_posix()
     print(json.dumps({"tools": ["avatar_load", "avatar_list", "simulate", "scene_open", "clo_api_call", "clo_run_python"],
                       "case": "change avatars while retaining cloth",
@@ -5942,6 +6019,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
+    comparisons.add_argument("--compare-live-avatar-workflow", action="store_const", dest="comparison",
+                             const=compare_live_avatar_workflow,
+                             help="compare native avatar loads, scene names, library and arrangement on both backends")
     comparisons.add_argument("--verify-avatar-changes-keep-drape", action="store_const", dest="comparison",
                              const=verify_avatar_changes_keep_drape,
                              help="verify avatar changes preserve cloth, with updated collision on resume")
