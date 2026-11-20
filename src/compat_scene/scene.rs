@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SCENE_FORMAT: &str = "clo-rust.scene.v1";
 const PATTERN_FORMAT: &str = "clo-rust.pattern.v1";
 
-fn avatar_names(state: &Value) -> Vec<&str> {
+pub(crate) fn avatar_names(state: &Value) -> Vec<&str> {
     let avatar = &state["avatar"];
     avatar
         .as_array()

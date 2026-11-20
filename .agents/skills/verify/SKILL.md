@@ -60,6 +60,11 @@ CLO_MCP_OFFICIAL_COMMAND='["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp
   python -m clo_mcp.smoke_compat --compare-fabric-library
 ```
 
+Use `--compare-avatar-library` with `CLO_RUST_AVATAR_DIR` set to the matching
+`Avatar` directory, or set `CLO_MCP_ASSETS` to its parent. Compare the library
+paths and aliases across backends, and verify each session's `in_scene` against
+its own `scene_info` since this read-only case does not change the active project.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.

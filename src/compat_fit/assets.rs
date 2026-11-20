@@ -196,21 +196,25 @@ fn scaled_body(height: f64, girth: f64, source: &str) -> Value {
 }
 
 fn avatar_library() -> Vec<String> {
-    let mut result = vec![
-        "female mannequin".into(),
-        "luka".into(),
-        "male mannequin".into(),
-        "melody".into(),
-        "mia".into(),
-        "oliver".into(),
-    ];
-    result.extend(
-        configured_avatar_paths()
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned()),
-    );
-    result.sort();
-    result
+    configured_avatar_paths()
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("avt"))
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn asset_subfolder(setting: &str, subfolder: &str) -> Option<PathBuf> {
+    match std::env::var_os(setting) {
+        Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
+        None => std::env::var_os("CLO_MCP_ASSETS").map(|dir| PathBuf::from(dir).join(subfolder)),
+    }
+}
+
+fn avatar_root() -> Option<PathBuf> {
+    asset_subfolder("CLO_RUST_AVATAR_DIR", "Avatar")
 }
 
 fn configured_avatar_paths() -> Vec<PathBuf> {
@@ -249,7 +253,7 @@ fn configured_avatar_paths() -> Vec<PathBuf> {
         }
     }
     let mut result = Vec::new();
-    if let Some(dir) = std::env::var_os("CLO_RUST_AVATAR_DIR") {
+    if let Some(dir) = avatar_root() {
         let mut remaining = MAX_ASSETS;
         visit(Path::new(&dir), 5, &mut remaining, &mut result);
     }
@@ -274,21 +278,43 @@ fn avatar_lookup(reference: &str, alias: Option<&str>) -> Option<PathBuf> {
     if direct.is_file() {
         return Some(direct);
     }
-    configured_avatar_paths().into_iter().find(|path| {
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case(reference))
-            || path
-                .file_stem()
+    let reference = reference.trim();
+    let paths = configured_avatar_paths();
+    let native = alias.and_then(|name| {
+        paths.iter().find(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("avt"))
+                && path
+                    .file_stem()
+                    .is_some_and(|stem| stem.eq_ignore_ascii_case(native_alias_stem(name)))
+        })
+    });
+    let exact = native.or_else(|| {
+        paths.iter().find(|path| {
+            path.file_name()
                 .and_then(|s| s.to_str())
-                .is_some_and(|stem| {
-                    stem.eq_ignore_ascii_case(reference)
-                        || alias.is_some_and(|alias| {
-                            stem.eq_ignore_ascii_case(alias)
-                                || stem.eq_ignore_ascii_case(native_alias_stem(alias))
-                        })
-                })
-    })
+                .is_some_and(|s| s.eq_ignore_ascii_case(reference))
+                || path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| {
+                        stem.eq_ignore_ascii_case(reference)
+                            || alias.is_some_and(|alias| stem.eq_ignore_ascii_case(alias))
+                    })
+        })
+    });
+    let lower = reference.to_ascii_lowercase();
+    exact
+        .or_else(|| {
+            paths.iter().find(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("avt"))
+                    && path.file_name().is_some_and(|name| {
+                        name.to_string_lossy().to_ascii_lowercase().contains(&lower)
+                    })
+            })
+        })
+        .cloned()
 }
 
 fn fabric_paths(root: &Path) -> Vec<PathBuf> {
@@ -324,10 +350,7 @@ fn fabric_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn fabric_root() -> Option<PathBuf> {
-    match std::env::var_os("CLO_RUST_FABRIC_DIR") {
-        Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
-        None => std::env::var_os("CLO_MCP_ASSETS").map(|dir| PathBuf::from(dir).join("Fabric")),
-    }
+    asset_subfolder("CLO_RUST_FABRIC_DIR", "Fabric")
 }
 
 pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
@@ -552,15 +575,16 @@ fn avatar_obj(path: &Path) -> Result<(Vec<[f64; 3]>, Vec<[usize; 3]>), String> {
 }
 
 pub fn avatar_list(state: &Value) -> Value {
-    let in_scene: Vec<_> = std::iter::once(&state["avatar"])
-        .chain(array(&state["additional_avatars"]))
-        .filter_map(|a| a["name"].as_str())
-        .collect();
-    json!({"in_scene":in_scene,"library":avatar_library(),"aliases":AVATARS.iter().map(|(alias,_)|alias).collect::<Vec<_>>()})
+    json!({"in_scene":crate::compat_scene::avatar_names(state),"library":avatar_library(),"aliases":AVATARS.iter().map(|(alias,_)|alias).collect::<Vec<_>>()})
 }
 
 pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     let reference = string(args, "name_or_path", "mia");
+    let reference = if reference.trim().is_empty() {
+        "mia"
+    } else {
+        reference
+    };
     let alias = reference.trim().to_ascii_lowercase();
     let canonical = AVATARS
         .iter()
@@ -568,7 +592,7 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
         .map(|(_, name)| *name);
     let avatar = if let Some(path) = avatar_lookup(reference, canonical) {
         avatar_from_path(&path)?
-    } else if let Some(name) = canonical {
+    } else if let Some(name) = canonical.filter(|_| avatar_root().is_none()) {
         let (height, girth) = match name {
             "luka" | "male mannequin" => (1820.0, 1.17),
             "melody" => (1370.0, 0.74),
@@ -591,6 +615,7 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     } else {
         array_mut(state, "additional_avatars").push(avatar);
     }
+    result["avatars"] = json!(crate::compat_scene::avatar_names(state));
     state["simulation"] = Value::Null;
     Ok(result)
 }

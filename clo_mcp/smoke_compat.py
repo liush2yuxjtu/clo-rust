@@ -301,9 +301,32 @@ async def compare_fabric_library():
     }, ensure_ascii=False))
 
 
-async def main(compare_library=False):
+async def compare_avatar_library():
+    results = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+            catalog = await json_result(session, "avatar_list")
+            scene = await json_result(session, "scene_info")
+            assert catalog["in_scene"] == scene["avatars"], backend
+            assert catalog["library"] and catalog["aliases"], backend
+            results[backend] = {key: catalog[key] for key in ("library", "aliases")}
+    assert results["official"] == results["rust"], "avatar_list library or aliases differ"
+    print(json.dumps({
+        "tool": "avatar_list",
+        "backends": ["official", "rust"],
+        "library_size": len(results["rust"]["library"]),
+        "alias_count": len(results["rust"]["aliases"]),
+        "in_scene_readback": "pass",
+    }))
+
+
+async def main(compare_library=False, compare_avatars=False):
     if compare_library:
         await compare_fabric_library()
+        return
+    if compare_avatars:
+        await compare_avatar_library()
         return
     await smoke_rust()
     if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
@@ -312,9 +335,12 @@ async def main(compare_library=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--compare-fabric-library", action="store_true",
+    comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--compare-fabric-library", action="store_true",
                         help="compare both live backends against the same CLO fabric library")
+    comparisons.add_argument("--compare-avatar-library", action="store_true",
+                             help="compare both live backends against the same CLO avatar library")
     args = parser.parse_args()
-    if args.compare_fabric_library and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
-        parser.error("--compare-fabric-library requires CLO_MCP_OFFICIAL_COMMAND")
-    asyncio.run(main(args.compare_fabric_library))
+    if (args.compare_fabric_library or args.compare_avatar_library) and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+        parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
+    asyncio.run(main(args.compare_fabric_library, args.compare_avatar_library))

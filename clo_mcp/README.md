@@ -47,7 +47,8 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 保存姿态网格，并读取可用的 `.zprj` 内嵌静态人台。此类导入会返回 `partial`
 及明确的缺项。MCP 的 GLB 导出使用 CLO 实测的毫米坐标。
 `avatar_load` 和 `scene_open` 可读取 `.avt` 的静态网格和排布点。可用 `CLO_RUST_AVATAR_DIR`
-指定本地人台库。骨骼动作和原生量体校准尚未包含。
+指定本地人台库，也可用共享的 `CLO_MCP_ASSETS`。未配置人台库时，内置别名可以生成
+程序化人台。配置人台库后，`avatar_list` 列出库内的 `.avt` 路径。骨骼动作和原生量体校准尚未包含。
 `fabric_library` 和 `fabric_apply` 可以读取本地 CLO 面料库。将
 `CLO_RUST_FABRIC_DIR` 指向包含 `.zfab` 的 `Fabric` 目录，或通过
 `CLO_MCP_ASSETS` 指定其上一级。也可以直接向 `fabric_apply` 传入
