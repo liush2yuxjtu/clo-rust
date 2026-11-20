@@ -1287,6 +1287,25 @@ different triangulation, so compare coincident rest coordinates at 0.001 mm
 resolution and require at least four per panel. Use 1 mm for their 3D
 distance and 2.5 mm for the world bounds delta.
 
+Run `--verify-native-mixed-draft` with the installed Mia and poplin assets,
+the same measurement and arrangement caches, and a fresh shared
+`CLO_MCP_STATE`. Leave `CLO_RUST_CHECKPOINT_DIR` unset. Set
+`CLO_SCENE_OPEN_PROJECT` to `multi-colorway-colored.zprj` and
+`CLO_MIXED_DRAFT_REFERENCE` to a directory with `official-append.zprj` and
+`official-delete-append.zprj`. Create those references in CLO by opening
+the same project, optionally deleting panel 0, and building the zero-step
+six-panel top with `replace_existing=false` and particle distance 45.
+
+The verifier saves ZPAC and ZPRJ and obtains a native automatic checkpoint
+by rebuilding each unsaved mixed scene. It compares pattern order, sewing
+group membership, colorways and RGBA, 2D bounds within 0.001 mm, and the
+original panels' exact mesh coordinates and indices. It confirms that a
+source changed after opening leaves the destination and live scene intact.
+It also checks the authoring of meshes after one solver step, both during
+build and through a separate `simulate` call, against Rust's saved poses.
+In live CLO, open the direct Rust append ZPRJ and restore the delete-and-append
+checkpoint by name in the same shared checkpoint folder.
+
 Run `--compare-live-garment-to-project` with the native bridge up.
 Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
 and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave

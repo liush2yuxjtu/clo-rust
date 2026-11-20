@@ -1382,6 +1382,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     let arrangement_notes = calibrate_arrangement(&mut draft, &next["avatar"]);
     let material = assets::load_material(string(&draft["spec"], "fabric", ""))?;
     let replace = rebuild || boolean(args, "replace_existing", true);
+    let native_append = (!replace).then(|| crate::compat_scene::draft_append_start(&next)).flatten();
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
         crate::compat_scene::checkpoint_before_build(&mut next)
             .map(|value| value["path"].clone())
@@ -1511,6 +1512,9 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     state["garment_piece_names"] = json!(names);
     state["runtime"]["last_garment"] =
         json!({"spec":state["garment_spec"],"pieces":state["garment_piece_names"]});
+    if let Some(start) = native_append {
+        crate::compat_scene::remember_draft_append(state, start);
+    }
     let images = if boolean(args, "snapshots", true) {
         let views = if rebuild || array(&args["views"]).is_empty() {
             json!(["front", "3/4-right", "back"])

@@ -275,6 +275,44 @@ pub(in crate::compat_scene) fn remember_panel_deletion(state: &mut Value, retain
     state[SOURCE]["retained_panels"] = json!(retained);
 }
 
+fn drafted_append(state: &Value) -> Result<Option<usize>, String> {
+    let Some(draft) = state[SOURCE].get("draft_append") else { return Ok(None) };
+    let start = draft["start"].as_u64().and_then(|v| usize::try_from(v).ok())
+        .filter(|&start| start > 0 && start < super::super::array(state, "patterns").len());
+    if draft["layout"].as_u64() != Some(layout_fingerprint(state))
+        || draft["fabrics"].as_u64() != Some(fabric_fingerprint(state))
+        || draft["avatars"].as_u64() != Some(avatar_fingerprint(state))
+    {
+        return Err("native save requires the unchanged appended draft".into());
+    }
+    start.map(Some).ok_or_else(|| "invalid native draft append start".into())
+}
+
+pub(crate) fn draft_append_start(state: &Value) -> Option<usize> {
+    let source = &state[SOURCE];
+    if !source.is_object() || author_scene(source) || source["empty_append"] == true {
+        return None;
+    }
+    if let Some(start) = drafted_append(state).ok()? {
+        return Some(start);
+    }
+    if source["garment"].as_u64() != Some(garment_fingerprint(state))
+        || source["fabrics"].as_u64() != Some(fabric_fingerprint(state))
+        || has_material_edits(source)
+    {
+        return None;
+    }
+    let count = super::super::array(state, "patterns").len();
+    (count > 0).then_some(count)
+}
+
+pub(crate) fn remember_draft_append(state: &mut Value, start: usize) {
+    let has_pose = state[SOURCE]["draft_append"]["has_pose"] == true
+        || !super::super::array(&state["simulation"], "meshes").is_empty();
+    state[SOURCE]["draft_append"] = json!({"start": start, "layout": layout_fingerprint(state),
+        "fabrics": fabric_fingerprint(state), "avatars": avatar_fingerprint(state), "has_pose": has_pose});
+}
+
 pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool, recovered_zpac: bool) -> Option<Vec<Value>> {
     let source = &state[SOURCE];
     if source["garment"].as_u64()? != garment_fingerprint(state)
@@ -402,14 +440,16 @@ fn rename_fields(record: &Fields<'_>, utf8: &[u8], legacy: &[u8], name: &str) ->
     Ok(updated)
 }
 
-fn update_panels(pac: &[u8], state: &Value, write_pose: bool) -> Result<Option<Vec<u8>>, String> {
+fn update_panels(pac: &[u8], state: &Value, pose_count: usize, write_distance: bool) -> Result<Option<Vec<u8>>, String> {
     let root = Fields::read(pac)?;
     let editor = root.map(b"mapPatternEditor")?;
     let patterns = editor.map(b"mapPatternList")?;
     let records = patterns.get(b"listPattern", LIST_TYPE)?;
     let panels = super::super::array(state, "patterns");
     let meshes = super::super::array(&state["simulation"], "meshes");
-    if write_pose && (meshes.len() != panels.len() || panels.iter().zip(meshes).any(|(panel, mesh)| {
+    if pose_count > 0 && (meshes.len() < pose_count
+        || (pose_count == panels.len() && meshes.len() != pose_count)
+        || panels.iter().zip(meshes).take(pose_count).any(|(panel, mesh)| {
         panel["id"].is_null() || panel["id"] != mesh["id"] || !crate::compat_fit::mesh_uses_rest_mm(state, mesh)
     })) {
         return Err("native save requires a continued native pose for every original panel".into());
@@ -423,11 +463,19 @@ fn update_panels(pac: &[u8], state: &Value, write_pose: bool) -> Result<Option<V
             bytes.push(Cow::Borrowed(record.encoded()));
             continue;
         }
-        let name = panels
-            .get(current)
-            .and_then(|piece| piece["name"].as_str())
+        let panel = panels.get(current).ok_or("native write requires the original editable panel count")?;
+        let name = panel["name"].as_str()
             .ok_or("native write requires the original editable panel count")?;
-        let posed = if write_pose { replace_positions(&record, &meshes[current])? } else { None };
+        let mut posed = if current < pose_count { replace_positions(&record, &meshes[current])? } else { None };
+        if write_distance {
+            let distance = panel["particle_distance"].as_f64().map(|d| d as f32)
+                .filter(|d| d.is_finite() && *d > 0.).ok_or("invalid appended draft particle distance")?;
+            let current = Fields::read(posed.as_deref().unwrap_or_else(|| record.encoded()))?;
+            let bytes = distance.to_le_bytes();
+            if current.get(b"fEdgeLength", 6)? != bytes {
+                posed = Some(current.replace(b"fEdgeLength", 6, &bytes)?);
+            }
+        }
         current += 1;
         let element = record.map(b"mapElement")?;
         if element.get(b"qsNameUTF8", BYTE_TYPE)? == name.as_bytes() {
@@ -658,8 +706,8 @@ fn archive_members<'a>(members: impl IntoIterator<Item = (&'a str, &'a [u8])>) -
     Ok(zip.finish().map_err(|error| error.to_string())?.into_inner())
 }
 
-fn authored_garment(state: &Value) -> Result<Vec<u8>, String> {
-    let native_author::Garment { body, images } = native_author::encode(state)?;
+fn authored_garment(state: &Value, composable: bool) -> Result<Vec<u8>, String> {
+    let native_author::Garment { body, images } = native_author::encode(state, composable)?;
     let manifest = serde_json::to_vec(&std::iter::once("garment.pac")
         .chain(images.keys().map(String::as_str)).map(|name| (name, name))
         .collect::<std::collections::BTreeMap<_, _>>()).map_err(|error| error.to_string())?;
@@ -671,6 +719,48 @@ fn authored_garment(state: &Value) -> Result<Vec<u8>, String> {
     header.extend(12u32.to_le_bytes());
     header.resize(40, 0);
     join_archive(header, &zip)
+}
+
+fn drafted_garment(state: &Value, start: usize) -> Result<Vec<u8>, String> {
+    use super::super::array;
+    let mut patterns = array(state, "patterns")[start..].to_vec();
+    let ids = patterns.iter().map(|panel| panel["id"].clone()).collect::<HashSet<_>>();
+    let mut slots = HashMap::new();
+    let mut fabrics = Vec::new();
+    for panel in &mut patterns {
+        let index = panel["fabric_index"].as_u64().ok_or("invalid drafted fabric index")?;
+        let slot = if let Some(&slot) = slots.get(&index) {
+            slot
+        } else {
+            let mut fabric = array(state, "fabrics").iter().find(|fabric| fabric["index"] == index)
+                .ok_or("drafted panel refers to a missing fabric")?.clone();
+            let slot = fabrics.len();
+            fabric["index"] = json!(slot);
+            fabrics.push(fabric);
+            slots.insert(index, slot);
+            slot
+        };
+        panel["fabric_index"] = json!(slot);
+    }
+    let mut seams = Vec::new();
+    for seam in array(state, "seams") {
+        match (ids.contains(&seam["pattern_a"]), ids.contains(&seam["pattern_b"])) {
+            (true, true) => seams.push(seam),
+            (false, false) => (),
+            _ => return Err("native draft append cannot join sewing across the original boundary".into()),
+        }
+    }
+    let mut simulation = state["simulation"].clone();
+    if simulation.is_object() {
+        let meshes = array(&simulation, "meshes").iter()
+            .filter(|mesh| ids.contains(&mesh["id"])).collect::<Vec<_>>();
+        simulation["meshes"] = json!(meshes);
+    }
+    authored_garment(&json!({
+        "patterns": patterns, "seams": seams, "fabrics": fabrics, "avatar": state["avatar"],
+        "colorways": [&state["colorways"][0]], "current_colorway": 0,
+        "simulation": simulation,
+    }), true)
 }
 
 fn author_scene(source: &Value) -> bool {
@@ -887,13 +977,16 @@ fn rebind_project_avatars(state: &mut Value, path: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec<u8>, TextureAssets), String> {
+fn append_archives(
+    raw: &[u8], mut pac: Vec<u8>, parts: &[Value], drafted: Option<Vec<u8>>,
+) -> Result<(Vec<u8>, TextureAssets), String> {
     let mut receiver = open_archive(Cursor::new(raw), ZPAC)?;
     let mut asset_names = archive_names(&receiver)?;
     let mut images = TextureAssets::default();
     let mut total_bytes = raw.len() as u64;
-    for source in parts {
-        let bytes = garment_archive(read_source(source)?, source["project"] == true)?;
+    let parts = parts.iter().map(|source| garment_archive(read_source(source)?, source["project"] == true));
+    for bytes in parts.chain(drafted.map(Ok)) {
+        let bytes = bytes?;
         let mut archive = open_archive(Cursor::new(bytes), ZPAC)?;
         let incoming = member(&mut archive, "pac")?;
         if pac.len() + incoming.len() > 256 * 1024 * 1024 {
@@ -1047,7 +1140,7 @@ pub(in crate::compat_scene) fn encode(
     }
     let source = &state[SOURCE];
     if author_scene(source) {
-        let garment = authored_garment(state)?;
+        let garment = authored_garment(state, false)?;
         let output = if project { native_project(Some(&garment), state, thumbnail)? } else { garment };
         if output.len() as u64 > ARCHIVE_LIMIT {
             return Err("native output archive exceeds 512 MiB".into());
@@ -1056,6 +1149,7 @@ pub(in crate::compat_scene) fn encode(
     }
     source_path(source)?;
     let parts = super::super::array(source, "appended");
+    let draft = drafted_append(state)?;
     let source_project = source["project"] == true;
     let empty_append = source["empty_append"] == true;
     let switched = state["current_colorway"] != source["current_colorway"];
@@ -1078,7 +1172,7 @@ pub(in crate::compat_scene) fn encode(
     let changed_garment = source["garment"].as_u64() != Some(garment_fingerprint(state));
     let write_pose = changed_garment && parts.is_empty() && !empty_append
         && source["layout"].as_u64() == Some(layout_fingerprint(state));
-    if changed_garment && !write_pose || !can_save_materials {
+    if draft.is_none() && (changed_garment && !write_pose || !can_save_materials) {
         return Err("native save requires the original layout, with compatible pose, name and fabric edits".into());
     }
     let original = read_source(source)?;
@@ -1097,17 +1191,25 @@ pub(in crate::compat_scene) fn encode(
         let name = state["colorways"][0].as_str().ok_or("native ZPAC has no active colorway name")?;
         pac = native_materials::default_append_colorway(&pac, name)?;
     }
-    let (pac, appended_assets) = if parts.is_empty() {
+    let (pac, appended_assets) = if parts.is_empty() && draft.is_none() {
         (pac, TextureAssets::default())
     } else {
-        append_archives(&garment, pac, parts)?
+        let drafted = draft.map(|start| drafted_garment(state, start)).transpose()?;
+        append_archives(&garment, pac, parts, drafted)?
     };
     let asset_names = || {
         garment_archive.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
             .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
     };
-    let panel_edits = update_panels(&pac, state, write_pose)?;
-    let (edited, assets) = if !parts.is_empty() || empty_append {
+    let pose_count = if let Some(start) = draft {
+        if source["draft_append"]["has_pose"] == true { start } else { 0 }
+    } else if write_pose {
+        super::super::array(state, "patterns").len()
+    } else {
+        0
+    };
+    let panel_edits = update_panels(&pac, state, pose_count, draft.is_some())?;
+    let (edited, assets) = if !parts.is_empty() || empty_append || draft.is_some() {
         (Some(panel_edits.unwrap_or(pac)), appended_assets)
     } else if write_colorways {
         let index = state["current_colorway"]

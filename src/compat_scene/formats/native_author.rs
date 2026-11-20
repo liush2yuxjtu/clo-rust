@@ -1,6 +1,7 @@
 //! Write the native garment records of an editable Rust scene.
 
 mod seams;
+mod colorways;
 
 use super::mesh::triangulate;
 use super::native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
@@ -521,7 +522,7 @@ pub(super) struct Garment {
     pub images: BTreeMap<String, Vec<u8>>,
 }
 
-pub(super) fn encode(state: &Value) -> Result<Garment, String> {
+pub(super) fn encode(state: &Value, composable: bool) -> Result<Garment, String> {
     let panels = array(state, "patterns");
     let fabrics = array(state, "fabrics");
     let colorways = array(state, "colorways");
@@ -536,13 +537,11 @@ pub(super) fn encode(state: &Value) -> Result<Garment, String> {
             "native authoring cannot yet preserve imported geometry; save as .clorust".into(),
         );
     }
-    let [colorway] = colorways else {
-        return Err("native authoring requires a single colorway".into());
-    };
-    let colorway_name = colorway
-        .as_str()
-        .ok_or("invalid native colorway name")?
-        .as_bytes();
+    let active = state["current_colorway"].as_u64()
+        .or_else(|| state["current_colorway"].is_null().then_some(0))
+        .and_then(|index| u32::try_from(index).ok())
+        .filter(|&index| (index as usize) < colorways.len() && colorways.len() <= 4096)
+        .ok_or("invalid native authored colorway catalog")?;
     let panel_materials = panels.iter().map(|panel| {
         panel["fabric_index"].as_u64().and_then(|index| usize::try_from(index).ok())
             .filter(|&index| index < fabrics.len()).ok_or("invalid native panel fabric assignment")
@@ -567,7 +566,7 @@ pub(super) fn encode(state: &Value) -> Result<Garment, String> {
             Ok((material(fabric, id, &physical)?, physical))
         })
         .collect::<Result<Vec<_>, String>>()?.into_iter().unzip();
-    let mut next_id = fabrics.len() as u32 + 1;
+    let mut next_id = (fabrics.len() + colorways.len()) as u32;
     let meshes = array(&state["simulation"], "meshes");
     if meshes
         .iter()
@@ -626,18 +625,25 @@ pub(super) fn encode(state: &Value) -> Result<Garment, String> {
         (b"mapSeamLinePairGroupWithHalfSymmetry", MAP_TYPE, &sewing),
         (b"uiMaxGID", UINT, &count.to_le_bytes()),
     ])?;
-    let palette = encode_map(&[
-        (b"qsName", BYTE_TYPE, colorway_name),
-        (b"qsNameUTF8", BYTE_TYPE, colorway_name),
-        (b"uiID", UINT, &(fabrics.len() as u32 + 1).to_le_bytes()),
-        (b"uiColorwayMainFabricUID", UINT, &1u32.to_le_bytes()),
-        (b"v4MainColor", VEC4, &float_bytes([-1., -1., -1., 1.])?),
-    ])?;
-    let colorways = encode_map(&[
-        (b"listColorway", LIST_TYPE, &records(&[palette])?),
-        (b"uiCurrentCoordinationIndex", UINT, &ZERO),
-        (b"bIsTheNewColorway", BOOL, FALSE),
-    ])?;
+    let palettes = colorways.iter().enumerate().map(|(index, colorway)| {
+        let name = colorway.as_str().ok_or("invalid native colorway name")?.as_bytes();
+        encode_map(&[
+            (b"qsName", BYTE_TYPE, name),
+            (b"qsNameUTF8", BYTE_TYPE, name),
+            (b"uiID", UINT, &((fabrics.len() + index + 1) as u32).to_le_bytes()),
+            (b"uiColorwayMainFabricUID", UINT, &1u32.to_le_bytes()),
+            (b"v4MainColor", VEC4, &float_bytes([-1., -1., -1., 1.])?),
+        ])
+    }).collect::<Result<Vec<_>, _>>()?;
+    let colorways = if composable || palettes.len() > 1 {
+        colorways::encode(&palettes, active, &panel_records, &fabrics, &mut next_id)?
+    } else {
+        encode_map(&[
+            (b"listColorway", LIST_TYPE, &records(&palettes)?),
+            (b"uiCurrentCoordinationIndex", UINT, &ZERO),
+            (b"bIsTheNewColorway", BOOL, FALSE),
+        ])?
+    };
     let body = encode_map(&[
         (b"qsClothIDListUTF8", BYTE_TYPE, b"Default"),
         (b"uiVersion", UINT, &1001u32.to_le_bytes()),

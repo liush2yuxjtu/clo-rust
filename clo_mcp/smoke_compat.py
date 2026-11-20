@@ -4334,8 +4334,8 @@ async def compare_live_garment_workflow():
             }) for session in sessions]
             latest = [await read(session) for session in sessions]
             same(*latest)
-            checkpoints = [checkpoint(report, suffix, scene) for report, suffix, scene in
-                           zip(rebuilt, (".zprj", ".clorust"), latest, strict=True)]
+            checkpoints = [checkpoint(report, ".zprj", scene) for report, scene in
+                           zip(rebuilt, latest, strict=True)]
             assert rebuilt[0] == rebuilt[1], rebuilt
             assert [row["name"] for row in latest[0]["panels"]] == names
             assert [row["fabric_index"] for row in latest[0]["panels"]] == [2] * len(names)
@@ -4349,8 +4349,8 @@ async def compare_live_garment_workflow():
             }) for session in sessions]
             simulated_state = [await read(session) for session in sessions]
             same(*simulated_state)
-            for report, suffix, scene in zip(simulated, (".zprj", ".clorust"), simulated_state, strict=True):
-                checkpoint(report, suffix, scene)
+            for report, scene in zip(simulated, simulated_state, strict=True):
+                checkpoint(report, ".zprj", scene)
                 assert report["simulation"].pop("seconds") >= 0
             assert simulated[0] == simulated[1], simulated
             assert simulated[0]["simulation"]["ok"] is True and simulated[0]["simulation"]["steps"] == 1
@@ -4388,6 +4388,143 @@ async def compare_live_garment_workflow():
                       "invalid_draft_kept_loaded_avatar": True, "invalid_rebuild_kept_history": True,
                       "invalid_snapshot_kept_successful_build": True, "positive_step_merge_flags": [False, False],
                       "new_session_history_empty": True, "result": "pass"}))
+
+
+async def verify_native_mixed_draft():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    source = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    references = Path(os.environ["CLO_MIXED_DRAFT_REFERENCE"])
+    request = {"spec": {"garment": "top", "silhouette": "regular", "neckline": "crew",
+                        "sleeve": "short", "fabric": "cotton", "color": "navy", "particle_distance": 45},
+               "simulate_steps": 0, "snapshots": False, "replace_existing": False}
+    assert source.is_file() and not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    async def open_project(session, path):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        return await json_result(session, "scene_open", {"path": str(path)})
+
+    async def snapshot(session, label):
+        path = root / f"{label}.clorust"
+        await json_result(session, "scene_save", {"path": str(path)})
+        return json.loads(path.read_text())["scene"]
+
+    async def contents(session):
+        full = await read_composed_archive(session)
+        panels = (await json_result(session, "pattern_list"))["patterns"]
+        fields = {key: full[key] for key in ("patterns", "colorways", "current_colorway",
+                                              "catalog_names", "fabric_rgba_f32")}
+        fields["seams"] = [group["patterns"] for group in full["seams"]["groups"]]
+        geometry = [[*panel["pos_2d"], float(panel["bbox"]["Width"]), float(panel["bbox"]["Height"])]
+                    for panel in panels]
+        return fields, geometry
+
+    async def build(session, path, deleted=False, steps=0):
+        await open_project(session, path)
+        if deleted:
+            await json_result(session, "pattern_delete", {"patterns": ["0"]})
+        built = await json_result(session, "garment_build", request | {"simulate_steps": steps})
+        assert len(built["pieces"]) == 6 and len(built["seams"]) == 14
+        assert built["checkpoint_before_build"] is None and built["avatar"] == "Mara_09_eye_Joint"
+
+    async with open_backend("rust") as rust, open_backend("rust") as reader:
+        await open_project(reader, source)
+        original = (await snapshot(reader, "original"))["simulation"]["meshes"]
+        assert len(original) == 2
+        verified = []
+        for tag, deleted, panels, seams in (("append", False, 8, 15), ("delete-append", True, 7, 14)):
+            reference = references / f"official-{tag}.zprj"
+            await open_project(reader, reference)
+            expected, original_geometry = await contents(reader)
+            assert len(expected["patterns"]) == panels and len(expected["seams"]) == seams
+            assert len(expected["colorways"]) == 2 and len(expected["catalog_names"]) == 2
+
+            await build(rust, source, deleted)
+            outputs = [root / f"{tag}.{suffix}" for suffix in ("zpac", "zprj")]
+            for output in outputs:
+                await json_result(rust, "scene_save", {"path": str(output), "thumbnail": False})
+            await build(rust, source, deleted)
+            rebuilt = await json_result(rust, "garment_rebuild", {
+                "changes": {"color": "red"}, "simulate_steps": 0, "snapshots": False,
+            })
+            checkpoint = Path(rebuilt["checkpoint_before_build"])
+            assert checkpoint.suffix == ".zprj" and checkpoint.is_file()
+            assert checkpoint.parent == root / "checkpoints"
+            latest = await json_result(rust, "garment_last_spec")
+            assert latest["spec"]["color"] == "red"
+            outputs.append(checkpoint)
+            for output in outputs:
+                if output == checkpoint:
+                    opened = await json_result(rust, "checkpoint_restore", {"name": output.stem})
+                    assert await json_result(rust, "garment_last_spec") == latest
+                    session = rust
+                else:
+                    opened = await open_project(reader, output)
+                    session = reader
+                assert opened["pattern_count"] == panels
+                assert opened["avatars"] == (["Mara_09_eye_Joint"] if output.suffix == ".zprj" else [])
+                fields, geometry = await contents(session)
+                assert fields == expected, (tag, fields, expected)
+                error = max(abs(a - b) for now, prior in zip(geometry, original_geometry, strict=True)
+                            for a, b in zip(now, prior, strict=True))
+                assert error <= 0.001
+                meshes = (await snapshot(session, f"mixed-{tag}-{output.suffix[1:]}-{output.stem}"))["simulation"]["meshes"]
+                preserved = original[int(deleted):]
+                for old, live in zip(preserved, meshes[:len(preserved)], strict=True):
+                    assert all(old[key] == live[key] for key in ("positions", "triangles", "texcoords"))
+                verified.append({"case": tag, "file": output.name, "panels": panels, "seam_groups": seams,
+                                 "max_2d_delta_mm": error, "preserved_panels": len(preserved)})
+
+        motion = []
+        for label, steps in (("in-build", 1), ("after-build", 0)):
+            await build(rust, source, steps=steps)
+            if steps == 0:
+                await json_result(rust, "simulate", {"steps": 1})
+            saved = (await snapshot(rust, f"{label}-before"))["simulation"]["meshes"]
+            output = root / f"{label}.zprj"
+            await json_result(rust, "scene_save", {"path": str(output), "thumbnail": False})
+            await open_project(reader, output)
+            reopened = (await snapshot(reader, f"{label}-after"))["simulation"]["meshes"]
+            assert len(saved) == len(reopened) == 8
+            errors = []
+            for before, after in zip(saved, reopened, strict=True):
+                assert before["triangles"] == after["triangles"]
+                errors.extend(math.dist(a, b) for a, b in zip(before["positions"], after["positions"], strict=True))
+            assert max(errors) <= 0.001
+            motion.append({"case": label, "vertices": len(errors), "saved_pose_max_delta_mm": max(errors)})
+
+        await build(rust, source, deleted=True)
+        for changes, steps in (({"color": "#246", "sleeve": "long"}, 0), ({"sleeve": "short"}, 1)):
+            rebuilt = await json_result(rust, "garment_rebuild", {
+                "changes": changes, "simulate_steps": steps, "snapshots": False,
+            })
+            checkpoint = Path(rebuilt["checkpoint_before_build"])
+            assert checkpoint.suffix == ".zprj" and checkpoint.is_file()
+        await open_project(reader, checkpoint)
+        consecutive, _ = await contents(reader)
+        assert len(consecutive["patterns"]) == 6
+        assert consecutive["colorways"] == expected["colorways"]
+        assert consecutive["current_colorway"] == expected["current_colorway"]
+        assert consecutive["catalog_names"] == ["V2_Woven_Poplin_1"]
+        rgba = struct.pack("<4f", 0x22 / 255, 0x44 / 255, 0x66 / 255, 1.0).hex()
+        assert consecutive["fabric_rgba_f32"] == [[rgba], [rgba]]
+
+        changed = root / "source-to-change.zprj"
+        shutil.copyfile(source, changed)
+        await build(rust, changed)
+        with changed.open("r+b") as handle:
+            handle.truncate(changed.stat().st_size - 1)
+        protected = root / "protected-target.zprj"
+        protected.write_bytes(b"existing file")
+        before = await json_result(rust, "scene_info")
+        denied = await rust.call_tool("scene_save", {"path": str(protected), "thumbnail": False})
+        assert denied.isError and "source archive changed" in denied.content[0].text
+        assert protected.read_bytes() == b"existing file"
+        assert await json_result(rust, "scene_info") == before
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
+    print(json.dumps({"result": "pass", "native_outputs": verified, "motion": motion,
+                      "consecutive_checkpoint_colorways": consecutive["colorways"],
+                      "changed_source_rejected": True, "source_sha256": original_hash}))
 
 
 async def verify_native_avatar_placement():
@@ -8662,6 +8799,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
                              const=compare_live_avatar_measurements,
                              help="compare live avatar mesh measurements and shared measurement cache behavior")
+    comparisons.add_argument("--verify-native-mixed-draft", action="store_const", dest="comparison",
+                             const=verify_native_mixed_draft,
+                             help="write mixed original and drafted panels as native archives")
     comparisons.add_argument("--verify-native-avatar-placement", action="store_const", dest="comparison",
                              const=verify_native_avatar_placement,
                              help="compare Rust initial and reset poses against saved native AVT projects")
