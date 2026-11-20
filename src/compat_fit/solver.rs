@@ -1,4 +1,5 @@
 mod native_stitches;
+mod shirring;
 
 use super::{array, assets, boolean, number, string};
 use crate::collision::MeshCollider;
@@ -59,6 +60,8 @@ pub struct Mesh {
     stiffness: f64,
     #[serde(skip)]
     frozen: bool,
+    #[serde(skip)]
+    shirring_vertices: usize,
 }
 
 fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
@@ -302,6 +305,8 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
     if distance.is_finite() {
         refine(&mut points, &mut triangles, &mut sides, distance);
     }
+    let shirring_vertices =
+        shirring::refine(pattern, &mut points, &mut triangles, &mut sides, distance)?;
     let positions = placement(pattern, &points, &state["avatar"]);
     let velocities = vec![[0.0; 3]; positions.len()];
     Ok(Mesh {
@@ -316,6 +321,7 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         sides,
         stiffness: panel_stiffness(pattern, state),
         frozen: boolean(pattern, "freeze", false),
+        shirring_vertices,
     })
 }
 
@@ -497,6 +503,7 @@ fn native_mesh(
         sides,
         stiffness: panel_stiffness(pattern, state),
         frozen: boolean(pattern, "freeze", false),
+        shirring_vertices: 0,
     })
 }
 
@@ -1140,6 +1147,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             }
         }
     }
+    let shirring_vertices: usize = meshes.iter().map(|mesh| mesh.shirring_vertices).sum();
     state["simulation"] = json!({"steps":total,"quality":quality,"meshes":meshes});
     if use_native {
         state["simulation"]["source"] = json!(RUST_NATIVE_REST);
@@ -1169,7 +1177,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
-        "elastic_constraint_count":elastic.len(),"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
+        "elastic_constraint_count":elastic.len(),"shirring_refined_vertices":shirring_vertices,"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {
