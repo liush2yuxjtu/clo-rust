@@ -3,7 +3,7 @@
 use super::{
     clo_native::{member, open_archive, ARCHIVE_LIMIT, ZPAC, ZPRJ},
     native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_recolor, native_textures, write,
+    native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -54,11 +54,21 @@ fn garment_fingerprint(state: &Value) -> u64 {
         "native_seam_groups",
         "garment_spec",
         "colorways",
-        "current_colorway",
         "imported_meshes",
     ] {
         state[key].hash(&mut hash);
     }
+    let simulation = &state["simulation"];
+    hash_except(simulation, &["meshes"], &mut hash);
+    for mesh in super::super::array(simulation, "meshes") {
+        hash_except(mesh, &["name"], &mut hash);
+    }
+    hash.finish()
+}
+
+fn fabric_fingerprint(state: &Value) -> u64 {
+    let mut hash = DefaultHasher::new();
+    state["current_colorway"].hash(&mut hash);
     for fabric in super::super::array(state, "fabrics") {
         hash_except(
             fabric,
@@ -75,12 +85,29 @@ fn garment_fingerprint(state: &Value) -> u64 {
         }
         hash_except(&fabric["info"]["catalog"], &["Color", "Texture"], &mut hash);
     }
-    let simulation = &state["simulation"];
-    hash_except(simulation, &["meshes"], &mut hash);
-    for mesh in super::super::array(simulation, "meshes") {
-        hash_except(mesh, &["name"], &mut hash);
-    }
     hash.finish()
+}
+
+fn colorway_fingerprint(state: &Value) -> Option<u64> {
+    let names = state["colorways"].as_array()?;
+    let active = usize::try_from(state["current_colorway"].as_u64()?).ok()?;
+    if names.len() < 2 || active >= names.len() {
+        return None;
+    }
+    let mut hash = DefaultHasher::new();
+    for fabric in super::super::array(state, "fabrics") {
+        let variants = &fabric["native_colorway_materials"];
+        let values = variants["values"].as_array()?;
+        if variants["names"] != state["colorways"] || values.len() != names.len() {
+            return None;
+        }
+        for (index, material) in values.iter().enumerate() {
+            // The current material carries live edits. Its archived slot may be stale.
+            let material = if index == active { fabric } else { material };
+            hash_except(material, &["native_colorway_materials"], &mut hash);
+        }
+    }
+    Some(hash.finish())
 }
 
 fn avatar_fingerprint(state: &Value) -> u64 {
@@ -100,6 +127,9 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "path": path.to_str()?,
                 "project": project,
                 "garment": garment_fingerprint(state),
+                "fabrics": fabric_fingerprint(state),
+                "colorways": colorway_fingerprint(state),
+                "current_colorway": state["current_colorway"],
                 "avatars": avatar_fingerprint(state),
                 "textures": super::super::array(state, "fabrics").iter().map(|fabric| &fabric["texture_maps"]).collect::<Vec<_>>(),
             }))
@@ -347,10 +377,19 @@ pub(in crate::compat_scene) fn encode(
     if project && !source_project {
         return Err("saving a .zprj requires a loaded native .zprj project".into());
     }
+    let switched = state["current_colorway"] != source["current_colorway"];
+    let changed_material = source["fabrics"].as_u64() != Some(fabric_fingerprint(state));
+    let can_save_materials = !switched && !changed_material
+        || source["colorways"].as_u64().is_some_and(|saved| {
+            super::super::array(source, "recolored").is_empty()
+                && super::super::array(source, "retextured").is_empty()
+                && colorway_fingerprint(state) == Some(saved)
+        });
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
+        || !can_save_materials
         || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
     {
-        return Err("native save currently preserves the loaded scene, pattern renames and verified fabric edits; save other edits as .clorust".into());
+        return Err("native save supports the loaded scene, pattern renames, verified fabric edits and unedited archived colorway selections; save other edits as .clorust".into());
     }
     let expected = stamp(template)?;
     if expected != source["stamp"] {
@@ -372,21 +411,30 @@ pub(in crate::compat_scene) fn encode(
         "pac",
     )?;
     let renamed = renamed_pac(&pac, state)?;
-    let recolored = native_recolor::recolor(
-        renamed.as_deref().unwrap_or(&pac),
-        state,
-        super::super::array(source, "recolored"),
-        super::super::array(source, "retextured"),
-    )?;
-    let edited = recolored.or(renamed);
-    let (textures, assets) = native_textures::replacements(
-        edited.as_deref().unwrap_or(&pac),
-        state,
-        super::super::array(source, "textures"),
-        super::super::array(source, "recolored"),
-        super::super::array(source, "retextured"),
-    )?;
-    let edited = textures.or(edited);
+    let (edited, assets) = if switched {
+        let index = state["current_colorway"]
+            .as_u64()
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or("invalid active colorway index")?;
+        let pac = native_materials::select_colorway(renamed.as_deref().unwrap_or(&pac), index)?;
+        (Some(pac), HashMap::new())
+    } else {
+        let recolored = native_recolor::recolor(
+            renamed.as_deref().unwrap_or(&pac),
+            state,
+            super::super::array(source, "recolored"),
+            super::super::array(source, "retextured"),
+        )?;
+        let edited = recolored.or(renamed);
+        let (textures, assets) = native_textures::replacements(
+            edited.as_deref().unwrap_or(&pac),
+            state,
+            super::super::array(source, "textures"),
+            super::super::array(source, "recolored"),
+            super::super::array(source, "retextured"),
+        )?;
+        (textures.or(edited), assets)
+    };
     let has_edits = edited.is_some();
     let garment = match edited {
         Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes, assets)?,

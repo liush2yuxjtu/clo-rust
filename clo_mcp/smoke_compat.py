@@ -4117,10 +4117,30 @@ async def verify_native_colorway_refresh():
                 assert scene["colorways"] == list(names) and scene["current_colorway"] == 1
                 assert [await api(color, i, 0, 0) for i in range(2)] == expected
                 await export("python-reopened", "glb", True)
+                for selected in (0, 1):
+                    await api(select, selected)
+                    await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                    glb = await export(f"saved-colorway-{selected}", "glb", False)
+                    model, _ = read_gltf_export(glb)
+                    rgb = model["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][:3]
+                    assert all(abs(a - b ** 2.2) < 1e-6
+                               for a, b in zip(rgb, expected[selected][:3], strict=True))
+                    await json_result(session, "scene_open", {"path": str(saved)})
+                    assert (await json_result(session, "scene_info"))["current_colorway"] == selected
+                    assert await api(color, 0, 0) == expected[selected]
+                    assert [await api(color, i, 0, 0) for i in range(2)] == expected
+                original = saved.read_bytes()
+                await api(select, 0)
+                await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#123456"})
+                rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
+                assert rejected.isError and saved.read_bytes() == original
+                assert (await json_result(session, "scene_info"))["current_colorway"] == 0
     print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
                       "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
                       "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True,
-                      "public_and_python_reopen_restore_bundle": True}))
+                      "public_and_python_reopen_restore_bundle": True,
+                      "native_save_preserves_selected_colorway": True,
+                      "rejects_switched_material_edits_without_overwriting": True}))
 
 
 async def verify_native_append():

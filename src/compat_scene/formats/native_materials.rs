@@ -1,7 +1,8 @@
 //! Restore recorded material identity and front-face color for scene queries and display.
 
-use super::native_pose::{map_list, panel_records, Fields, BYTE_TYPE, LIST_TYPE};
+use super::native_pose::{encoded_list, map_list, panel_records, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 const INT_TYPE: u8 = 4;
@@ -170,6 +171,48 @@ pub(super) fn colorway_materials<'a>(
             Ok(material)
         }).collect()
     }).collect()
+}
+
+pub(super) fn select_colorway(pac: &[u8], index: u32) -> Result<Vec<u8>, String> {
+    let root = Fields::read(pac)?;
+    let table = root.map(b"mapColorWay")?;
+    let fabrics = map_list(root.get(b"listFabric", LIST_TYPE)?, 4096)?;
+    let materials = colorway_materials(&root, &fabrics)?;
+    let selected = materials.get(index as usize).ok_or("invalid native colorway index")?;
+    let fabrics = fabrics.iter().zip(selected)
+        .map(|(fabric, material)| select_fabric_material(fabric, material).map(Cow::Owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    let table = table.replace(b"uiCurrentCoordinationIndex", UINT_TYPE, &index.to_le_bytes())?;
+    let root = root.replace(b"mapColorWay", MAP_TYPE, &table)?;
+    Fields::read(&root)?.replace(b"listFabric", LIST_TYPE, &encoded_list(&fabrics)?)
+}
+
+fn select_fabric_material(fabric: &Fields<'_>, selected: &Fields<'_>) -> Result<Vec<u8>, String> {
+    let legacy = fabric.map(b"mapColorwayInfo")?;
+    let legacy_rows = map_list(legacy.get(b"listColorwayInfo", LIST_TYPE)?, 4096)?;
+    let [legacy_row] = legacy_rows.as_slice() else {
+        return Err("native fabric has an unsupported legacy colorway table".into());
+    };
+    let material_list = legacy_row.get(b"listMaterial2D", LIST_TYPE)?;
+    let old_material = fabric.map(b"mapMaterial2D")?;
+    let legacy_material = map_list(material_list, 64)?;
+    let old_faces = old_material.get(b"listFaceMaterial", LIST_TYPE)?;
+    if !matches!(legacy_material.as_slice(), [material] if material.encoded() == old_material.encoded())
+        || legacy_row.get(b"listFaceMaterial", LIST_TYPE)? != old_faces
+    {
+        return Err("native fabric legacy material differs from its active material".into());
+    }
+    // CLO stores the active style chip in the main material and both legacy mirrors.
+    let selected_list = encoded_list(&[Cow::Borrowed(selected.encoded())])?;
+    let legacy_row = legacy_row.replace(b"listMaterial2D", LIST_TYPE, &selected_list)?;
+    let legacy_row = Fields::read(&legacy_row)?.replace(
+        b"listFaceMaterial", LIST_TYPE, selected.get(b"listFaceMaterial", LIST_TYPE)?,
+    )?;
+    let legacy = legacy.replace(
+        b"listColorwayInfo", LIST_TYPE, &encoded_list(&[Cow::Borrowed(&legacy_row)])?,
+    )?;
+    let fabric = fabric.replace(b"mapMaterial2D", MAP_TYPE, selected.encoded())?;
+    Fields::read(&fabric)?.replace(b"mapColorwayInfo", MAP_TYPE, &legacy)
 }
 
 fn assignment(record: &Fields<'_>, count: usize) -> Result<usize, String> {

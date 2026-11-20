@@ -514,6 +514,14 @@ archive with `scene_open` and with the default Python `ImportZprj` or
 reopening, the active index, and both archived RGBA values. Record the
 preceding save and any colorway refresh calls in the evidence.
 
+Switch the archived active colorway from index `1` to `0`, save in the
+same native format and reopen. Verify the active RGBA and both indexed
+materials, GLB output after saving, and the switch back to index `1`.
+With distinct source textures, open the Rust-written archive in official CLO
+and compare the active texture with the official export from the same source.
+An unsupported multi-colorway material edit must leave the previous target
+file intact when saving fails.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.
