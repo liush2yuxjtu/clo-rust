@@ -1,6 +1,7 @@
 mod native_stitches;
 
 use super::{array, assets, boolean, number, string};
+use crate::collision::MeshCollider;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -937,7 +938,26 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
         (meshes, resume)
     };
-    let body = &state["avatar"]["body"];
+    let primary_avatar = &state["avatar"];
+    let use_saved_avatar_proxy = |avatar: &Value| use_native && !avatar["source_project"].is_null();
+    let mesh_geometry = |avatar: &Value| {
+        (!avatar["mesh"].is_null() && !use_saved_avatar_proxy(avatar))
+            .then(|| avatar_geometry(avatar))
+            .into_iter()
+            .flatten()
+    };
+    let primary_triangles = MeshCollider::new(mesh_geometry(primary_avatar));
+    let additional_triangles = MeshCollider::new(
+        array(&state["additional_avatars"])
+            .iter()
+            .flat_map(mesh_geometry),
+    );
+    let colliders = [primary_triangles.as_ref(), additional_triangles.as_ref()];
+    let body = if primary_triangles.is_some() {
+        &Value::Null
+    } else {
+        &primary_avatar["body"]
+    };
     let proxies = if body.is_null() { vec![] } else { limbs(body) };
     let mut offsets = Vec::new();
     let mut positions = Vec::new();
@@ -963,6 +983,22 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         _ => 12,
     };
     let dt = 1.0 / 30.0;
+    let mut contacts = 0usize;
+    let use_mesh_collision = colliders.iter().any(Option::is_some);
+    let mut start_of_iteration = if use_mesh_collision {
+        positions.clone()
+    } else {
+        Vec::new()
+    };
+    let reserve_contact = |start: Point, end: &mut Point| {
+        usize::from(MeshCollider::sweep(
+            colliders.iter().flatten().copied(),
+            start,
+            end,
+            0.5,
+        ))
+    };
+    let using_proxy = !body.is_null();
     let mut old = positions.clone();
     for _ in 0..steps {
         old.copy_from_slice(&positions);
@@ -980,16 +1016,29 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 p[i] += v[i] * dt;
             }
         }
+        if use_mesh_collision {
+            for ((p, &start), &weight) in positions.iter_mut().zip(&old).zip(&weights) {
+                if weight > 0.0 {
+                    contacts += reserve_contact(start, p);
+                }
+            }
+        }
         for _ in 0..iterations {
+            if use_mesh_collision {
+                start_of_iteration.copy_from_slice(&positions);
+            }
             for c in constraints.iter().chain(&seam_constraints) {
                 apply_constraint(&mut positions, &weights, c);
             }
             for stitch in &native_stitches.constraints {
                 stitch.apply(&mut positions, &weights);
             }
-            for (p, &weight) in positions.iter_mut().zip(&weights) {
+            for (i, (p, &weight)) in positions.iter_mut().zip(&weights).enumerate() {
                 if weight > 0.0 {
                     project_proxy(p, body, &proxies);
+                    if use_mesh_collision {
+                        contacts += reserve_contact(start_of_iteration[i], p);
+                    }
                 }
             }
         }
@@ -1038,10 +1087,15 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut limitations = vec![
         "self-collision unavailable".to_owned(),
-        "avatar collisions use an analytic proxy".to_owned(),
         "fabric and edge properties are partially implemented".to_owned(),
         "no CLO material calibration".to_owned(),
     ];
+    if use_mesh_collision {
+        limitations.push("Static avatar triangle collisions sweep cloth vertices; pre-existing penetrations and moving avatars are unavailable.".into());
+    }
+    if using_proxy {
+        limitations.push("The primary avatar uses an analytic collision proxy.".into());
+    }
     if use_native {
         limitations.push("Native topology and saved drape initialize the independent CPU solver. Official CLO solver velocities and state are unavailable.".into());
     }
@@ -1053,7 +1107,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
-        "native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
+        "mesh_collision_contacts":contacts,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {

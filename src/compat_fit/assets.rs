@@ -362,7 +362,7 @@ fn avatar_from_mesh(
         });
         let mut warnings=vec![
             "Loaded saved AVT rest geometry only. Native skinning, posing, and avatar textures are unavailable.",
-            "Body measurements are estimated. The CPU cloth solver uses an analytic collision proxy.",
+            "Body measurements are estimated. The imported mesh represents the avatar rest pose.",
         ];
         if names.is_empty() {
             warnings.push("Native arrangement names are unavailable. Using built-in names.");

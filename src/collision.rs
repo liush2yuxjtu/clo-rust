@@ -52,26 +52,31 @@ impl Triangle {
         Self { p, bounds }
     }
     fn crosses_segment(&self, a: Point, b: Point) -> bool {
+        self.segment_fraction(a, b)
+            .is_some_and(|t| (1e-8..1.0 - 1e-8).contains(&t))
+    }
+
+    fn segment_fraction(&self, a: Point, b: Point) -> Option<f64> {
         let [p, q, r] = self.p;
         let (u, v, ray) = (sub(q, p), sub(r, p), sub(b, a));
         let x = cross(ray, v);
         let det = dot(u, x);
         if det.abs() < 1e-10 {
-            return false;
+            return None;
         }
         let inv = det.recip();
         let delta = sub(a, p);
         let s = dot(delta, x) * inv;
         if !(0.0..=1.0).contains(&s) {
-            return false;
+            return None;
         }
         let y = cross(delta, u);
         let t = dot(ray, y) * inv;
         if t < 0.0 || s + t > 1.0 {
-            return false;
+            return None;
         }
         let k = dot(v, y) * inv;
-        (1e-8..1.0 - 1e-8).contains(&k)
+        (0.0..=1.0).contains(&k).then_some(k)
     }
     fn crosses_edges(&self, other: &Self) -> bool {
         let [a, b, c] = other.p;
@@ -112,6 +117,40 @@ impl Bvh {
             Box::new(Self::new(right)),
         )
     }
+    fn first_contact(
+        &self,
+        bounds: Bounds,
+        start: Point,
+        end: Point,
+        nearest: &mut Option<(f64, Point)>,
+    ) {
+        let node_bounds = match self {
+            Self::Leaf(b, _) | Self::Branch(b, _, _) => *b,
+        };
+        if !node_bounds.overlaps(bounds) {
+            return;
+        }
+        match self {
+            Self::Branch(_, left, right) => {
+                left.first_contact(bounds, start, end, nearest);
+                right.first_contact(bounds, start, end, nearest);
+            }
+            Self::Leaf(_, faces) => {
+                for face in faces {
+                    if !face.bounds.overlaps(bounds) {
+                        continue;
+                    }
+                    if let Some(t) = face.segment_fraction(start, end) {
+                        if nearest.is_none_or(|(best, _)| t < best) {
+                            let [a, b, c] = face.p;
+                            *nearest = Some((t, cross(sub(b, a), sub(c, a))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn query(&self, cloth: &Triangle, counts: &mut Count) {
         let bounds = match self {
             Self::Leaf(b, _) | Self::Branch(b, _, _) => *b,
@@ -138,6 +177,60 @@ impl Bvh {
                 }
             }
         }
+    }
+}
+
+/// Static triangle surfaces against which the cloth solver sweeps vertices.
+pub(crate) struct MeshCollider(Bvh);
+
+impl MeshCollider {
+    pub(crate) fn new(
+        meshes: impl IntoIterator<Item = (Vec<Point>, Vec<[usize; 3]>)>,
+    ) -> Option<Self> {
+        let mut triangles = Vec::new();
+        for (points, faces) in meshes {
+            for [a, b, c] in faces {
+                let (Some(&a), Some(&b), Some(&c)) = (points.get(a), points.get(b), points.get(c))
+                else {
+                    continue;
+                };
+                if [a, b, c].iter().flatten().all(|v| v.is_finite()) {
+                    triangles.extend(nondegenerate([a, b, c]));
+                }
+            }
+        }
+        (!triangles.is_empty()).then(|| Self(Bvh::new(triangles)))
+    }
+
+    pub(crate) fn sweep<'a>(
+        surfaces: impl IntoIterator<Item = &'a Self>,
+        start: Point,
+        end: &mut Point,
+        clearance: f64,
+    ) -> bool {
+        if start == *end {
+            return false;
+        }
+        let bounds = Bounds {
+            low: std::array::from_fn(|i| start[i].min(end[i])),
+            high: std::array::from_fn(|i| start[i].max(end[i])),
+        };
+        let mut nearest = None;
+        for surface in surfaces {
+            surface.0.first_contact(bounds, start, *end, &mut nearest);
+        }
+        let Some((t, normal)) = nearest else {
+            return false;
+        };
+        let movement = sub(*end, start);
+        let sign = if dot(movement, normal) > 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let scale = clearance * sign / dot(normal, normal).sqrt();
+        *end = std::array::from_fn(|i| start[i] + t * movement[i] + scale * normal[i]);
+        true
     }
 }
 
@@ -308,6 +401,21 @@ fn write_debug(path: &str, points: &[(Point, usize)]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sweep_stops_at_nearest_surface_regardless_of_face_winding() {
+        let plane = |y, triangle| {
+            MeshCollider::new([(vec![[-4.0, y, -4.0], [4.0, y, -4.0], [0.0, y, 4.0]], vec![triangle])]).unwrap()
+        };
+        let far = plane(1.0, [0, 1, 2]);
+        let near = plane(3.0, [2, 1, 0]);
+        let start = [0.0, 10.0, 0.0];
+        let mut end = [0.0, -3.0, 0.0];
+        assert!(MeshCollider::sweep([&far, &near], start, &mut end, 0.5));
+        assert!((end[1] - 3.5).abs() < 1e-9);
+        let mut clear = [5.0, 10.0, 0.0];
+        assert!(!MeshCollider::sweep([&near], start, &mut clear, 0.5));
+    }
+
     #[test]
     fn isolated_and_crossing() {
         let body = Triangle::new([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]);

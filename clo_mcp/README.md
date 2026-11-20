@@ -51,6 +51,8 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 `simulate` 未指定新粒距时，可从保存的网格和零初速度启动 Rust CPU 求解，
 后续调用保留 Rust 计算出的速度。显式指定新粒距会重新划分网格。
 CPU 求解器会约束已识别的启用边区间缝线，并报告尚未覆盖的内部线和跨边缝线组。
+静态人台使用载入网格阻挡布料顶点穿越。原生保存姿态里的内嵌人台仅有未摆姿网格，
+因此该路径仍使用近似人台碰撞。
 使用 `.clorust` 保存 Rust 工程。PNG 和 JPEG 基础贴图可用于 2D 和 3D 快照。
 OBJ、GLB 和 glTF 导出会保留已分配的面料底色和基础 PNG 贴图，并支持单色卡的
 `colorways=true`。OBJ 会返回同目录下的 MTL 路径，MTL 引用导出时复制的 PNG 文件。
