@@ -1374,10 +1374,21 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         .or_else(|| draft["simulation"]["steps"].as_i64())
         .unwrap_or(120);
     let sim = if steps > 0 {
-        solver::simulate(
+        let mut simulation = solver::simulate(
             &json!({"steps":steps,"particle_distance":draft["simulation"]["particle_distance"]}),
             &mut next,
-        )?
+        )?;
+        if array(&draft["pieces"])
+            .iter()
+            .any(|piece| piece["layer"].as_i64().is_some_and(|layer| layer != 0))
+        {
+            for pattern in array_mut(&mut next, "patterns") {
+                pattern["layer"] = json!(0);
+            }
+            let relax = solver::simulate(&json!({"steps": (steps / 4).max(30)}), &mut next)?;
+            simulation["extra_steps_after_layer_reset"] = relax["steps"].clone();
+        }
+        simulation
     } else {
         Value::Null
     };

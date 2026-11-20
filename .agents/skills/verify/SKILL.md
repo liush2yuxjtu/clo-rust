@@ -144,6 +144,15 @@ length mismatches, seam directions, waist elastic, warnings and simulation defau
 Build the tiered skirt in a disposable Rust scene and read back its layers,
 seam flags and first-tier elastic before checking one simulation step.
 
+Run `python -m clo_mcp.smoke_compat --verify-tiered-build-relaxation` to
+exercise the full two-stage Rust build. A zero-step build retains initial
+layers. Positive-step builds reset scene layers after the initial settle
+and continue the same pose for `max(30, steps // 4)` steps. Compare a saved
+auto-built pose and velocities to a manual sequence of the same MCP calls.
+The fixture covers an appended pre-existing panel, reopening and resuming,
+rebuild, and a plain top with only one stage. Live CLO comparison requires
+a disposable scene with the bridge connected.
+
 Use `--compare-curved-skirt-preview` for quarter-, half-, three-quarter- and
 full-circle skirts, skater dresses, ball gowns, mermaid dresses and trumpet
 skirts. Compare the complete preview, including radial seam order, the four

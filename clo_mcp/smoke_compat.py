@@ -864,6 +864,79 @@ async def compare_gathered_draft_preview():
                       "comparisons": results, "last_spec_unchanged": True, "zero_tiers_error": "pass"}))
 
 
+async def verify_tiered_build_relaxation():
+    spec = {"garment": "skirt", "silhouette": "tiered", "tiers": 3,
+            "length": "midi", "particle_distance": 100.0}
+    request = {"spec": spec, "snapshots": False, "replace_existing": False}
+    with TemporaryDirectory(prefix="clo-tier-relaxation-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+                       "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints")}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            async def exercise(steps, relax):
+                await json_result(rust, "scene_clear", {"keep_avatar": False})
+                await json_result(rust, "pattern_create", {
+                    "name": "Existing", "points": [[0, 0], [100, 0], [40, 60]],
+                })
+                await json_result(rust, "pattern_ops", {"pattern": "Existing", "op": "layer",
+                                                       "args": {"layer": 4}})
+                source, _ = await save("before-build")
+                manual = await json_result(rust, "garment_build", request | {"simulate_steps": 0})
+                assert manual["simulation"] is None
+                _, drafted = await save("drafted")
+                assert [p["layer"] for p in drafted["patterns"]] == [4, 0, 0, 1, 1, 2, 2]
+                assert len(drafted["seams"]) == len(manual["seams"])
+                await json_result(rust, "simulate", {"steps": steps, "particle_distance": 100.0})
+                _, settled = await save("settled")
+                for panel in drafted["patterns"]:
+                    await json_result(rust, "pattern_ops", {
+                        "pattern": panel["name"], "op": "layer", "args": {"layer": 0},
+                    })
+                _, reset = await save("reset")
+                assert reset["simulation"] == settled["simulation"], "reset must preserve the settled pose"
+                await json_result(rust, "simulate", {"steps": relax})
+                _, reference = await save("manual")
+
+                await json_result(rust, "scene_open", {"path": str(source)})
+                result = await json_result(rust, "garment_build", request | {"simulate_steps": steps})
+                assert result["simulation"]["steps"] == steps
+                assert result["simulation"]["extra_steps_after_layer_reset"] == relax
+                assert result["seams"] == manual["seams"]
+                path, automatic = await save("automatic")
+                assert all(panel["layer"] == 0 for panel in automatic["patterns"])
+                assert automatic["simulation"]["steps"] == steps + relax
+                assert automatic["simulation"] == reference["simulation"]
+                await json_result(rust, "scene_open", {"path": str(path)})
+                await json_result(rust, "simulate", {"steps": 1})
+                _, continued = await save("continued")
+                assert continued["simulation"]["steps"] == steps + relax + 1
+                return {"initial_steps": steps, "relaxation_steps": relax, "panels": len(automatic["patterns"])}
+
+            cases = [await exercise(1, 30), await exercise(124, 31)]
+            rebuilt = await json_result(rust, "garment_rebuild", {
+                "changes": {"tiers": 2}, "simulate_steps": 1, "snapshots": False,
+            })
+            assert rebuilt["simulation"]["extra_steps_after_layer_reset"] == 30
+            _, rebuilt_scene = await save("rebuilt")
+            assert [panel["layer"] for panel in rebuilt_scene["patterns"]] == [0] * 4
+            assert rebuilt_scene["simulation"]["steps"] == 31
+            plain = await json_result(rust, "garment_build", {
+                "spec": {"garment": "top", "length": "waist", "particle_distance": 100.0},
+                "simulate_steps": 1, "snapshots": False,
+            })
+            assert "extra_steps_after_layer_reset" not in plain["simulation"]
+    print(json.dumps({"tools": ["garment_build", "garment_rebuild", "pattern_ops", "simulate"],
+                      "case": "tiered build relaxation", "comparisons": cases,
+                      "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
+
+
 async def compare_curved_skirt_preview():
     cases = (
         {"garment": "skirt", "silhouette": "full-circle", "length": "midi"},
@@ -1239,6 +1312,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-gathered-draft-preview", action="store_const", dest="comparison",
                              const=compare_gathered_draft_preview,
                              help="compare offline gathered and tiered garment draft previews")
+    comparisons.add_argument("--verify-tiered-build-relaxation", action="store_const", dest="comparison",
+                             const=verify_tiered_build_relaxation,
+                             help="verify layer reset, solver continuation and saved drape after tiered builds")
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
@@ -1259,7 +1335,7 @@ if __name__ == "__main__":
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
-                                verify_native_append, verify_mixed_native_append)
+                                verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
