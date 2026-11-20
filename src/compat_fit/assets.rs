@@ -846,12 +846,65 @@ pub fn fabric_library(args: &Value) -> Value {
 }
 
 pub fn fabric_list(state: &Value) -> Value {
-    let fabrics: Vec<_> = array(&state["fabrics"]).iter().map(|value| json!({
-        "index":value["index"],"name":value["name"],"info":{
-            "material":value["info"],"color":value["color"],"texture_maps":value["texture_maps"]
+    let fabrics: Vec<_> = array(&state["fabrics"])
+        .iter()
+        .map(|value| {
+            let material = &value["info"];
+            let catalog = &material["catalog"];
+            let properties = &material["physical_properties"];
+            let rgb = serde_json::from_value::<[f64; 3]>(value["color"].clone()).unwrap_or([1.0; 3]);
+            let [r, g, b] = rgb.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            let hex = format!("{r:02X}{g:02X}{b:02X}");
+            let texture = value["texture_maps"]["base"].as_str()
+                .and_then(|path| Path::new(path).file_stem()?.to_str());
+            let thickness = properties["thickness"].as_f64()
+                .map(|mm| format!("{} mm", mm as f32)).unwrap_or_default();
+            let weight = properties["density"].as_f64()
+                .map(|density| format!("{:.0} g/m2", density * 1_000_000.0)).unwrap_or_default();
+            json!({
+                "index":value["index"],"name":value["name"],"info":{
+                    "Classification": string(catalog, "Classification", string(material, "fabric_type", "None")),
+                    "Color": string(catalog, "Color", &hex),
+                    "ColorCode": format!("#{}", hex.to_ascii_lowercase()),
+                    "Content": string(catalog, "Content", string(material, "composition", "None")),
+                    "Owner": string(catalog, "Owner", "None"),
+                    "Print": string(catalog, "Print", ""),
+                    "SupplierName": string(catalog, "SupplierName", "None"),
+                    "Texture": string(catalog, "Texture", texture.unwrap_or("None")),
+                    "Thickness": thickness, "Weight": weight,
+                    "material":material,"color":value["color"],"texture_maps":value["texture_maps"]
+                }
+            })
+        })
+        .collect();
+    let current = state["current_fabric"]
+        .as_i64()
+        .filter(|&index| fabrics.iter().any(|fabric| fabric["index"] == index))
+        .or_else(|| fabrics.first()?.get("index")?.as_i64())
+        .unwrap_or(-1);
+    json!({"fabrics":fabrics,"current":current})
+}
+
+fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) {
+    fabric["color"] = json!(rgb);
+    let [r, g, b] = rgb;
+    fabric["rgba"] = json!([r, g, b, 1.0]);
+    if let Some(maps) = fabric["texture_maps"].as_object_mut() {
+        maps.remove("base");
+    }
+    if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
+        catalog.remove("Color");
+        catalog.remove("Texture");
+    }
+}
+
+fn update_material_texture(fabric: &mut Value, kind: &str, path: &Path) {
+    fabric["texture_maps"][kind] = json!(path);
+    if kind == "base" {
+        if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
+            catalog.remove("Texture");
         }
-    })).collect();
-    json!({"fabrics":fabrics,"current":state["current_fabric"].as_i64().unwrap_or(if fabrics.is_empty(){-1}else{0})})
+    }
 }
 
 pub fn parse_color(input: &Value) -> Result<[f64; 3], String> {
@@ -977,14 +1030,10 @@ pub fn fabric_apply(args: &Value, state: &mut Value) -> Result<Value, String> {
         .map(|p| texture(p, "base"))
         .transpose()?;
     if let Some(rgb) = rgb {
-        material["color"] = json!(rgb);
-        material["rgba"] = json!([rgb[0], rgb[1], rgb[2], 1.0]);
-        if let Some(maps) = material["texture_maps"].as_object_mut() {
-            maps.remove("base");
-        }
+        update_material_color(&mut material, rgb);
     }
     if let Some(path) = &base_texture {
-        material["texture_maps"]["base"] = json!(path);
+        update_material_texture(&mut material, "base", path);
     }
     let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
         pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&i)
@@ -1036,12 +1085,7 @@ pub fn fabric_set_color(args: &Value, state: &mut Value) -> Result<Value, String
         .ok_or("fabric_index must be a nonnegative integer")?;
     let rgb = parse_color(&args["color"])?;
     let fabric = find_fabric_mut(state, index)?;
-    fabric["color"] = json!(rgb);
-    let [r, g, b] = rgb;
-    fabric["rgba"] = json!([r, g, b, 1.0]);
-    if let Some(maps) = fabric["texture_maps"].as_object_mut() {
-        maps.remove("base");
-    }
+    update_material_color(fabric, rgb);
     crate::compat_scene::mark_native_fabric_color(state, index);
     Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}))
 }
@@ -1052,7 +1096,7 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
         .ok_or("fabric_index must be a nonnegative integer")?;
     let kind = string(args, "map", "base");
     let path = texture(string(args, "image_path", ""), kind)?;
-    find_fabric_mut(state, index)?["texture_maps"][kind] = json!(path);
+    update_material_texture(find_fabric_mut(state, index)?, kind, &path);
     crate::compat_scene::mark_native_fabric_texture(state, index, kind);
     state["current_fabric"] = json!(index);
     Ok(json!({"ok":true}))

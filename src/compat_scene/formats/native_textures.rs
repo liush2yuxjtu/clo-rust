@@ -55,6 +55,17 @@ fn textures<'a>(face: &Fields<'a>) -> Result<Vec<Fields<'a>>, String> {
     map_list(face.get(b"listTexture", LIST_TYPE)?, 64)
 }
 
+pub(super) fn base_texture_label<'a>(face: &Fields<'a>) -> Option<&'a str> {
+    let texture = textures(face)
+        .ok()?
+        .into_iter()
+        .find(|texture| integer(texture, b"enType") == Ok(0))?;
+    let original = std::str::from_utf8(texture.get(b"qsFileNameUTF8", BYTE_TYPE).ok()?).ok()?;
+    Path::new(original.rsplit(['/', '\\']).next()?)
+        .file_stem()?
+        .to_str()
+}
+
 fn cache_image(bytes: &[u8]) -> Result<PathBuf, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let folder = std::env::var_os("CLO_RUST_OUTPUT_DIR")

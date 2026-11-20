@@ -65,6 +65,12 @@ Use `--compare-avatar-library` with `CLO_RUST_AVATAR_DIR` set to the matching
 paths and aliases across backends, and verify each session's `in_scene` against
 its own `scene_info` since this read-only case does not change the active project.
 
+Use `--compare-saved-fabric-list` with the same stdio settings and a saved CLO
+project available on disk. Open the project in CLO with no unsaved material edits.
+The case reads the official `fabric_list`, opens the saved project in Rust,
+sets the same current fabric in the disposable Rust session, and compares names,
+indices, selection readback and each public catalog field reported by CLO.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.

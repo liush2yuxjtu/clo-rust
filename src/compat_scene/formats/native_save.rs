@@ -60,7 +60,9 @@ fn garment_fingerprint(state: &Value) -> u64 {
         state[key].hash(&mut hash);
     }
     for fabric in super::super::array(state, "fabrics") {
-        hash_except(fabric, &["color", "rgba", "texture_maps"], &mut hash);
+        hash_except(fabric, &["color", "rgba", "texture_maps", "info"], &mut hash);
+        hash_except(&fabric["info"], &["catalog"], &mut hash);
+        hash_except(&fabric["info"]["catalog"], &["Color", "Texture"], &mut hash);
     }
     let simulation = &state["simulation"];
     hash_except(simulation, &["meshes"], &mut hash);

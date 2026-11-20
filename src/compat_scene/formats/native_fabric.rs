@@ -1,7 +1,7 @@
 //! Read a standalone CLO fabric archive using the same typed maps as native projects.
 
 use super::clo_native::{bounded_file, member, open_archive};
-use super::native_materials::read_face_colors;
+use super::native_materials::{face_records, face_type, read_face_colors};
 use super::native_pose::{map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use super::native_textures::fabric_maps;
 use serde_json::{json, Value};
@@ -18,6 +18,25 @@ fn text<'a>(record: &Fields<'a>, key: &[u8]) -> Option<&'a str> {
 fn float(record: &Fields<'_>, key: &[u8]) -> Option<f64> {
     let value = f32::from_le_bytes(record.get(key, 6).ok()?.try_into().ok()?);
     value.is_finite().then_some(f64::from(value))
+}
+
+pub(super) fn catalog(record: &Fields<'_>, material: &Fields<'_>) -> Result<Value, String> {
+    let (faces, legacy_front) = face_records(material)?;
+    let mut info = json!({
+        "Classification": text(record, b"fabricTypeUTF8").unwrap_or("None"),
+        "Content": text(record, b"fabricContentUTF8").unwrap_or("None"),
+        "Owner": text(record, b"qsOwnerUTF8").unwrap_or("None"),
+        "SupplierName": text(record, b"qsSupplierNameUTF8").unwrap_or("None"),
+    });
+    for (index, face) in faces.iter().enumerate() {
+        if face_type(face, index, legacy_front)? == 0 {
+            let color = face.map(b"mapBaseColor")?;
+            info["Color"] = json!(text(&color, b"qsNameUTF8"));
+            info["Texture"] = json!(super::native_textures::base_texture_label(face));
+            break;
+        }
+    }
+    Ok(info)
 }
 
 fn active_material<'a>(record: &Fields<'a>) -> Result<Fields<'a>, String> {
@@ -90,6 +109,7 @@ pub(crate) fn read(path: &Path) -> Result<Value, String> {
             "source": "native_zfab", "path": path,
             "fabric_type": text(&record, b"fabricTypeUTF8"),
             "composition": text(&record, b"fabricContentUTF8"),
+            "catalog": catalog(&record, &material)?,
             "face_colors": faces.iter().map(|(kind, rgba)| json!({"type": kind, "rgba": rgba})).collect::<Vec<_>>(),
             "physical_properties": properties,
             "stiffness": stiffness, "warnings": warnings,

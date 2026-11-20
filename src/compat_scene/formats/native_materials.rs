@@ -37,11 +37,6 @@ fn rgba(bytes: &[u8]) -> Result<[f64; 4], String> {
     }
 }
 
-fn face_colors(record: &Fields<'_>) -> Result<Vec<(i32, [f64; 4])>, String> {
-    let material = record.map(b"mapMaterial2D")?;
-    read_face_colors(&material)
-}
-
 pub(super) fn read_face_colors(material: &Fields<'_>) -> Result<Vec<(i32, [f64; 4])>, String> {
     let (faces, legacy_front) = face_records(material)?;
     faces
@@ -75,7 +70,8 @@ pub(super) fn face_type(
 fn material(record: &Fields<'_>) -> Result<Value, String> {
     let name = std::str::from_utf8(record.get(b"qsFabricNameUTF8", BYTE_TYPE)?)
         .map_err(|_| "invalid UTF-8 in native fabric name")?;
-    let faces = face_colors(record)?;
+    let material = record.map(b"mapMaterial2D")?;
+    let faces = read_face_colors(&material)?;
     let front = faces
         .iter()
         .find(|(kind, _)| *kind == 0)
@@ -84,6 +80,7 @@ fn material(record: &Fields<'_>) -> Result<Value, String> {
         "name": name, "texture_maps": {},
         "info": {
             "source": "native_saved_material",
+            "catalog": super::native_fabric::catalog(record, &material)?,
             "face_colors": faces.iter().map(|(type_code, rgba)| json!({"type": type_code, "rgba": rgba})).collect::<Vec<_>>()
         }
     });

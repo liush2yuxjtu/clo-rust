@@ -321,12 +321,44 @@ async def compare_avatar_library():
     }))
 
 
-async def main(compare_library=False, compare_avatars=False):
+async def compare_saved_fabric_list():
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene = await json_result(session, "scene_info")
+        official = await json_result(session, "fabric_list")
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() in {".zprj", ".zpac"}, project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        if official["current"] >= 0:
+            await json_result(session, "clo_api_call", {
+                "name": "fabric_api.SetCurrentFabricIndex", "args": [official["current"]],
+            })
+        rust = await json_result(session, "fabric_list")
+    assert official["current"] == rust["current"]
+    assert official["fabrics"] and len(official["fabrics"]) == len(rust["fabrics"])
+    compared = 0
+    for expected, observed in zip(official["fabrics"], rust["fabrics"]):
+        assert expected["index"] == observed["index"] and expected["name"] == observed["name"]
+        assert expected["info"], expected["name"]
+        for key, value in expected["info"].items():
+            assert key in observed["info"], (expected["name"], key)
+            assert value == observed["info"][key], (expected["name"], key, value, observed["info"][key])
+            compared += 1
+    print(json.dumps({"tool": "fabric_list", "fabrics": len(rust["fabrics"]),
+                      "catalog_fields_compared": compared, "current": rust["current"]}))
+
+
+async def main(compare_library=False, compare_avatars=False, compare_fabrics=False):
     if compare_library:
         await compare_fabric_library()
         return
     if compare_avatars:
         await compare_avatar_library()
+        return
+    if compare_fabrics:
+        await compare_saved_fabric_list()
         return
     await smoke_rust()
     if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
@@ -340,7 +372,9 @@ if __name__ == "__main__":
                         help="compare both live backends against the same CLO fabric library")
     comparisons.add_argument("--compare-avatar-library", action="store_true",
                              help="compare both live backends against the same CLO avatar library")
+    comparisons.add_argument("--compare-saved-fabric-list", action="store_true",
+                             help="compare live fabric metadata against the same saved CLO project in Rust")
     args = parser.parse_args()
-    if (args.compare_fabric_library or args.compare_avatar_library) and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+    if (args.compare_fabric_library or args.compare_avatar_library or args.compare_saved_fabric_list) and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
-    asyncio.run(main(args.compare_fabric_library, args.compare_avatar_library))
+    asyncio.run(main(args.compare_fabric_library, args.compare_avatar_library, args.compare_saved_fabric_list))
