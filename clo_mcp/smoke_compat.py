@@ -2276,6 +2276,28 @@ async def verify_new_panels_keep_drape():
             _, continued = await save("continued")
             assert continued["simulation"]["steps"] == 4
 
+            observed = await json_result(rust, "clo_ui_state")
+            base_row = next(node for node in observed["nodes"] if node["AXRole"] == "AXRow" and node["AXTitle"] == "Base")
+            invalid_outline = await rust.call_tool("pattern_create", {"points": [[0, 0], [80, 0]]})
+            assert invalid_outline.isError
+            selected = await json_result(rust, "clo_ui_action", {
+                "snapshot": observed["snapshot"], "action": "press", "element": base_row["id"],
+            })
+            invalid_arrangement = await rust.call_tool("pattern_create", {
+                "name": "Unarranged", "arrangement": "missing-arrangement",
+                "points": [[0, 0], [80, 0], [0, 80]],
+            })
+            assert invalid_arrangement.isError
+            stale = await rust.call_tool("clo_ui_action", {
+                "snapshot": selected["state"]["snapshot"], "action": "press", "element": base_row["id"],
+            })
+            assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
+            _, partial = await save("arrangement-failed")
+            assert partial["patterns"][:-1] == continued["patterns"]
+            assert partial["patterns"][-1]["name"] == "Unarranged"
+            assert partial["patterns"][-1]["arrangement"] == ""
+            assert partial["simulation"] == continued["simulation"] | {"source": "mixed_saved_pose"}
+
             native_count = None
             if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
                 await json_result(rust, "scene_open", {"path": fixture})
@@ -2299,7 +2321,9 @@ async def verify_new_panels_keep_drape():
                 assert restored[-1].get("texcoords_units") is None
     print(json.dumps({"tools": ["pattern_create", "pattern_ops", "scene_export", "simulate"],
                       "case": "new panels alongside a saved drape", "new_meshes_initialized": 3,
-                      "continued_step": 4, "native_pose_meshes_preserved": native_count}))
+                      "continued_step": 4, "native_pose_meshes_preserved": native_count,
+                      "invalid_outline_kept_ui_snapshot": True,
+                      "invalid_arrangement_kept_panel_and_invalidated_snapshot": True}))
 
 
 async def verify_delete_keeps_drape():
@@ -2848,8 +2872,16 @@ async def verify_geometry_edits_rebuild_one_panel():
                 ("pattern_ops", {"op": "particle_distance", "args": {"mm": 24}}),
             ):
                 await json_result(rust, "scene_open", {"path": str(initial)})
+                if tool == "pattern_edit_points":
+                    observed = await json_result(rust, "clo_ui_state")
+                    front = next(node for node in observed["nodes"]
+                                 if node["AXRole"] == "AXRow" and node["AXTitle"] == "Front")
                 reply = await json_result(rust, tool, {"pattern": "Front"} | args)
                 if tool == "pattern_edit_points":
+                    stale = await rust.call_tool("clo_ui_action", {
+                        "snapshot": observed["snapshot"], "action": "press", "element": front["id"],
+                    })
+                    assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
                     assert reply["moved"] == [{"point": 1, "x": 140, "y": 0},
                                               {"point": 2, "x": 56.5, "y": 90}]
                     raw = await json_result(rust, "clo_api_call", {

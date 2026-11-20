@@ -357,6 +357,9 @@ native seam groups after deleting a native panel.
 Run `--verify-new-panels-keep-drape` to create, copy and mirror panels
 beside settled cloth. Verify the OBJ contains both posed and newly
 placed panels, then reopen and assemble the new meshes at zero steps.
+An invalid outline leaves the current UI snapshot usable. If the outline
+is valid but the requested arrangement is missing, the newly named panel
+remains and the previous UI snapshot is rejected.
 Check the original mesh, velocities and step count, then resume simulation.
 Set `CLO_DISPLAY_FIXTURE` to also verify a new panel beside archived meshes.
 
@@ -378,6 +381,7 @@ seam reference leaves the receiving scene intact.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
+Successful point movement must invalidate the pre-edit UI snapshot.
 Save and reopen after each edit. At zero steps, rebuild the edited panel
 and verify that the other panel's saved mesh and velocities match exactly.
 Check that a subsequent step continues the original simulation.

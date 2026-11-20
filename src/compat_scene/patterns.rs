@@ -445,16 +445,18 @@ pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Pattern_{}", i + 1));
     let point = args["arrangement"].as_str().unwrap_or("");
-    if !point.is_empty() {
-        arrangement(state, point)?;
-    }
     let pts = points(args)?;
     let pattern = json!({
         "id": next_id(state)?, "name": name, "points": pts.into_iter().map(Point::record).collect::<Vec<_>>(),
-        "arrangement": point, "fabric_index": 0
+        "arrangement": "", "fabric_index": 0
     });
     vec_mut(state, "patterns").push(pattern);
     use_partial_pose(state);
+    crate::compat_runtime::invalidate_scene_ui_snapshot(state);
+    if !point.is_empty() {
+        arrangement(state, point)?;
+        state["patterns"][i]["arrangement"] = json!(point);
+    }
     Ok(json!({"index": i, "name": name}))
 }
 
@@ -574,6 +576,7 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
         set_points(&mut state["patterns"][i], points);
         let id = state["patterns"][i]["id"].clone();
         discard_panel_pose(state, &id);
+        crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     }
     Ok(json!({"index": i, "moved": moved}))
 }
