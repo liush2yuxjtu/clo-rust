@@ -2313,7 +2313,7 @@ async def verify_delete_keeps_drape():
                 await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
                 return path, json.loads(path.read_text())["scene"]
 
-            names = ("Front", "Drop 1", "Drop 2", "Back")
+            names = ("Front", "Drop 1", "Back", "Drop 2")
             for i, name in enumerate(names):
                 x = 140 * i
                 await json_result(rust, "pattern_create", {
@@ -2324,6 +2324,11 @@ async def verify_delete_keeps_drape():
                                                 "pattern_b": b, "line_b": 0})
             await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
             _, before = await save("before")
+            for index in (0, 3):
+                await json_result(rust, "clo_api_call", {
+                    "name": "pattern_api.SelectPatternViaIndex", "args": [index, True],
+                })
+            observed = await json_result(rust, "clo_ui_state")
             invalid = await rust.call_tool("pattern_delete", {"patterns": ["Drop 1", "missing"]})
             assert invalid.isError
             _, rejected = await save("rejected")
@@ -2331,14 +2336,27 @@ async def verify_delete_keeps_drape():
             assert rejected["simulation"] == before["simulation"]
             assert rejected["seams"] == before["seams"]
 
-            result = await json_result(rust, "pattern_delete", {"patterns": ["Drop 1", "2", "Drop 1"]})
+            result = await json_result(rust, "pattern_delete", {"patterns": ["Drop 1", "3", "Drop 1"]})
             assert result == {"deleted": 2, "pattern_count": 2}
+            stale = await rust.call_tool("clo_ui_action", {
+                "snapshot": observed["snapshot"], "action": "set_value", "element": 8, "value": "Stale",
+            })
+            assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
             path, kept = await save("edited")
             assert [p["name"] for p in kept["patterns"]] == ["Front", "Back"]
             assert kept["seams"] == before["seams"][:1]
             remaining = [mesh for mesh in before["simulation"]["meshes"] if mesh["name"] in ("Front", "Back")]
             assert kept["simulation"] == before["simulation"] | {"meshes": remaining}
             assert (await json_result(rust, "seams_list"))["count"] == 1
+            await json_result(rust, "pattern_create", {
+                "name": "Replacement", "points": [[0, 0], [80, 0], [0, 80]],
+            })
+            _, reused = await save("reused-id")
+            assert reused["patterns"][-1]["id"] == before["patterns"][-1]["id"]
+            selected = await json_result(rust, "clo_api_call", {"name": "pattern_api.GetSelectedPattern"})
+            assert selected["value"] == ["Front"]
+            ui = await json_result(rust, "clo_ui_state")
+            assert next(node for node in ui["nodes"] if node["id"] == 8)["AXValue"] == "Front"
             await json_result(rust, "scene_open", {"path": str(path)})
             await json_result(rust, "simulate", {"steps": 0})
             _, zero = await save("zero")
@@ -2370,7 +2388,8 @@ async def verify_delete_keeps_drape():
     print(json.dumps({"tools": ["pattern_delete", "seams_list", "scene_open", "simulate"],
                       "case": "delete panels without resetting the remaining drape",
                       "retained_panels": 2, "retained_seam_groups": 1, "continued_step": 4,
-                      "invalid_batch_and_empty_scene": "pass", "native_meshes_preserved": native_count}))
+                      "invalid_batch_and_empty_scene": "pass", "native_meshes_preserved": native_count,
+                      "deleted_selection_cannot_follow_reused_id": True, "pre_delete_ui_token_rejected": True}))
 
 
 async def verify_sew_keeps_drape():

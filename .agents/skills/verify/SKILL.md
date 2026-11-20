@@ -347,7 +347,10 @@ and the newly authored group on the same archive after reopening.
 Run `--verify-delete-keeps-drape` to delete panels by name and index from
 a simulated scene. Check that repeated references are deduplicated,
 an invalid batch preserves the scene, and only the deleted panels'
-meshes and sewing are removed. Reopen and resume the surviving
+meshes and sewing are removed. Select a surviving panel and a panel slated
+for deletion. Verify the old UI snapshot is rejected, the surviving panel
+still has selection, and a new panel reusing the deleted ID stays unselected.
+Reopen and resume the surviving
 simulation. Set `CLO_DISPLAY_FIXTURE` to also check archived meshes and
 native seam groups after deleting a native panel.
 

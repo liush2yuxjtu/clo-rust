@@ -489,6 +489,7 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
         for i in indices.iter().rev() {
             vec_mut(state, "patterns").remove(*i);
         }
+        crate::compat_runtime::remove_deleted_pattern_selection(state, &removed);
         if let Some(meshes) = state["simulation"].get_mut("meshes").and_then(Value::as_array_mut) {
             meshes.retain(|mesh| !removed.contains(&mesh["id"]));
             if meshes.is_empty() {

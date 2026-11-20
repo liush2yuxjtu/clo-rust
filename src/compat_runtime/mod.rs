@@ -107,6 +107,26 @@ pub(crate) fn invalidate_scene_ui_snapshot(state: &mut Value) {
     }
 }
 
+pub(crate) fn remove_deleted_pattern_selection(state: &mut Value, ids: &[Value]) {
+    let Some(ui) = scene_ui(state) else {
+        return;
+    };
+    for key in ["observed", "menu_x", "menu_y"] {
+        ui.remove(key);
+    }
+    let last_selected = ui
+        .get_mut("selected_keys")
+        .and_then(Value::as_array_mut)
+        .and_then(|keys| {
+            keys.retain(|key| !ids.contains(key));
+            keys.last().cloned()
+        });
+    if ui.get("primary_key").is_some_and(|key| ids.contains(key)) {
+        ui.insert("primary_key".to_owned(), last_selected.unwrap_or(Value::Null));
+        ui.remove("focus");
+    }
+}
+
 pub(crate) fn clear_scene_ui(state: &mut Value, keep_view: bool) {
     let Some(ui) = scene_ui(state) else {
         return;
