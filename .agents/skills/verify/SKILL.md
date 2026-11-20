@@ -325,9 +325,12 @@ to a fresh writable directory. Verify that repeat launch describes readiness,
 invalid arguments leave the bridge online, stop leaves the app running, and
 scene/API/Python calls fail while offline. Check that checkpoint listing stays
 available. When the script prints the native restart prompt, restart the
-bridge from inside CLO within 60 seconds. Confirm the same process returns
-and both the scene summary and detailed panels match the pre-stop state.
-On Rust, `clo_launch(with_bridge=true)` restarts the embedded bridge.
+bridge from inside CLO within 60 seconds. On the Boat reference installation,
+reload the bridge's packaged operations after starting it and confirm
+`scene_info` is available. Confirm the same process returns and both the scene
+summary and detailed panels match the pre-stop state. On Rust,
+`clo_launch(with_bridge=true)` restarts the embedded bridge. On the official
+backend an already running CLO instance returns the native restart instructions.
 Record a native process exit or restart timeout as a failed recovery case.
 The first launch from a closed official application is a separate case.
 

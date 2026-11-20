@@ -850,8 +850,10 @@ async def compare_live_bridge_lifecycle():
             status = await json_result(session, "clo_status")
             assert status["bridge"] == "up" and status["clo_running"], status
             original = await json_result(session, "scene_info")
+            original_path = original["project_path"]
+            restorable = bool(original_path and Path(original_path).is_file())
             if name == "official":
-                assert original["project_path"] or not (
+                assert restorable or not (
                     original["patterns"] or original["avatars"]
                 ), "Use a dedicated CLO window without unsaved garments or avatars."
             await json_result(session, "scene_open", {"path": str(project)})
@@ -921,8 +923,8 @@ async def compare_live_bridge_lifecycle():
                 }
             finally:
                 if name == "official" and (await json_result(session, "clo_status"))["bridge"] == "up":
-                    if original["project_path"]:
-                        await json_result(session, "scene_open", {"path": original["project_path"]})
+                    if restorable:
+                        await json_result(session, "scene_open", {"path": original_path})
                     else:
                         await json_result(session, "scene_clear", {"keep_avatar": False})
         assert scenes["rust"] == scenes["official"]
