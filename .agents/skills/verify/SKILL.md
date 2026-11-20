@@ -640,6 +640,44 @@ a negative overflow can leave earlier deletions applied. Also check typed
 `DeletePatternPiece` responses, the unaffected seam group, and the project,
 avatar and colorways readback. The comparison reopens the original project.
 
+Run `--compare-live-native-deletion-save` with the native bridge up, a fresh
+shared `CLO_MCP_STATE`, and `CLO_RUST_CHECKPOINT_DIR` unset. Use the two-panel
+ZPRJ in `CLO_SCENE_OPEN_PROJECT`. For `CLO_DELETION_SAVE_FIXTURE`, open the
+same ZPRJ in CLO, append the six-panel top from the live garment workflow
+with zero simulation steps, and save the resulting eight-panel ZPRJ.
+Delete the first panel from each file and also test two successive deletes
+from the eight-panel file. Save ZPAC, ZPRJ and a checkpoint on both backends.
+Cross-open each saved file and compare surviving fabrics, colorways, seam
+groups and avatar names where the output format stores them. Check the mesh
+indices and UV exactly. Compare positions exactly for Rust and within
+0.001 mm for native CLO. When both original panels are removed from the
+eight-panel project, verify the remaining poplin becomes archive slot 0 and
+every surviving panel still uses it in both colorways. Alter a disposable
+source copy and check that saving returns an error while the destination and
+current scene are preserved.
+
+```sh
+export CLO_MCP_STATE="$(mktemp -d /shared/path/native-deletion.XXXXXX)"
+unset CLO_RUST_CHECKPOINT_DIR
+export CLO_SCENE_OPEN_PROJECT=/shared/path/multi-colorway-colored.zprj
+export CLO_DELETION_SAVE_FIXTURE=/shared/path/official-append.zprj
+shasum -a 256 "$CLO_SCENE_OPEN_PROJECT" "$CLO_DELETION_SAVE_FIXTURE"
+python -m clo_mcp.smoke_compat --compare-live-native-deletion-save \
+  > "$CLO_MCP_STATE/native-deletion.json" 2> "$CLO_MCP_STATE/native-deletion.log"
+jq '{result, outputs: (.cases | length), cross_backend_reads, source_change_rejected}' \
+  "$CLO_MCP_STATE/native-deletion.json"
+```
+
+Use a folder visible at the same path to the reference bridge and both MCP
+processes. Set the binary and reference command as shown in the 48-tool recipe.
+Recreate the eight-panel fixture with the public `garment_build` arguments below
+on the official backend, then save a ZPRJ. The comparison checks both readers
+after each save and records the per-output counts and coordinate error.
+
+```json
+{"spec":{"garment":"top","silhouette":"regular","neckline":"crew","sleeve":"short","fabric":"cotton","color":"navy","particle_distance":45},"simulate_steps":0,"snapshots":false,"replace_existing":false}
+```
+
 Run `--verify-new-panels-keep-drape` to create, copy and mirror panels
 beside settled cloth. Verify the OBJ contains both posed and newly
 placed panels, then reopen and assemble the new meshes at zero steps.

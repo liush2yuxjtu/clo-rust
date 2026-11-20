@@ -7516,6 +7516,128 @@ async def compare_live_resumed_native_save():
     print(json.dumps({"cases": results, "remesh_rejected_without_changes": True, "result": "pass"}))
 
 
+async def compare_live_native_deletion_save():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    small = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    combined = Path(os.environ["CLO_DELETION_SAVE_FIXTURE"])
+    assert root.is_dir() and small.is_file() and combined.is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    reports = []
+
+    async def load(session, path):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        await json_result(session, "scene_open", {"path": str(path)})
+
+    async def poses(session, label):
+        meshes, _ = await snapshot_composed_archive(session, root / f"{label}.clorust")
+        return [{key: mesh[key] for key in ("positions", "triangles", "texcoords")} for mesh in meshes]
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as inspector:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for tag, fixture, deleted, expected_groups in (
+                ("pair", small, 1, 0),
+                ("mixed", combined, 1, 14),
+                ("repeated", combined, 2, 14),
+            ):
+                original_bytes = fixture.read_bytes()
+                await load(inspector, fixture)
+                initial_mesh = await poses(inspector, f"{tag}-initial")
+                official_saved_colors = {}
+                for writer, session in backends:
+                    for kind in ("zpac", "zprj", "checkpoint"):
+                        label = f"{tag}-{writer}-{kind}"
+                        await load(session, fixture)
+                        before = await json_result(session, "scene_info")
+                        assert before["pattern_count"] == len(initial_mesh)
+                        for _ in range(deleted):
+                            await json_result(session, "pattern_delete", {"patterns": ["0"]})
+                        expected = await read_composed_archive(session)
+                        assert expected["seams"]["count"] == expected_groups
+                        assert [panel["name"] for panel in expected["patterns"]] == [
+                            panel["name"] for panel in before["patterns"][deleted:]
+                        ]
+                        if kind == "checkpoint":
+                            record = await json_result(session, "checkpoint_save", {"name": label})
+                            path = Path(record["path"])
+                            assert path.suffix == ".zprj" and record["name"] == label, record
+                        else:
+                            path = root / f"{label}.{kind}"
+                            assert await json_result(session, "scene_save", {
+                                "path": str(path), "thumbnail": False,
+                            }) == {"path": str(path)}, label
+                        observed = []
+                        for reader, consumer in backends:
+                            await json_result(consumer, "scene_clear", {"keep_avatar": False})
+                            if kind == "checkpoint":
+                                await json_result(consumer, "checkpoint_restore", {"name": label})
+                            else:
+                                await json_result(consumer, "scene_open", {"path": str(path)})
+                            scene = await json_result(consumer, "scene_info")
+                            assert scene["avatars"] == (before["avatars"] if kind != "zpac" else []), (label, reader)
+                            observed.append(await read_composed_archive(consumer))
+                        assert observed[0] == observed[1], (label, observed)
+                        used = sorted({panel["fabric_index"] for panel in expected["patterns"]})
+                        saved_indices = {old: new for new, old in enumerate(used)}
+                        expected["patterns"] = [
+                            dict(panel, fabric_index=saved_indices[panel["fabric_index"]])
+                            for panel in expected["patterns"]
+                        ]
+                        if len(used) == expected["materials"]:
+                            assert observed[0]["fabric_rgba_f32"] == expected["fabric_rgba_f32"], label
+                        else:
+                            # Native save removes the old main style. The reloaded colorway can resolve
+                            # a different PBR color than the deleted scene's live palette still reports.
+                            if writer == "official":
+                                official_saved_colors[kind] = observed[0]["fabric_rgba_f32"]
+                            else:
+                                assert observed[0]["fabric_rgba_f32"] == official_saved_colors[kind], (
+                                    label, observed[0]["fabric_rgba_f32"], official_saved_colors[kind])
+                        expected["materials"] = len(used)
+                        expected["catalog_names"] = [expected["catalog_names"][index] for index in used]
+                        for key in ("patterns", "seams", "current_colorway", "colorways", "materials", "catalog_names"):
+                            assert observed[0][key] == expected[key], (label, key, observed[0][key], expected[key])
+                        await load(inspector, path)
+                        restored = await poses(inspector, label)
+                        error = 0.0
+                        for before_mesh, after_mesh in zip(initial_mesh[deleted:], restored, strict=True):
+                            assert before_mesh["triangles"] == after_mesh["triangles"], label
+                            assert before_mesh["texcoords"] == after_mesh["texcoords"], label
+                            for earlier, later in zip(before_mesh["positions"], after_mesh["positions"], strict=True):
+                                error = max(error, *(abs(a - b) for a, b in zip(earlier, later, strict=True)))
+                        assert error == 0.0 if writer == "rust" else error < 0.001, (label, error)
+                        reports.append({"case": tag, "writer": writer, "format": kind, "readers": 2,
+                                        "panels": len(restored), "seam_groups": expected_groups,
+                                        "vertices": sum(len(mesh["positions"]) for mesh in restored),
+                                        "max_position_error_mm": error})
+                assert fixture.read_bytes() == original_bytes
+
+            mutable = root / "modified-deletion-source.zprj"
+            shutil.copyfile(small, mutable)
+            await load(rust, mutable)
+            await json_result(rust, "pattern_delete", {"patterns": ["0"]})
+            before = await json_result(rust, "scene_info")
+            mutable.write_bytes(mutable.read_bytes()[:-1])
+            target = root / "protected-deletion-save.zprj"
+            target.write_bytes(small.read_bytes())
+            reply = await rust.call_tool("scene_save", {"path": str(target), "thumbnail": False})
+            assert reply.isError and "source archive changed" in reply.content[0].text, reply
+            assert target.read_bytes() == small.read_bytes()
+            assert await json_result(rust, "scene_info") == before
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"result": "pass", "cases": reports, "cross_backend_reads": 2 * len(reports),
+                      "source_change_rejected": True}))
+
+
 async def compare_live_empty_native_save():
     root = Path(os.environ["CLO_MCP_STATE"])
     fixture = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
@@ -8389,6 +8511,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-resumed-native-save", action="store_const", dest="comparison",
                              const=compare_live_resumed_native_save,
                              help="resume native ZPRJ and ZPAC and cross-open the position-only updates")
+    comparisons.add_argument("--compare-live-native-deletion-save", action="store_const", dest="comparison",
+                             const=compare_live_native_deletion_save,
+                             help="save and cross-open native projects after deleting archived panels")
     comparisons.add_argument("--compare-live-empty-native-save", action="store_const", dest="comparison",
                              const=compare_live_empty_native_save,
                              help="verify empty and avatar-only ZPAC, ZPRJ and native checkpoint behavior")

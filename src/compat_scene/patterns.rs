@@ -619,6 +619,7 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
     }
     let indices: Vec<_> = requested.iter().filter_map(|&index| usize::try_from(index).ok())
         .filter(|&index| index < patterns.len()).collect();
+    let retained = super::formats::native_save::retained_after_deletion(state, &indices);
     let removed: Vec<_> = indices
         .iter()
         .map(|i| state["patterns"][i]["id"].clone())
@@ -637,6 +638,9 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
                 invalidate_geometry(state);
             }
         }
+    }
+    if let Some(retained) = retained {
+        super::formats::native_save::remember_panel_deletion(state, retained);
     }
     if requested.first().is_some_and(|index| *index < i64::from(i32::MIN)) {
         return Err(overflow.into());

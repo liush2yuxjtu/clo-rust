@@ -6,6 +6,7 @@ use super::native_pose::{
 };
 use crate::compat_scene::appended_colorway;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 const UINT: u8 = 5;
@@ -166,19 +167,29 @@ impl Offsets {
     }
 }
 
+fn read_indices(data: &[u8]) -> Result<Vec<u32>, String> {
+    let count = uint(data.get(..4).ok_or("missing native index array length")?)? as usize;
+    if count == 0 && data.len() == 4 {
+        return Ok(Vec::new());
+    }
+    if data.get(4) != Some(&4) || count > LIMIT || data.len() != 5 + count * 4 {
+        return Err("invalid native index array".into());
+    }
+    data[5..].chunks_exact(4).map(uint).collect()
+}
+
+fn write_indices(indices: &[u32]) -> Vec<u8> {
+    let mut output = (indices.len() as u32).to_le_bytes().to_vec();
+    if !indices.is_empty() {
+        output.push(4);
+        output.extend(indices.iter().flat_map(|index| index.to_le_bytes()));
+    }
+    output
+}
+
 fn append_link_indices(a: &[u8], b: &[u8], offset: u32) -> Result<Vec<u8>, String> {
-    let decode = |data: &[u8]| -> Result<Vec<u32>, String> {
-        let count = uint(data.get(..4).ok_or("missing native index array length")?)? as usize;
-        if count == 0 && data.len() == 4 {
-            return Ok(Vec::new());
-        }
-        if data.get(4) != Some(&4) || count > LIMIT || data.len() != 5 + count * 4 {
-            return Err("invalid native index array".into());
-        }
-        data[5..].chunks_exact(4).map(uint).collect()
-    };
-    let mut left = decode(a)?;
-    for index in decode(b)? {
+    let mut left = read_indices(a)?;
+    for index in read_indices(b)? {
         left.push(if index == u32::MAX {
             index
         } else {
@@ -187,12 +198,7 @@ fn append_link_indices(a: &[u8], b: &[u8], offset: u32) -> Result<Vec<u8>, Strin
                 .ok_or("native PAC link index overflow")?
         });
     }
-    let mut out = (left.len() as u32).to_le_bytes().to_vec();
-    if !left.is_empty() {
-        out.push(4);
-        out.extend(left.iter().flat_map(|index| index.to_le_bytes()));
-    }
-    Ok(out)
+    Ok(write_indices(&left))
 }
 
 fn join_group(
@@ -373,4 +379,261 @@ pub(super) fn join(receiver: &[u8], incoming: &[u8]) -> Result<Vec<u8>, String> 
     let result = a.replace(b"mapPatternEditor", MAP_TYPE, &editor)?;
     let result = Fields::read(&result)?.replace(b"listFabric", LIST_TYPE, &fabric)?;
     Fields::read(&result)?.replace(b"mapColorWay", MAP_TYPE, &colors)
+}
+
+fn remapped_index(index: u32, slots: &[Option<u32>]) -> Result<Option<u32>, String> {
+    if index == u32::MAX {
+        return Ok(Some(index));
+    }
+    slots.get(index as usize).copied().ok_or_else(|| "native archive index is outside its table".into())
+}
+
+fn keep_seam_group(record: &Fields<'_>, panels: &[Option<u32>], depth: usize) -> Result<Option<Vec<u8>>, String> {
+    if depth == 0 {
+        return Err("native PAC sewing group has too many nested maps".into());
+    }
+    let mut values = Vec::new();
+    for (name, kind, data) in record.fields() {
+        let changed = match kind {
+            UINT if name == b"uiSelfIndex" => {
+                let Some(index) = remapped_index(uint(data)?, panels)? else {
+                    return Ok(None);
+                };
+                Cow::Owned(index.to_le_bytes().to_vec())
+            }
+            MAP_TYPE => {
+                let Some(kept) = keep_seam_group(&Fields::read(data)?, panels, depth - 1)? else {
+                    return Ok(None);
+                };
+                Cow::Owned(kept)
+            }
+            LIST_TYPE if list_of_maps(data) => {
+                let mut children = Vec::new();
+                for child in map_list(data, LIMIT)? {
+                    let Some(kept) = keep_seam_group(&child, panels, depth - 1)? else {
+                        return Ok(None);
+                    };
+                    children.push(Cow::Owned(kept));
+                }
+                Cow::Owned(encoded_list(&children)?)
+            }
+            _ => Cow::Borrowed(data),
+        };
+        values.push((name, kind, changed));
+    }
+    encode_map(&values.iter().map(|(name, kind, data)| (*name, *kind, data.as_ref())).collect::<Vec<_>>()).map(Some)
+}
+
+fn keep_seams(table: &Fields<'_>, panels: &[Option<u32>]) -> Result<Vec<u8>, String> {
+    let key = b"listSeamLinePairGroup";
+    let mut output = Vec::new();
+    let records = maps(table, key)?;
+    let mut kept = Vec::with_capacity(records.len());
+    for record in records {
+        let group = keep_seam_group(&record, panels, 32)?;
+        kept.push(group.as_ref().map(|_| output.len() as u32));
+        if let Some(group) = group {
+            output.push(Cow::Owned(group));
+        }
+    }
+    let indices = read_indices(table.get(b"arrSelfIndex", INT_ARRAY)?)?;
+    if indices.len() != kept.len() {
+        return Err("native seam link count does not match its groups".into());
+    }
+    let indices = indices.into_iter().zip(&kept).filter(|(_, slot)| slot.is_some())
+        .map(|(index, _)| Ok(remapped_index(index, &kept)?.unwrap_or(u32::MAX)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let groups = table.replace(key, LIST_TYPE, &encoded_list(&output)?)?;
+    Fields::read(&groups)?.replace(b"arrSelfIndex", INT_ARRAY, &write_indices(&indices))
+}
+
+fn panel_ids(record: &Fields<'_>, ids: &mut HashSet<u32>, depth: usize) -> Result<(), String> {
+    if depth == 0 {
+        return Err("native PAC panel has too many nested maps".into());
+    }
+    for (name, kind, data) in record.fields() {
+        match kind {
+            UINT if name == b"uiID" => {
+                let id = uint(data)?;
+                if id != 0 && id != u32::MAX {
+                    ids.insert(id);
+                }
+            }
+            MAP_TYPE => panel_ids(&Fields::read(data)?, ids, depth - 1)?,
+            LIST_TYPE if list_of_maps(data) => {
+                for child in map_list(data, LIMIT)? {
+                    panel_ids(&child, ids, depth - 1)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn remove_colorway_assignments(root: &Fields<'_>, removed: &HashSet<u32>) -> Result<Vec<u8>, String> {
+    let colors = root.map(b"mapColorWay")?;
+    let table = colors.map(b"mapNewColorway")?;
+    let rows = maps(&table, b"listColorway")?;
+    let mut kept_rows = Vec::new();
+    for row in rows {
+        let assign = row.map(b"mapAssign")?;
+        let mut updated = assign.encoded().to_vec();
+        for (key, kind, data) in assign.fields() {
+            if kind != LIST_TYPE || data == [0; 4] {
+                continue;
+            }
+            if !matches!(key, b"listPatternToFabric" | b"listFabricShape2DToGrainLineInfo" | b"listUVTransformerToMatrix") {
+                return Err("native panel removal cannot update an unsupported colorway assignment".into());
+            }
+            let records = map_list(data, LIMIT)?;
+            let mut kept = Vec::new();
+            for record in &records {
+                if !removed.contains(&uint(record.get(b"uiItemID", UINT)?)?) {
+                    kept.push(Cow::Borrowed(record.encoded()));
+                }
+            }
+            updated = Fields::read(&updated)?.replace(key, LIST_TYPE, &encoded_list(&kept)?)?;
+        }
+        kept_rows.push(Cow::Owned(row.replace(b"mapAssign", MAP_TYPE, &updated)?));
+    }
+    let table = table.replace(b"listColorway", LIST_TYPE, &encoded_list(&kept_rows)?)?;
+    colors.replace(b"mapNewColorway", MAP_TYPE, &table)
+}
+
+pub(super) fn keep_panels(pac: &[u8], retained: &[usize]) -> Result<Vec<u8>, String> {
+    let root = Fields::read(pac)?;
+    let editor = root.map(b"mapPatternEditor")?;
+    if editor.fields().any(|(_, kind, data)| kind == LIST_TYPE && data != [0; 4]) {
+        return Err("native panel removal cannot update an unsupported pattern editor list".into());
+    }
+    let list = editor.map(b"mapPatternList")?;
+    let panels = maps(&list, b"listPattern")?;
+    let instances = maps(&list, b"listInstance")?;
+    let links = read_indices(list.get(b"arrSymmetricIndex", INT_ARRAY)?)?;
+    if panels.len() != instances.len() || panels.len() != links.len()
+        || retained.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err("native panel removal requires matching pattern tables and ordered slots".into());
+    }
+    let mut slots = vec![None; panels.len()];
+    for (new, &old) in retained.iter().enumerate() {
+        *slots.get_mut(old).ok_or("native panel removal references an unknown slot")? = Some(new as u32);
+    }
+    let mut removed = HashSet::new();
+    let mut kept_ids = HashSet::new();
+    let mut kept = Vec::new();
+    let mut kept_instances = Vec::new();
+    let mut kept_links = Vec::new();
+    for (index, panel) in panels.iter().enumerate() {
+        if uint(panel.get(b"uiPatternType", UINT)?)? != 0 {
+            return Err("native panel removal requires editable pattern records".into());
+        }
+        if slots[index].is_some() {
+            panel_ids(panel, &mut kept_ids, 32)?;
+            kept.push(Cow::Borrowed(panel.encoded()));
+            kept_instances.push(Cow::Borrowed(instances[index].encoded()));
+            kept_links.push(remapped_index(links[index], &slots)?.unwrap_or(u32::MAX));
+        } else {
+            panel_ids(panel, &mut removed, 32)?;
+        }
+    }
+    let list = list.replace(b"listPattern", LIST_TYPE, &encoded_list(&kept)?)?;
+    let list = Fields::read(&list)?.replace(b"listInstance", LIST_TYPE, &encoded_list(&kept_instances)?)?;
+    let list = Fields::read(&list)?.replace(b"arrSymmetricIndex", INT_ARRAY, &write_indices(&kept_links))?;
+    let mut updated = editor.replace(b"mapPatternList", MAP_TYPE, &list)?;
+    for key in [b"mapSeamLinePairGroup".as_slice(), b"mapSeamLinePairGroupWithHalfSymmetry"] {
+        let kept = keep_seams(&editor.map(key)?, &slots)?;
+        updated = Fields::read(&updated)?.replace(key, MAP_TYPE, &kept)?;
+    }
+    removed.retain(|id| !kept_ids.contains(id));
+    let colors = remove_colorway_assignments(&root, &removed)?;
+    let result = root.replace(b"mapPatternEditor", MAP_TYPE, &updated)?;
+    Fields::read(&result)?.replace(b"mapColorWay", MAP_TYPE, &colors)
+}
+
+fn keep_styles(table: &Fields<'_>, list: &[u8], styles: &HashSet<u32>) -> Result<Vec<u8>, String> {
+    let rows = maps(table, list)?;
+    let mut kept = Vec::new();
+    for row in &rows {
+        if styles.contains(&uint(row.get(b"uiStyleID", UINT)?)?) {
+            kept.push(Cow::Borrowed(row.encoded()));
+        }
+    }
+    table.replace(list, LIST_TYPE, &encoded_list(&kept)?)
+}
+
+fn update_main_fabric(row: &Fields<'_>, styles: &HashSet<u32>, first: u32) -> Result<Vec<u8>, String> {
+    let key = b"uiColorwayMainFabricUID";
+    let id = uint(row.get(key, UINT)?)?;
+    if id == 0 || id == u32::MAX || styles.contains(&id) {
+        return Ok(row.encoded().to_vec());
+    }
+    row.replace(key, UINT, &first.to_le_bytes())
+}
+
+pub(super) fn compact_deleted_panel_fabrics(pac: Vec<u8>) -> Result<Vec<u8>, String> {
+    let root = Fields::read(&pac)?;
+    let fabrics = maps(&root, b"listFabric")?;
+    let ids = fabrics.iter().map(|fabric| uint(fabric.get(b"uiID", UINT)?))
+        .collect::<Result<Vec<_>, String>>()?;
+    let editor = root.map(b"mapPatternEditor")?;
+    let table = editor.map(b"mapPatternList")?;
+    let panels = maps(&table, b"listPattern")?;
+    let indices = panels.iter().map(|panel| uint(panel.map(b"mapFabricShape2D")?.get(b"iFabricIndex", UINT)?))
+        .collect::<Result<Vec<_>, String>>()?;
+    let colors = root.map(b"mapColorWay")?;
+    let colorway_table = colors.map(b"mapNewColorway")?;
+    let rows = maps(&colorway_table, b"listColorway")?;
+    let mut styles = HashSet::new();
+    for index in &indices {
+        styles.insert(*ids.get(*index as usize).ok_or("native panel has an unknown fabric index")?);
+    }
+    for row in &rows {
+        for assignment in maps(&row.map(b"mapAssign")?, b"listPatternToFabric")? {
+            styles.insert(uint(assignment.get(b"uiStyleID", UINT)?)?);
+        }
+    }
+    if styles.iter().any(|id| !ids.contains(id)) {
+        return Err("retained colorway assignment references an unknown fabric".into());
+    }
+    if styles.len() == fabrics.len() {
+        return Ok(pac);
+    }
+    let mut slots = vec![None; fabrics.len()];
+    let mut kept = Vec::new();
+    let mut first = None;
+    for (index, (id, fabric)) in ids.into_iter().zip(&fabrics).enumerate() {
+        if styles.contains(&id) {
+            first.get_or_insert(id);
+            slots[index] = Some(kept.len());
+            kept.push(Cow::Borrowed(fabric.encoded()));
+        }
+    }
+    let first = first.ok_or("native panel removal left no fabrics")?;
+    let recalculated = panels.iter().zip(indices).map(|(panel, original)| {
+        let index = slots[original as usize].ok_or("retained panel lost its native fabric")? as u32;
+        let key = b"mapFabricShape2D";
+        let shape = panel.map(key)?.replace(b"iFabricIndex", UINT, &index.to_le_bytes())?;
+        panel.replace(key, MAP_TYPE, &shape).map(Cow::Owned)
+    }).collect::<Result<Vec<_>, String>>()?;
+    let table = table.replace(b"listPattern", LIST_TYPE, &encoded_list(&recalculated)?)?;
+    let editor = editor.replace(b"mapPatternList", MAP_TYPE, &table)?;
+    let rows = rows.iter().map(|row| {
+        let key = b"mapAssignStyleChip";
+        let assignments = keep_styles(&row.map(key)?, b"listFabricToStyleChip", &styles)?;
+        let updated = row.replace(key, MAP_TYPE, &assignments)?;
+        update_main_fabric(&Fields::read(&updated)?, &styles, first).map(Cow::Owned)
+    }).collect::<Result<Vec<_>, String>>()?;
+    let colorway_table = colorway_table.replace(b"listColorway", LIST_TYPE, &encoded_list(&rows)?)?;
+    let legacy = maps(&colors, b"listColorway")?.iter()
+        .map(|row| update_main_fabric(row, &styles, first).map(Cow::Owned))
+        .collect::<Result<Vec<_>, String>>()?;
+    let chips = keep_styles(&colors.map(b"mapStyleChipAssign")?, b"listFabricToStyleChipVector", &styles)?;
+    let colors = colors.replace(b"mapNewColorway", MAP_TYPE, &colorway_table)?;
+    let colors = Fields::read(&colors)?.replace(b"mapStyleChipAssign", MAP_TYPE, &chips)?;
+    let colors = Fields::read(&colors)?.replace(b"listColorway", LIST_TYPE, &encoded_list(&legacy)?)?;
+    let root = root.replace(b"mapPatternEditor", MAP_TYPE, &editor)?;
+    let root = Fields::read(&root)?.replace(b"mapColorWay", MAP_TYPE, &colors)?;
+    Fields::read(&root)?.replace(b"listFabric", LIST_TYPE, &encoded_list(&kept)?)
 }

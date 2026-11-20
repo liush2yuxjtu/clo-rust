@@ -246,6 +246,35 @@ pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &P
     }
 }
 
+pub(in crate::compat_scene) fn retained_after_deletion(state: &Value, deleted: &[usize]) -> Option<Vec<usize>> {
+    let source = &state[SOURCE];
+    if deleted.is_empty() || author_scene(source) || source["empty_append"] == true
+        || !super::super::array(source, "appended").is_empty()
+        || source["garment"].as_u64() != Some(garment_fingerprint(state))
+    {
+        return None;
+    }
+    let count = super::super::array(state, "patterns").len();
+    let retained = if let Some(saved) = source.get("retained_panels") {
+        serde_json::from_value::<Vec<usize>>(saved.clone()).ok()?
+    } else {
+        (0..count).collect()
+    };
+    if retained.len() != count {
+        return None;
+    }
+    Some(retained.into_iter().enumerate()
+        .filter_map(|(index, slot)| deleted.binary_search(&index).is_err().then_some(slot))
+        .collect())
+}
+
+pub(in crate::compat_scene) fn remember_panel_deletion(state: &mut Value, retained: Vec<usize>) {
+    state[SOURCE]["garment"] = json!(garment_fingerprint(state));
+    state[SOURCE]["layout"] = json!(layout_fingerprint(state));
+    state[SOURCE]["assigned_fabrics"] = json!(assigned_fabric_fingerprint(state));
+    state[SOURCE]["retained_panels"] = json!(retained);
+}
+
 pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool, recovered_zpac: bool) -> Option<Vec<Value>> {
     let source = &state[SOURCE];
     if source["garment"].as_u64()? != garment_fingerprint(state)
@@ -279,6 +308,7 @@ pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Ve
     let project = source["project"] == true;
     let old_stamp = source["stamp"].clone();
     let recovered_zpac = source["recovered_zpac"] == true;
+    let retained_panels = source.get("retained_panels").cloned();
     let archived_avatars = source["avatars"].clone();
     let empty_append = source["empty_append"] == true;
     let compacted_fabrics = source["compacted_fabrics"] == true;
@@ -290,6 +320,9 @@ pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Ve
             state[SOURCE]["appended"] = json!(parts);
             state[SOURCE]["empty_append"] = json!(empty_append);
             state[SOURCE]["compacted_fabrics"] = json!(compacted_fabrics);
+            if let Some(retained) = retained_panels {
+                state[SOURCE]["retained_panels"] = retained;
+            }
         }
     }
 }
@@ -958,9 +991,16 @@ pub(in crate::compat_scene) fn save(
     } else if state[SOURCE]["project"] != true {
         // The saved garment has compact indices. Keep the original parts
         // when their indices differ from the live fabric catalog.
-        let appended = !super::super::array(&state[SOURCE], "appended").is_empty();
-        if !appended || super::super::assigned_fabric_count(state) == super::super::array(state, "fabrics").len() {
+        let source = &state[SOURCE];
+        let unused_fabrics = super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
+        let appended = !super::super::array(source, "appended").is_empty();
+        let compacted = source["compacted_fabrics"] == true
+            || source.get("retained_panels").is_some() && unused_fabrics;
+        if !appended || !unused_fabrics {
             remember(state, path, false, false);
+            if compacted && state[SOURCE].is_object() {
+                state[SOURCE]["compacted_fabrics"] = json!(true);
+            }
         }
     }
     Ok(())
@@ -970,7 +1010,8 @@ pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &P
     let source = &state[SOURCE];
     let authored = author_scene(source) || super::super::array(state, "patterns").is_empty();
     let compacted = source["compacted_fabrics"] == true
-        || (source["empty_append"] == true || !super::super::array(source, "appended").is_empty())
+        || (source["empty_append"] == true || source.get("retained_panels").is_some()
+            || !super::super::array(source, "appended").is_empty())
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
     let _ = rebind_project_avatars(state, path);
     remember(state, path, true, false);
@@ -1036,6 +1077,12 @@ pub(in crate::compat_scene) fn encode(
     let garment = garment_archive(original.clone(), source_project)?;
     let mut garment_archive = open_archive(Cursor::new(garment.as_slice()), ZPAC)?;
     let mut pac = member(&mut garment_archive, "pac")?;
+    let retained_panels = source.get("retained_panels");
+    if let Some(retained) = retained_panels {
+        let slots = serde_json::from_value::<Vec<usize>>(retained.clone())
+            .map_err(|_| "invalid native retained panel slots")?;
+        pac = native_compose::keep_panels(&pac, &slots)?;
+    }
     if empty_append {
         // The destination's empty-scene fabric is not part of the exported
         // garment. Its palette is retained when adding each source part.
@@ -1095,7 +1142,12 @@ pub(in crate::compat_scene) fn encode(
             retextured,
             occupied,
         )?;
-        (textures.or(edited), assets)
+        (textures.or(edited).or_else(|| retained_panels.map(|_| pac)), assets)
+    };
+    let edited = if retained_panels.is_some() {
+        edited.map(native_compose::compact_deleted_panel_fabrics).transpose()?
+    } else {
+        edited
     };
     let has_edits = edited.is_some();
     let garment = match edited {
