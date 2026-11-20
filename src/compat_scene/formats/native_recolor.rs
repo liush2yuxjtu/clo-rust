@@ -1,9 +1,10 @@
-//! Update a native fabric and the records used to reconstruct its single colorway.
+//! Update native fabric colors and their archived style chips.
 
+use super::native_materials;
 use super::native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const UINT: u8 = 5;
 const INT: u8 = 4;
@@ -141,19 +142,32 @@ fn update_colorway<T>(
     record: &Fields<'_>,
     fabrics: &HashMap<u32, &T>,
     face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+    allow_multiple: bool,
 ) -> Result<Vec<u8>, String> {
     let colorways = record.map(b"mapNewColorway")?;
     let list = map_list(colorways.get(b"listColorway", LIST_TYPE)?, 4096)?;
-    if list.len() != 1 || uint(record, b"uiCurrentCoordinationIndex", UINT)? != 0 {
+    if !allow_multiple && list.len() != 1 {
         return Err("native material edits are only verified for a single colorway".into());
     }
-    let assignment = list[0].map(b"mapAssignStyleChip")?;
+    let active = uint(record, b"uiCurrentCoordinationIndex", UINT)? as usize;
+    let assignment = list.get(active).ok_or("invalid active native colorway")?
+        .map(b"mapAssignStyleChip")?;
     let mut selected = HashMap::new();
     for row in map_list(assignment.get(b"listFabricToStyleChip", LIST_TYPE)?, 4096)? {
         let fabric = uint(&row, b"uiStyleID", UINT)?;
         let chip = uint(&row, b"uiStyleChipID", UINT)?;
         if selected.insert(fabric, chip).is_some() {
             return Err("duplicate native fabric style assignment".into());
+        }
+    }
+    for (index, colorway) in list.iter().enumerate().filter(|(index, _)| *index != active) {
+        let assignment = colorway.map(b"mapAssignStyleChip")?;
+        for row in map_list(assignment.get(b"listFabricToStyleChip", LIST_TYPE)?, 4096)? {
+            let fabric = uint(&row, b"uiStyleID", UINT)?;
+            let chip = uint(&row, b"uiStyleChipID", UINT)?;
+            if fabrics.contains_key(&fabric) && selected.get(&fabric) == Some(&chip) {
+                return Err(format!("native recolor shares a style chip with colorway {index}"));
+            }
         }
     }
 
@@ -239,6 +253,15 @@ pub(super) fn edit_materials<T>(
     edits: &HashMap<usize, T>,
     face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<Option<Vec<u8>>, String> {
+    edit_materials_in_active_colorway(data, edits, face_edit, false)
+}
+
+fn edit_materials_in_active_colorway<T>(
+    data: &[u8],
+    edits: &HashMap<usize, T>,
+    face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
+    allow_multiple: bool,
+) -> Result<Option<Vec<u8>>, String> {
     if edits.is_empty() {
         return Ok(None);
     }
@@ -259,6 +282,36 @@ pub(super) fn edit_materials<T>(
     }
     let root = Fields::read(&rewritten)?;
     Ok(Some(update_map(&root, b"mapColorWay", |map| {
-        update_colorway(map, &by_id, face_edit)
+        update_colorway(map, &by_id, face_edit, allow_multiple)
     })?))
+}
+
+pub(super) fn recolor_colorways(
+    data: &[u8],
+    state: &Value,
+    targets: &HashSet<[usize; 2]>,
+    active: u32,
+) -> Result<Vec<u8>, String> {
+    let (_, mut current) = native_materials::read_colorways(data)?;
+    let fabrics = super::super::array(state, "fabrics");
+    let mut groups = BTreeMap::<usize, HashMap<usize, Color>>::new();
+    for &[colorway, index] in targets {
+        let fabric = fabrics.get(index).ok_or("native fabric index is no longer present")?;
+        let material = super::super::fabric_for_colorway(state, fabric, colorway)?;
+        groups.entry(colorway).or_default().insert(index, scene_color(material, index, false)?);
+    }
+    let mut result = Cow::Borrowed(data);
+    for (colorway, edits) in groups {
+        if colorway != current {
+            result = Cow::Owned(native_materials::select_colorway(&result, colorway as u32)?);
+            current = colorway;
+        }
+        if let Some(updated) = edit_materials_in_active_colorway(&result, &edits, update_face, true)? {
+            result = Cow::Owned(updated);
+        }
+    }
+    if current != active as usize {
+        return native_materials::select_colorway(&result, active);
+    }
+    Ok(result.into_owned())
 }

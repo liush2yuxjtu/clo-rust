@@ -519,8 +519,11 @@ same native format and reopen. Verify the active RGBA and both indexed
 materials, GLB output after saving, and the switch back to index `1`.
 With distinct source textures, open the Rust-written archive in official CLO
 and compare the active texture with the official export from the same source.
-An unsupported multi-colorway material edit must leave the previous target
-file intact when saving fails.
+Recolor only the active colorway, save and reopen, then compare the edited and
+untouched RGBA values. Recolor both colorways before saving again and confirm
+each keeps its own edit. Include the textured ZPAC to check the base texture
+binding and desaturation after reopening. A rejected multi-colorway texture
+edit must leave the previous target file intact.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

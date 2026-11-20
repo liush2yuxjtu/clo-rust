@@ -4058,6 +4058,10 @@ async def verify_native_colorway_refresh():
                 async def api(name, *args):
                     return (await json_result(session, "clo_api_call", {"name": name, "args": list(args)}))["value"]
 
+                async def archived_rgba():
+                    rgba = await api("fabric_api.GetFabricPBRMaterialBaseColor", 0, 0)
+                    return list(struct.unpack("<4f", struct.pack("<4f", *rgba)))
+
                 async def export(stem, ext, grouped):
                     path = root / fixture.suffix[1:] / f"{stem}.{ext}"
                     result = await json_result(session, "scene_export", {"path": str(path), "colorways": True})
@@ -4129,18 +4133,35 @@ async def verify_native_colorway_refresh():
                     assert (await json_result(session, "scene_info"))["current_colorway"] == selected
                     assert await api(color, 0, 0) == expected[selected]
                     assert [await api(color, i, 0, 0) for i in range(2)] == expected
-                original = saved.read_bytes()
-                await api(select, 0)
                 await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#123456"})
+                first_edit = await archived_rgba()
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                await json_result(session, "scene_open", {"path": str(saved)})
+                assert [await api(color, i, 0, 0) for i in range(2)] == [expected[0], first_edit]
+                await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#2468ac"})
+                alternate = await archived_rgba()
+                await api(select, 0)
+                await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#a34429"})
+                original = await archived_rgba()
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                await json_result(session, "scene_open", {"path": str(saved)})
+                assert (await json_result(session, "scene_info"))["current_colorway"] == 0
+                assert [await api(color, i, 0, 0) for i in range(2)] == [original, alternate]
+                assert await api(color, 0, 0) == original
+                target_bytes = saved.read_bytes()
+                await json_result(session, "fabric_set_texture", {
+                    "fabric_index": 0, "map": "base", "image_path": "",
+                })
                 rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
-                assert rejected.isError and saved.read_bytes() == original
+                assert rejected.isError and saved.read_bytes() == target_bytes
                 assert (await json_result(session, "scene_info"))["current_colorway"] == 0
     print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
                       "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
                       "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True,
                       "public_and_python_reopen_restore_bundle": True,
                       "native_save_preserves_selected_colorway": True,
-                      "rejects_switched_material_edits_without_overwriting": True}))
+                      "native_save_preserves_recolors_by_colorway": True,
+                      "rejects_multicolorway_texture_edits_without_overwriting": True}))
 
 
 async def verify_native_append():

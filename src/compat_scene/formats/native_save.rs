@@ -7,7 +7,7 @@ use super::{
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Write};
@@ -70,44 +70,68 @@ fn fabric_fingerprint(state: &Value) -> u64 {
     let mut hash = DefaultHasher::new();
     state["current_colorway"].hash(&mut hash);
     for fabric in super::super::array(state, "fabrics") {
-        hash_except(
-            fabric,
-            &["color", "rgba", "texture_maps", "base_texture_desaturated", "info"],
-            &mut hash,
-        );
-        hash_except(&fabric["info"], &["catalog", "face_colors"], &mut hash);
-        for face in super::super::array(&fabric["info"], "face_colors") {
-            if matches!(face["type"].as_u64(), Some(0..=2)) {
-                hash_except(face, &["rgba"], &mut hash);
-            } else {
-                face.hash(&mut hash);
-            }
-        }
-        hash_except(&fabric["info"]["catalog"], &["Color", "Texture"], &mut hash);
+        hash_editable_material(fabric, false, &mut hash);
     }
     hash.finish()
 }
 
-fn colorway_fingerprint(state: &Value) -> Option<u64> {
+fn hash_editable_material(fabric: &Value, recolor_only: bool, hash: &mut DefaultHasher) {
+    let mut omitted = vec!["color", "rgba", "texture_maps", "base_texture_desaturated", "info"];
+    if recolor_only {
+        omitted.push("native_colorway_materials");
+        let opacity = !crate::compat_fit::preserves_opacity_on_recolor(fabric);
+        let clearable_maps: &[&str] = if opacity { &["opacity"] } else { &[] };
+        hash_except(&fabric["texture_maps"], clearable_maps, hash);
+    }
+    hash_except(fabric, &omitted, hash);
+    hash_except(&fabric["info"], &["catalog", "face_colors"], hash);
+    for face in super::super::array(&fabric["info"], "face_colors") {
+        if matches!(face["type"].as_u64(), Some(0..=2)) {
+            hash_except(face, &["rgba"], hash);
+        } else {
+            face.hash(hash);
+        }
+    }
+    let editable_catalog: &[&str] = if recolor_only { &["Color"] } else { &["Color", "Texture"] };
+    hash_except(&fabric["info"]["catalog"], editable_catalog, hash);
+}
+
+fn colorway_fingerprints(state: &Value) -> Option<Vec<Vec<[u64; 2]>>> {
     let names = state["colorways"].as_array()?;
     let active = usize::try_from(state["current_colorway"].as_u64()?).ok()?;
     if names.len() < 2 || active >= names.len() {
         return None;
     }
-    let mut hash = DefaultHasher::new();
-    for fabric in super::super::array(state, "fabrics") {
+    super::super::array(state, "fabrics").iter().map(|fabric| {
         let variants = &fabric["native_colorway_materials"];
         let values = variants["values"].as_array()?;
         if variants["names"] != state["colorways"] || values.len() != names.len() {
             return None;
         }
-        for (index, material) in values.iter().enumerate() {
+        Some(values.iter().enumerate().map(|(index, material)| {
             // The current material carries live edits. Its archived slot may be stale.
             let material = if index == active { fabric } else { material };
-            hash_except(material, &["native_colorway_materials"], &mut hash);
-        }
+            let mut exact = DefaultHasher::new();
+            hash_except(material, &["native_colorway_materials"], &mut exact);
+            let mut recolorable = DefaultHasher::new();
+            hash_editable_material(material, true, &mut recolorable);
+            [exact.finish(), recolorable.finish()]
+        }).collect())
+    }).collect()
+}
+
+fn verify_colorway_materials(state: &Value, source: &Value, recolors: &HashSet<[usize; 2]>) -> bool {
+    let Some(observed) = colorway_fingerprints(state) else { return false };
+    let Some(expected) = source["colorways"].as_array() else { return false };
+    if observed.len() != expected.len() {
+        return false;
     }
-    Some(hash.finish())
+    observed.iter().enumerate().all(|(fabric, variants)| {
+        variants.iter().enumerate().all(|(colorway, hashes)| {
+            let column = usize::from(recolors.contains(&[colorway, fabric]));
+            expected[fabric][colorway][column].as_u64() == Some(hashes[column])
+        })
+    })
 }
 
 fn avatar_fingerprint(state: &Value) -> u64 {
@@ -128,7 +152,8 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "project": project,
                 "garment": garment_fingerprint(state),
                 "fabrics": fabric_fingerprint(state),
-                "colorways": colorway_fingerprint(state),
+                "colorways": colorway_fingerprints(state),
+                "colorway_recolors": [],
                 "current_colorway": state["current_colorway"],
                 "avatars": avatar_fingerprint(state),
                 "textures": super::super::array(state, "fabrics").iter().map(|fabric| &fabric["texture_maps"]).collect::<Vec<_>>(),
@@ -139,7 +164,17 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
 }
 
 pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64, clear_opacity: bool) {
+    let colorway = state["current_colorway"].clone();
+    let multiple = super::super::array(state, "colorways").len() > 1;
     if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
+        if multiple {
+            let targets = super::super::vec_mut(source, "colorway_recolors");
+            let target = json!([colorway, index]);
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+            return;
+        }
         let indices = super::super::vec_mut(source, "recolored");
         let index = json!(index);
         if !indices.contains(&index) {
@@ -379,17 +414,18 @@ pub(in crate::compat_scene) fn encode(
     }
     let switched = state["current_colorway"] != source["current_colorway"];
     let changed_material = source["fabrics"].as_u64() != Some(fabric_fingerprint(state));
-    let can_save_materials = !switched && !changed_material
-        || source["colorways"].as_u64().is_some_and(|saved| {
-            super::super::array(source, "recolored").is_empty()
-                && super::super::array(source, "retextured").is_empty()
-                && colorway_fingerprint(state) == Some(saved)
-        });
+    let recolors: HashSet<[usize; 2]> = serde_json::from_value(source["colorway_recolors"].clone())
+        .map_err(|_| "invalid native colorway recolor targets")?;
+    let write_colorways = switched || !recolors.is_empty();
+    let can_save_materials = !write_colorways && !changed_material
+        || super::super::array(source, "recolored").is_empty()
+            && super::super::array(source, "retextured").is_empty()
+            && verify_colorway_materials(state, source, &recolors);
     if source["garment"].as_u64() != Some(garment_fingerprint(state))
         || !can_save_materials
         || project && source["avatars"].as_u64() != Some(avatar_fingerprint(state))
     {
-        return Err("native save supports the loaded scene, pattern renames, verified fabric edits and unedited archived colorway selections; save other edits as .clorust".into());
+        return Err("native save supports the loaded scene, pattern renames, verified fabric edits and archived colorway edits. Save other edits as .clorust".into());
     }
     let expected = stamp(template)?;
     if expected != source["stamp"] {
@@ -411,12 +447,17 @@ pub(in crate::compat_scene) fn encode(
         "pac",
     )?;
     let renamed = renamed_pac(&pac, state)?;
-    let (edited, assets) = if switched {
+    let (edited, assets) = if write_colorways {
         let index = state["current_colorway"]
             .as_u64()
             .and_then(|index| u32::try_from(index).ok())
             .ok_or("invalid active colorway index")?;
-        let pac = native_materials::select_colorway(renamed.as_deref().unwrap_or(&pac), index)?;
+        let pac = renamed.as_deref().unwrap_or(&pac);
+        let pac = if recolors.is_empty() {
+            native_materials::select_colorway(pac, index)?
+        } else {
+            native_recolor::recolor_colorways(pac, state, &recolors, index)?
+        };
         (Some(pac), HashMap::new())
     } else {
         let recolored = native_recolor::recolor(
