@@ -2713,14 +2713,25 @@ async def verify_simulation_reset_quality():
             async def api(name, *args):
                 return await successful(rust, "clo_api_call", {"name": f"utility_api.{name}", "args": list(args)})
 
+            empty = await rust.call_tool("simulate", {"steps": 0, "quality": 1})
+            assert empty.isError
+            _, empty_scene = await save(rust, "after-empty-error")
+            assert not empty_scene["patterns"] and empty_scene["simulation"] is None
+
             for name, x in (("Front", 0), ("Back", 140)):
                 await json_result(rust, "pattern_create", {
                     "name": name, "points": [[x, 0], [x + 100, 0], [x + 45, 70]],
                 })
             await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
                                             "pattern_b": "Back", "line_b": 0})
+            result = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 50})
+            assert result["ok"] is True and result["steps"] == 0
+            assert result["seconds"] >= 0 and result["seconds"] == round(result["seconds"], 2)
+            _, after_empty = await save(rust, "after-empty")
+            assert after_empty["simulation"]["quality"] == 1
+
             await api("SetSimulationQuality", 2)
-            await json_result(rust, "simulate", {"steps": 0, "particle_distance": 50})
+            await json_result(rust, "simulate", {"steps": 0})
             _, initialized = await save(rust, "initial")
             assert initialized["simulation"]["quality"] == 2
             await api("Simulate", 3)
@@ -2747,6 +2758,17 @@ async def verify_simulation_reset_quality():
             await api("Simulate", 0)
             _, after_denied = await save(rust, "after-denied")
             assert after_denied["simulation"]["quality"] == 1
+            failed_distance = await rust.call_tool(
+                "simulate", {"steps": 0, "quality": 2, "particle_distance": 2},
+            )
+            assert failed_distance.isError
+            _, after_error = await save(rust, "after-invalid-distance")
+            assert after_error["patterns"] == after_denied["patterns"]
+            assert after_error["simulation"] == after_denied["simulation"]
+            await api("Simulate", 0)
+            _, after_retry = await save(rust, "after-retry")
+            assert after_retry["simulation"] == after_denied["simulation"] | {"quality": 2}
+
             async with open_backend("rust", environment) as fresh:
                 await json_result(fresh, "scene_open", {"path": str(persisted)})
                 await json_result(fresh, "simulation_reset")
@@ -2756,7 +2778,10 @@ async def verify_simulation_reset_quality():
     print(json.dumps({"tools": ["simulate", "simulation_reset", "clo_api_call", "scene_open"],
                       "case": "reset arrangement without changing solver quality",
                       "quality_api_to_mcp": 2, "quality_mcp_to_api_and_reopen": 1,
-                      "arranged_mesh_restored": True, "unsupported_quality_preserves_setting": True}))
+                      "arranged_mesh_restored": True, "unsupported_quality_preserves_setting": True,
+                      "quality_retained_after_simulation_error": True,
+                      "quality_retained_after_invalid_distance": True,
+                      "failed_distance_preserves_mesh": True, "seconds_resolution": 0.01}))
 
 
 async def verify_avatar_changes_keep_drape():

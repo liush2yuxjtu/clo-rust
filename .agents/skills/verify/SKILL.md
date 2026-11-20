@@ -445,6 +445,11 @@ simulation and after reset. Exercise the public tools and corresponding
 `utility_api` calls, checking that both use the same quality setting,
 reset keeps the sewing and per-panel particle distance, and opening a
 saved scene in a fresh session can recover the saved quality before reset.
+Check that a requested CPU quality takes effect before an empty-scene error
+or invalid particle distance and is used by the next call. Verify that the
+invalid distance leaves the prior mesh and per-panel distances intact, that
+rejected quality 3 leaves the previous setting, and that the public response
+reports the requested steps and seconds to two decimal places.
 
 Run `--verify-simulation-remesh-keeps-pose` to refine settled cloth from
 90 mm to 25 mm at zero steps. Check exact shared vertices, inherited

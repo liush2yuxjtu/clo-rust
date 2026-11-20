@@ -1384,7 +1384,6 @@ fn append_inverse_masses(mesh: &Mesh, use_density: bool, weights: &mut Vec<f64>)
 
 pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let start = std::time::Instant::now();
-    let existing = &state["simulation"];
     let unsigned = |key: &str, default: u64| {
         if args[key].is_null() {
             Ok(default)
@@ -1395,17 +1394,13 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
     };
     let steps = unsigned("steps", 100)?;
-    let requested_distance = args["particle_distance"]
-        .as_f64()
-        .filter(|distance| *distance != 0.0);
-    let distance = requested_distance.unwrap_or_else(|| number(existing, "particle_distance", 20.0));
     let quality = unsigned(
         "quality",
         state["runtime"]["quality"].as_u64()
-            .or_else(|| existing["quality"].as_u64())
+            .or_else(|| state["simulation"]["quality"].as_u64())
             .unwrap_or(0),
     )?;
-    if steps > 3000 || !(3.0..=500.0).contains(&distance) || quality > 3 {
+    if quality > 3 {
         return Err(
             "simulation accepts 0..3000 steps, particle_distance 3..500 mm, and quality 0..3"
                 .into(),
@@ -1413,6 +1408,17 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     if quality == 3 {
         return Err("quality 3 requires a GPU cloth solver; CLO Rust currently supports CPU qualities 0, 1, and 2".into());
+    }
+    if args["quality"].is_number() {
+        state["runtime"]["quality"] = json!(quality);
+    }
+    let existing = &state["simulation"];
+    let requested_distance = args["particle_distance"]
+        .as_f64()
+        .filter(|distance| *distance != 0.0);
+    let distance = requested_distance.unwrap_or_else(|| number(existing, "particle_distance", 20.0));
+    if steps > 3000 || !(3.0..=500.0).contains(&distance) {
+        return Err("simulation accepts 0..3000 steps and particle_distance 3..500 mm".into());
     }
     let patterns = array(&state["patterns"]);
     if patterns.is_empty() {
@@ -1729,7 +1735,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             native_stitches.unsupported
         ));
     }
-    let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
+    let seconds = (start.elapsed().as_secs_f64() * 100.0).round() / 100.0;
+    let mut result = json!({"ok":true,"steps":steps,"seconds":seconds,"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
         "elastic_constraint_count":elastic.len(),"shirring_refined_vertices":shirring_vertices,"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_inner_seam_groups":native_stitches.inner_groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});

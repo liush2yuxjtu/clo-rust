@@ -45,6 +45,7 @@ fn execute(line: &str, state: &mut Value) -> Result<Value, String> {
     if result.is_ok() || matches!(request.name.as_str(),
         "clo_run_python" | "clo_ui_action" | "garment_build" | "garment_rebuild"
             | "fabric_apply" | "fabric_set_texture" | "pattern_create" | "pattern_edit_points"
+            | "simulate"
     ) || (request.name == "pattern_ops" && request.args["op"] == "elastic") {
         *state = candidate;
     }
