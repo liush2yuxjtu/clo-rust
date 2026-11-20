@@ -126,10 +126,15 @@ pub(super) fn material(record: &Fields<'_>, material: &Fields<'_>) -> Result<Val
     Ok(entry)
 }
 
+pub(super) struct ColorwayMaterial<'a> {
+    pub chip: u32,
+    pub material: Fields<'a>,
+}
+
 pub(super) fn colorway_materials<'a>(
     root: &Fields<'a>,
     fabrics: &[Fields<'a>],
-) -> Result<Vec<Vec<Fields<'a>>>, String> {
+) -> Result<Vec<Vec<ColorwayMaterial<'a>>>, String> {
     let table = root.map(b"mapColorWay")?;
     let colorways = map_list(
         table.map(b"mapNewColorway")?.get(b"listColorway", LIST_TYPE)?,
@@ -142,14 +147,16 @@ pub(super) fn colorway_materials<'a>(
         let data = row.get(key, UINT_TYPE)?;
         Ok::<_, String>(u32::from_le_bytes(data.try_into().map_err(|_| "invalid native colorway ID width")?))
     };
-    let mut chips = HashMap::new();
+    let mut chips: HashMap<(u32, u32), Fields<'_>> = HashMap::new();
     let vectors = table.map(b"mapStyleChipAssign")?;
     for vector in map_list(vectors.get(b"listFabricToStyleChipVector", LIST_TYPE)?, 4096)? {
         let style = id(&vector, b"uiStyleID")?;
         for chip in map_list(vector.get(b"listStyleChip", LIST_TYPE)?, 4096)? {
             let chip_id = id(&chip.map(b"mapElement")?, b"uiID")?;
-            if chips.insert((style, chip_id), chip).is_some() {
-                return Err("duplicate native fabric style chip".into());
+            if let Some(previous) = chips.insert((style, chip_id), chip) {
+                if previous.encoded() != chips[&(style, chip_id)].encoded() {
+                    return Err("conflicting native fabric style chip records".into());
+                }
             }
         }
     }
@@ -168,7 +175,7 @@ pub(super) fn colorway_materials<'a>(
             let materials = map_list(chip.get(b"listMaterial2D", LIST_TYPE)?, 64)?;
             let [material] = <[Fields<'_>; 1]>::try_from(materials)
                 .map_err(|_| "native colorway fabric style chip must have one material")?;
-            Ok(material)
+            Ok(ColorwayMaterial { chip: *chip_id, material })
         }).collect()
     }).collect()
 }
@@ -180,7 +187,7 @@ pub(super) fn select_colorway(pac: &[u8], index: u32) -> Result<Vec<u8>, String>
     let materials = colorway_materials(&root, &fabrics)?;
     let selected = materials.get(index as usize).ok_or("invalid native colorway index")?;
     let fabrics = fabrics.iter().zip(selected)
-        .map(|(fabric, material)| select_fabric_material(fabric, material).map(Cow::Owned))
+        .map(|(fabric, variant)| select_fabric_material(fabric, &variant.material).map(Cow::Owned))
         .collect::<Result<Vec<_>, _>>()?;
     let table = table.replace(b"uiCurrentCoordinationIndex", UINT_TYPE, &index.to_le_bytes())?;
     let root = root.replace(b"mapColorWay", MAP_TYPE, &table)?;

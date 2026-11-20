@@ -4189,13 +4189,67 @@ async def verify_native_colorway_refresh():
                     rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
                     assert rejected.isError and saved.read_bytes() == target_bytes
                     texture_archives.append(fixture.name)
+    shared_fixture = os.environ.get("CLO_SHARED_COLORWAY_FIXTURE")
+    if shared_fixture:
+        await verify_shared_colorway_edits(Path(shared_fixture).resolve(strict=True))
     print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
                       "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
                       "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True,
                       "public_and_python_reopen_restore_bundle": True,
                       "native_save_preserves_selected_colorway": True,
                       "native_save_preserves_recolors_by_colorway": True,
-                      "verified_colorway_texture_archives": texture_archives}))
+                      "verified_colorway_texture_archives": texture_archives,
+                      "shared_colorway_verified": bool(shared_fixture)}))
+
+
+async def verify_shared_colorway_edits(fixture):
+    with TemporaryDirectory(prefix="clo-shared-colorway-") as directory:
+        root = Path(directory)
+        path = root / "shared.zpac"
+        async with open_backend("rust") as session:
+            async def call(tool, **args):
+                return await json_result(session, tool, args)
+
+            async def colors():
+                return [(await call("clo_api_call", name="fabric_api.GetFabricPBRMaterialBaseColor",
+                                    args=[index, 0, 0]))["value"] for index in range(3)]
+
+            async def base_images():
+                portable = root / "shared.clorust"
+                await call("scene_save", path=str(portable))
+                scene = json.loads(portable.read_text())["scene"]
+                fabric = scene["fabrics"][0]
+                images = []
+                for index, variant in enumerate(fabric["native_colorway_materials"]["values"]):
+                    material = fabric if index == scene["current_colorway"] else variant
+                    image = material["texture_maps"].get("base")
+                    images.append(Path(image).read_bytes() if image else None)
+                return images
+
+            await call("scene_open", path=str(fixture))
+            assert (await call("scene_info"))["current_colorway"] == 2
+            original = await colors()
+            images = await base_images()
+            assert original[0] == original[2] != original[1]
+            assert images[0] == images[2] != images[1] and all(images)
+            await call("fabric_set_color", fabric_index=0, color="#27b46c")
+            changed = await colors()
+            assert changed[0] == changed[2] != original[0] and changed[1] == original[1]
+            await call("fabric_set_texture", fabric_index=0, map="base", image_path="")
+            assert await base_images() == [None, images[1], None]
+            await call("scene_save", path=str(path), thumbnail=False)
+            await call("scene_open", path=str(path))
+            assert (await call("scene_info"))["current_colorway"] == 2
+            assert await colors() == [
+                list(struct.unpack("<4f", struct.pack("<4f", *color))) for color in changed
+            ]
+            assert await base_images() == [None, images[1], None]
+            replacement = root / "replacement.png"
+            replacement.write_bytes(images[1])
+            await call("fabric_set_texture", fabric_index=0, map="base", image_path=str(replacement))
+            await call("scene_save", path=str(path), thumbnail=False)
+            await call("scene_open", path=str(path))
+            assert await base_images() == [images[1], images[1], images[1]]
 
 
 async def verify_native_append():

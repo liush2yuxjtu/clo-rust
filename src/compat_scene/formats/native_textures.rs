@@ -267,24 +267,25 @@ pub(super) fn hydrate<R: Read + Seek>(
     }
     let names = state["colorways"].clone();
     if names.as_array().is_some_and(|names| names.len() > 1) {
-        let variants = (|| -> Result<Vec<Vec<Value>>, String> {
+        let variants = (|| -> Result<Vec<(Vec<Value>, Vec<u32>)>, String> {
             let variants = colorway_materials(&root, &fabrics)?;
-            let mut output = vec![Vec::new(); fabrics.len()];
+            let mut output = vec![(Vec::new(), Vec::new()); fabrics.len()];
             for materials in variants {
                 for (index, colorway) in materials.iter().enumerate() {
-                    let mut entry = material(&fabrics[index], colorway)?;
+                    let mut entry = material(&fabrics[index], &colorway.material)?;
                     entry["index"] = json!(index);
-                    hydrate(&mut entry, colorway)?;
-                    output[index].push(entry);
+                    hydrate(&mut entry, &colorway.material)?;
+                    output[index].0.push(entry);
+                    output[index].1.push(colorway.chip);
                 }
             }
             Ok(output)
         })();
         match variants {
             Ok(variants) => {
-                for (index, values) in variants.into_iter().enumerate() {
+                for (index, (values, chips)) in variants.into_iter().enumerate() {
                     state["fabrics"][index]["native_colorway_materials"] =
-                        json!({"names": names, "values": values});
+                        json!({"names": names, "values": values, "chips": chips});
                 }
             }
             Err(error) => warnings.push(error),
@@ -344,7 +345,13 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
             };
             if let Some((asset, label)) = &edit.new_asset {
                 let bytes = record.as_deref().unwrap_or_else(|| texture.encoded());
-                record = Some(label_texture(&Fields::read(bytes)?, label, asset)?);
+                let mut updated = label_texture(&Fields::read(bytes)?, label, asset)?;
+                if edit.kind == 0 {
+                    let size = image_physical_size(edit.image.as_deref().ok_or("texture image is missing")?)?;
+                    updated = Fields::read(&updated)?.replace(b"v2Size", 10, &size)?;
+                    updated = Fields::read(&updated)?.replace(b"v2PhysicalSize", 10, &size)?;
+                }
+                record = Some(updated);
             }
             if let Some(record) = record {
                 converted.insert(index, record);
@@ -395,14 +402,20 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     Ok(Some(updated))
 }
 
-fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, String> {
+fn image_physical_size(image: &[u8]) -> Result<Vec<u8>, String> {
     let info = png::Decoder::new(Cursor::new(image)).read_info().map_err(|e| e.to_string())?;
     let info = info.info();
     let density = info.pixel_dims.filter(|dims| dims.unit == png::Unit::Meter)
         .map(|dims| [dims.xppu, dims.yppu]).unwrap_or([2835; 2]);
-    let size: Vec<u8> = [info.width, info.height].into_iter().zip(density)
-        .flat_map(|(pixels, per_meter)| (pixels as f32 * 1000.0 / per_meter.max(1) as f32).to_le_bytes())
-        .collect();
+    Ok([info.width, info.height].into_iter().zip(density)
+        .flat_map(|(pixels, per_meter)| {
+            let per_meter = if per_meter == 0 { 2835 } else { per_meter };
+            (pixels as f32 * 1000.0 / per_meter as f32).to_le_bytes()
+        }).collect())
+}
+
+fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, String> {
+    let size = image_physical_size(image)?;
     let white: Vec<u8> = [1.0f32; 4].into_iter().flat_map(f32::to_le_bytes).collect();
     let color = encode_map(&[
         (b"qsPLMIdUTF8", BYTE_TYPE, b""), (b"v4Color", 12, &white),

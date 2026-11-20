@@ -131,6 +131,7 @@ fn colorway_fingerprints(state: &Value) -> Option<Vec<Vec<Value>>> {
                 "hash": [exact.finish(), recolorable.finish(), texturable.finish(), both.finish()],
                 "textures": material["texture_maps"],
                 "sheer": crate::compat_fit::preserves_opacity_on_recolor(material),
+                "linked_colorway": super::super::canonical_colorway(fabric, index),
             })
         }).collect())
     }).collect()
@@ -151,9 +152,12 @@ fn verify_colorway_materials(
     }
     observed.iter().enumerate().all(|(fabric, variants)| {
         variants.iter().enumerate().all(|(colorway, material)| {
-            let target = [colorway, fabric];
-            let recolored = recolors.contains(&target);
             let before = &expected[fabric][colorway];
+            if before["linked_colorway"] != material["linked_colorway"] {
+                return false;
+            }
+            let target = [material["linked_colorway"].as_u64().unwrap_or(colorway as u64) as usize, fabric];
+            let recolored = recolors.contains(&target);
             let maps = texture_maps.get(&target);
             let column = usize::from(recolored) + 2 * usize::from(maps.is_some());
             if before["hash"][column] != material["hash"][column] {
@@ -205,8 +209,14 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
     state[SOURCE] = value;
 }
 
+fn current_material_colorway(state: &Value, index: u64) -> usize {
+    let colorway = state["current_colorway"].as_u64().unwrap_or(0) as usize;
+    super::super::array(state, "fabrics").iter().find(|fabric| fabric["index"] == index)
+        .map_or(colorway, |fabric| super::super::canonical_colorway(fabric, colorway))
+}
+
 pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64, clear_opacity: bool) {
-    let colorway = state["current_colorway"].clone();
+    let colorway = current_material_colorway(state, index);
     let multiple = super::super::array(state, "colorways").len() > 1;
     if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
         if multiple {
@@ -238,7 +248,7 @@ pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64, clear_o
 
 pub(in crate::compat_scene) fn mark_texture(state: &mut Value, index: u64, map: &str, clear: bool) {
     let multiple = super::super::array(state, "colorways").len() > 1;
-    let colorway = state["current_colorway"].clone();
+    let colorway = current_material_colorway(state, index);
     if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
         if multiple {
             let edits = super::super::vec_mut(source, "colorway_textures");

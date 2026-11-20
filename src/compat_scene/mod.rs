@@ -93,11 +93,54 @@ pub(crate) fn read_project_avatar_dan(
 }
 
 pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64, clear_opacity: bool) {
+    sync_shared_colorway_material(state, index);
     formats::native_save::mark_color(state, index, clear_opacity);
 }
 
 pub(crate) fn mark_native_fabric_texture(state: &mut Value, index: u64, map: &str, clear: bool) {
+    sync_shared_colorway_material(state, index);
     formats::native_save::mark_texture(state, index, map, clear);
+}
+
+fn canonical_colorway(fabric: &Value, colorway: usize) -> usize {
+    let Some(chips) = fabric["native_colorway_materials"]["chips"].as_array() else {
+        return colorway;
+    };
+    chips.get(colorway).filter(|chip| chip.is_u64())
+        .and_then(|chip| chips.iter().position(|candidate| candidate == chip))
+        .unwrap_or(colorway)
+}
+
+fn sync_shared_colorway_material(state: &mut Value, index: u64) {
+    let active = state["current_colorway"].as_u64().unwrap_or(0) as usize;
+    let names = state["colorways"].clone();
+    let Some(fabric) = state["fabrics"].as_array_mut()
+        .and_then(|fabrics| fabrics.iter_mut().find(|fabric| fabric["index"] == index))
+    else {
+        return;
+    };
+    let variants = &fabric["native_colorway_materials"];
+    if variants["names"] != names {
+        return;
+    }
+    let Some(chips) = variants["chips"].as_array() else { return };
+    let Some(chip) = chips.get(active).filter(|chip| chip.is_u64()) else { return };
+    let shared: Vec<_> = chips.iter().enumerate()
+        .filter(|(colorway, candidate)| *colorway != active && *candidate == chip)
+        .map(|(colorway, _)| colorway)
+        .collect();
+    if shared.is_empty() {
+        return;
+    }
+    let material = Value::Object(fabric.as_object().expect("fabric record").iter()
+        .filter(|(key, _)| key.as_str() != "native_colorway_materials")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect());
+    for colorway in shared {
+        if let Some(variant) = fabric["native_colorway_materials"]["values"].get_mut(colorway) {
+            *variant = material.clone();
+        }
+    }
 }
 
 type Reply = Result<Value, String>;

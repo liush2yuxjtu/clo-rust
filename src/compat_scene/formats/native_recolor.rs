@@ -160,18 +160,7 @@ fn update_colorway<T>(
             return Err("duplicate native fabric style assignment".into());
         }
     }
-    for (index, colorway) in list.iter().enumerate().filter(|(index, _)| *index != active) {
-        let assignment = colorway.map(b"mapAssignStyleChip")?;
-        for row in map_list(assignment.get(b"listFabricToStyleChip", LIST_TYPE)?, 4096)? {
-            let fabric = uint(&row, b"uiStyleID", UINT)?;
-            let chip = uint(&row, b"uiStyleChipID", UINT)?;
-            if fabrics.contains_key(&fabric) && selected.get(&fabric) == Some(&chip) {
-                return Err(format!("native recolor shares a style chip with colorway {index}"));
-            }
-        }
-    }
-
-    let mut updated = HashSet::new();
+    let mut updated = HashMap::<u32, Vec<u8>>::new();
     let output = update_map(record, b"mapStyleChipAssign", |assignments| {
         update_list(
             assignments,
@@ -189,8 +178,12 @@ fn update_colorway<T>(
                     if uint(&chip.map(b"mapElement")?, b"uiID", UINT)? != *chip_id {
                         return Ok(None);
                     }
-                    if !updated.insert(uid) {
-                        return Err("duplicate native material style chip".into());
+                    if let Some(previous) = updated.get(&uid) {
+                        if !allow_multiple || previous.as_slice() != chip.encoded() {
+                            return Err("conflicting native material style chip records".into());
+                        }
+                    } else {
+                        updated.insert(uid, chip.encoded().to_vec());
                     }
                     Ok(Some(material_list(chip, edit, face_edit)?))
                 })?;

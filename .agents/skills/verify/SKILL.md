@@ -532,6 +532,13 @@ Compare the stored physical size, the UV bounds and the decoded image against
 official CLO. Trying to add an unsupported map to a missing slot must leave the
 previous save intact.
 
+Set `CLO_SHARED_COLORWAY_FIXTURE` to the official three-colorway archive
+created by copying `Original` from a textured two-colorway ZPAC. Compare
+the original, copied and independent materials. Edit the copied colorway
+and verify that the original shares its new RGBA and texture, while
+`Alternate` keeps its original material. Reopen in official CLO and compare
+the GLBs for all three colorways after replacement, recolor and clearing.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.
