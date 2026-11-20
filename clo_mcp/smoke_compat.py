@@ -4051,6 +4051,7 @@ async def verify_native_colorway_refresh():
     fixtures = [Path(os.environ[key]).resolve(strict=True)
                 for key in ("CLO_REORDERED_ZPRJ", "CLO_REORDERED_ZPAC")]
     names = ("Original", "Alternate")
+    texture_archives = []
     with TemporaryDirectory(prefix="clo-colorway-refresh-") as directory:
         root = Path(directory)
         for fixture in fixtures:
@@ -4148,20 +4149,47 @@ async def verify_native_colorway_refresh():
                 assert (await json_result(session, "scene_info"))["current_colorway"] == 0
                 assert [await api(color, i, 0, 0) for i in range(2)] == [original, alternate]
                 assert await api(color, 0, 0) == original
-                target_bytes = saved.read_bytes()
-                await json_result(session, "fabric_set_texture", {
-                    "fabric_index": 0, "map": "base", "image_path": "",
-                })
-                rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
-                assert rejected.isError and saved.read_bytes() == target_bytes
-                assert (await json_result(session, "scene_info"))["current_colorway"] == 0
+                async def base_images():
+                    portable_path = saved.with_suffix(".clorust")
+                    await json_result(session, "scene_save", {"path": str(portable_path)})
+                    scene = json.loads(portable_path.read_text())["scene"]
+                    fabric = scene["fabrics"][0]
+                    results = []
+                    for index, variant in enumerate(fabric["native_colorway_materials"]["values"]):
+                        material = fabric if index == scene["current_colorway"] else variant
+                        path = material["texture_maps"].get("base")
+                        results.append(Path(path).read_bytes() if path else None)
+                    return results
+
+                async def set_base(path):
+                    await json_result(session, "fabric_set_texture", {
+                        "fabric_index": 0, "map": "base", "image_path": str(path),
+                    })
+
+                baseline = await base_images()
+                if all(baseline) and baseline[0] != baseline[1]:
+                    replacement = saved.with_suffix(".png")
+                    replacement.write_bytes(baseline[0])
+                    await api(select, 1)
+                    await set_base(replacement)
+                    await api(select, 0)
+                    await set_base("")
+                    await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                    await json_result(session, "scene_open", {"path": str(saved)})
+                    assert await base_images() == [None, baseline[0]]
+                    assert (await json_result(session, "scene_info"))["current_colorway"] == 0
+                    target_bytes = saved.read_bytes()
+                    await set_base(replacement)
+                    rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
+                    assert rejected.isError and saved.read_bytes() == target_bytes
+                    texture_archives.append(fixture.name)
     print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
                       "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
                       "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True,
                       "public_and_python_reopen_restore_bundle": True,
                       "native_save_preserves_selected_colorway": True,
                       "native_save_preserves_recolors_by_colorway": True,
-                      "rejects_multicolorway_texture_edits_without_overwriting": True}))
+                      "verified_colorway_texture_archives": texture_archives}))
 
 
 async def verify_native_append():

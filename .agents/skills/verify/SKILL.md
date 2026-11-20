@@ -522,8 +522,12 @@ and compare the active texture with the official export from the same source.
 Recolor only the active colorway, save and reopen, then compare the edited and
 untouched RGBA values. Recolor both colorways before saving again and confirm
 each keeps its own edit. Include the textured ZPAC to check the base texture
-binding and desaturation after reopening. A rejected multi-colorway texture
-edit must leave the previous target file intact.
+binding and desaturation after reopening. With the textured ZPAC, replace the
+existing base image in `Alternate`, switch to `Original`, and clear its base
+image. Save, reopen in both backends, and compare which GLB files contain a base
+image and its decoded pixels. Check that the replacement retains its source
+label and that attempting to add an image to a missing archive slot leaves a
+previous save intact.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

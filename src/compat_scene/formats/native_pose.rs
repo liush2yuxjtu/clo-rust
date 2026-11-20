@@ -13,6 +13,7 @@ pub(super) const BYTE_TYPE: u8 = 15;
 const UINT_TYPE: u8 = 5;
 const LIMIT: usize = 4096;
 
+#[derive(Clone, Copy)]
 struct Field<'a> {
     name: &'a [u8],
     kind: u8,
@@ -59,26 +60,39 @@ impl<'a> Fields<'a> {
 
     pub(super) fn replace(&self, name: &[u8], kind: u8, value: &[u8]) -> Result<Vec<u8>, String> {
         self.get(name, kind)?;
-        let mut output = vec![self.0.len() as u8];
-        output.extend(self.0.iter().map(|field| field.name.len() as u8));
-        output.extend(self.0.iter().map(|field| field.kind));
-        let values = self.0.iter().map(|field| {
-            if field.name == name && field.kind == kind {
-                value
-            } else {
-                field.value
+        self.set(name, kind, value)
+    }
+
+    pub(super) fn set(&self, name: &[u8], kind: u8, value: &[u8]) -> Result<Vec<u8>, String> {
+        let mut fields = self.0.to_vec();
+        let replacement = Field { name, kind, value };
+        let mut found = false;
+        for field in fields.iter_mut().filter(|field| field.name == name && field.kind == kind) {
+            *field = replacement;
+            found = true;
+        }
+        if !found {
+            if fields.iter().any(|field| field.name == name) {
+                return Err("native PAC field exists with a different type".into());
             }
-        });
-        for bytes in values.clone() {
+            fields.push(replacement);
+        }
+        let count = u8::try_from(fields.len()).map_err(|_| "too many native PAC map fields")?;
+        let mut output = vec![count];
+        for field in &fields {
+            output.push(u8::try_from(field.name.len()).map_err(|_| "native PAC field name is too long")?);
+        }
+        output.extend(fields.iter().map(|field| field.kind));
+        for field in &fields {
             output.extend(
-                u32::try_from(bytes.len())
+                u32::try_from(field.value.len())
                     .map_err(|_| "PAC map field exceeds the size limit")?
                     .to_le_bytes(),
             );
         }
-        for (field, bytes) in self.0.iter().zip(values) {
+        for field in &fields {
             output.extend(field.name);
-            output.extend(bytes);
+            output.extend(field.value);
         }
         Ok(output)
     }

@@ -1,13 +1,15 @@
 //! Resolve and replace texture images referenced by native fabric records.
 
 use super::clo_native::find;
-use super::native_materials::{colorway_materials, face_records, face_type, material};
+use super::native_materials::{
+    colorway_materials, face_records, face_type, material, read_colorways, select_colorway,
+};
 use super::native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE};
-use super::native_recolor::edit_materials;
+use super::native_recolor::edit_materials_in_active_colorway;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::hash::{DefaultHasher, Hasher};
 use std::io::{Read, Seek, Write};
@@ -24,6 +26,14 @@ const TYPES: &[(&str, i32)] = &[
     ("metalness", 12),
     ("opacity", 21),
 ];
+
+#[derive(serde::Deserialize)]
+pub(super) struct ColorwayTextureEdit {
+    pub colorway: usize,
+    pub fabric: usize,
+    pub map: String,
+    pub clear: bool,
+}
 
 fn integer(field: &Fields<'_>, key: &[u8]) -> Result<i32, String> {
     let raw = field
@@ -287,6 +297,7 @@ pub(super) fn hydrate<R: Read + Seek>(
 struct Edit {
     kind: i32,
     image: Option<Vec<u8>>,
+    label: Option<String>,
     matches: RefCell<Vec<String>>,
     desaturated: bool,
 }
@@ -324,11 +335,17 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
             if found.replace(name).is_some() {
                 return Err("native texture references are not uniquely paired".into());
             }
-            if image_type == 2 {
-                converted.insert(
-                    index,
-                    texture.replace(b"enImageType", 4, &5i32.to_le_bytes())?,
-                );
+            let mut record = if image_type == 2 {
+                Some(texture.replace(b"enImageType", 4, &5i32.to_le_bytes())?)
+            } else {
+                None
+            };
+            if let Some(label) = &edit.label {
+                let bytes = record.as_deref().unwrap_or_else(|| texture.encoded());
+                record = Some(label_texture(&Fields::read(bytes)?, label, name)?);
+            }
+            if let Some(record) = record {
+                converted.insert(index, record);
             }
         }
         if edit.image.is_some() {
@@ -366,6 +383,14 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
         )?;
     }
     Ok(Some(updated))
+}
+
+fn label_texture(texture: &Fields<'_>, label: &str, asset: &str) -> Result<Vec<u8>, String> {
+    let data = texture.replace(b"qsFileName", BYTE_TYPE, label.as_bytes())?;
+    let data = Fields::read(&data)?.replace(b"qsFileNameUTF8", BYTE_TYPE, label.as_bytes())?;
+    // The source label and the unique ZIP member name serve different callers.
+    let data = Fields::read(&data)?.set(b"qsUniqueFileName", BYTE_TYPE, asset.as_bytes())?;
+    Fields::read(&data)?.set(b"qsUniqueFileNameUTF8", BYTE_TYPE, asset.as_bytes())
 }
 
 fn occurrences(mut data: &[u8], needle: &[u8]) -> usize {
@@ -421,12 +446,21 @@ pub(super) fn replacements(
             edits.entry(index).or_insert_with(Vec::new).push(Edit {
                 kind,
                 image,
+                label: None,
                 matches: RefCell::new(Vec::new()),
                 desaturated: fabric["base_texture_desaturated"] == true,
             });
         }
     }
-    let updated = edit_materials(pac, &edits, update_face)?;
+    apply_edits(pac, edits, false)
+}
+
+fn apply_edits(
+    pac: &[u8],
+    edits: HashMap<usize, Vec<Edit>>,
+    multiple: bool,
+) -> Result<(Option<Vec<u8>>, HashMap<String, Vec<u8>>), String> {
+    let updated = edit_materials_in_active_colorway(pac, &edits, update_face, multiple)?;
     let mut images = HashMap::new();
     for edit in edits.into_values().flatten() {
         let Some(image) = edit.image else { continue };
@@ -446,4 +480,63 @@ pub(super) fn replacements(
         images.insert(name.clone(), image);
     }
     Ok((updated, images))
+}
+
+pub(super) fn replace_colorways(
+    pac: &[u8],
+    state: &Value,
+    targets: &[ColorwayTextureEdit],
+    active: u32,
+) -> Result<(Vec<u8>, HashMap<String, Vec<u8>>), String> {
+    let (_, mut current) = read_colorways(pac)?;
+    let fabrics = super::super::array(state, "fabrics");
+    let mut edits = BTreeMap::<usize, HashMap<usize, Vec<Edit>>>::new();
+    let mut image_bytes = 0;
+    for target in targets {
+        let material = super::super::fabric_for_colorway(
+            state, fabrics.get(target.fabric).ok_or("native fabric index no longer exists")?,
+            target.colorway,
+        )?;
+        let (_, kind) = TYPES.iter().find(|(key, _)| *key == target.map)
+            .ok_or("unknown native texture map")?;
+        let (image, label) = if target.clear {
+            (None, None)
+        } else {
+            let path = material["texture_maps"][&target.map].as_str()
+                .ok_or("native texture replacement is missing its image")?;
+            let path = Path::new(path);
+            let name = path.file_name().and_then(|name| name.to_str())
+                .ok_or("native texture replacement needs a UTF-8 filename")?;
+            (Some(crate::compat_fit::png_for_export(path, false)?), Some(name.to_owned()))
+        };
+        image_bytes += image.as_ref().map_or(0, Vec::len);
+        if image_bytes > 256 * 1024 * 1024 {
+            return Err("replacement texture assets exceed 256 MiB".into());
+        }
+        edits.entry(target.colorway).or_default().entry(target.fabric).or_default().push(Edit {
+            kind: *kind, image, label, matches: RefCell::new(Vec::new()),
+            desaturated: material["base_texture_desaturated"] == true,
+        });
+    }
+    let mut result = Cow::Borrowed(pac);
+    let mut images = HashMap::new();
+    for (colorway, edits) in edits {
+        if colorway != current {
+            result = Cow::Owned(select_colorway(&result, colorway as u32)?);
+            current = colorway;
+        }
+        let (updated, assets) = apply_edits(&result, edits, true)?;
+        if let Some(updated) = updated {
+            result = Cow::Owned(updated);
+        }
+        for (name, data) in assets {
+            if images.insert(name, data).is_some() {
+                return Err("native texture replacement asset is shared by edited colorways".into());
+            }
+        }
+    }
+    if current != active as usize {
+        result = Cow::Owned(select_colorway(&result, active)?);
+    }
+    Ok((result.into_owned(), images))
 }

@@ -256,7 +256,7 @@ pub(super) fn edit_materials<T>(
     edit_materials_in_active_colorway(data, edits, face_edit, false)
 }
 
-fn edit_materials_in_active_colorway<T>(
+pub(super) fn edit_materials_in_active_colorway<T>(
     data: &[u8],
     edits: &HashMap<usize, T>,
     face_edit: impl Copy + Fn(&Fields<'_>, &T) -> Result<Option<Vec<u8>>, String>,
@@ -291,6 +291,7 @@ pub(super) fn recolor_colorways(
     state: &Value,
     targets: &HashSet<[usize; 2]>,
     active: u32,
+    retextured: &[super::native_textures::ColorwayTextureEdit],
 ) -> Result<Vec<u8>, String> {
     let (_, mut current) = native_materials::read_colorways(data)?;
     let fabrics = super::super::array(state, "fabrics");
@@ -298,7 +299,10 @@ pub(super) fn recolor_colorways(
     for &[colorway, index] in targets {
         let fabric = fabrics.get(index).ok_or("native fabric index is no longer present")?;
         let material = super::super::fabric_for_colorway(state, fabric, colorway)?;
-        groups.entry(colorway).or_default().insert(index, scene_color(material, index, false)?);
+        let keep_opacity = retextured.iter().any(|edit| {
+            edit.colorway == colorway && edit.fabric == index && edit.map == "opacity" && !edit.clear
+        });
+        groups.entry(colorway).or_default().insert(index, scene_color(material, index, keep_opacity)?);
     }
     let mut result = Cow::Borrowed(data);
     for (colorway, edits) in groups {
