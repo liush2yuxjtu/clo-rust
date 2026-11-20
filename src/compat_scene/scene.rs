@@ -178,7 +178,8 @@ fn merge(state: &mut Value, incoming: &Value, append: bool) -> Result<(), String
             .cloned()
             .ok_or_else(|| "seam refers to an unknown panel".to_string())
     };
-    let (groups, group_ids) = super::annotations::remap(state, incoming, remap_id)?;
+    let groups = array(incoming, "native_seam_groups").iter();
+    let (groups, group_ids) = super::annotations::remap(state, groups, remap_id)?;
     let mut joins = Vec::with_capacity(seams.len());
     for seam in seams {
         let mut new_seam = seam.clone();

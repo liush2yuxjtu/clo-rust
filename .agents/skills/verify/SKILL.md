@@ -205,6 +205,12 @@ elastic and shirring settings follow the surviving lines, and a seam
 spanning a removed line is discarded. Check that an invalid edit leaves
 the surviving sewing unchanged.
 
+Run `--verify-symmetry-sewing` with both values of `with_sewing`.
+Reopen the mirrored panel and verify that whole-edge sewing, partial
+internal sewing and self-sewing reference the expected panel IDs.
+Check reflected internal rest coordinates and confirm that both
+internal seam groups reach the Rust solver after reopening.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

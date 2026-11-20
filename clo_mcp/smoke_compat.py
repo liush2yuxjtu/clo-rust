@@ -1355,6 +1355,80 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_symmetry_sewing():
+    with TemporaryDirectory(prefix="clo-symmetry-sewing-") as directory:
+        root = Path(directory)
+        async with open_backend("rust") as rust:
+            await inspect_contract(rust)
+            for name, x in (("Front", 0), ("Back", 200)):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 100, 50], [x, 60]],
+                })
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
+                                            "pattern_b": "Back", "line_b": 0})
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 1,
+                                            "pattern_b": "Front", "line_b": 3})
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())
+
+            fixture, document = await save("fixture")
+            initial = document["scene"]
+            a, b = (panel["id"] for panel in initial["patterns"])
+
+            def endpoint(panel, line, depth=1, start=0.0):
+                return {"pattern_id": panel, "shape_depth": depth, "shape_index": 0 if depth == 2 else None,
+                        "start_line": line, "end_line": line, "start_ratio": start,
+                        "end_ratio": 1.0, "direction": True}
+
+            initial["seams"][0]["native_group"] = 1
+            initial["patterns"][0]["inner_seam_rest"] = [[[[15, 12], [30, 35]]]]
+            initial["native_seam_groups"] = [
+                {"id": 1, "name": "Full edge", "restored": True, "active": True,
+                 "segments": [[endpoint(a, 0), endpoint(b, 0)]]},
+                {"id": 2, "name": "Partial inner", "restored": False, "active": True,
+                 "segments": [[endpoint(a, 0, depth=2, start=0.25), endpoint(b, 2, start=0.5)]]},
+            ]
+            fixture.write_text(json.dumps(document))
+            for with_sewing in (False, True):
+                await json_result(rust, "scene_open", {"path": str(fixture)})
+                await json_result(rust, "pattern_ops", {"pattern": "Front", "op": "symmetry",
+                                                       "args": {"with_sewing": with_sewing}})
+                path, result = await save(f"symmetry-{with_sewing}")
+                scene = result["scene"]
+                assert scene["patterns"][:2] == initial["patterns"]
+                mirrored = scene["patterns"][2]
+                assert mirrored["id"] not in (a, b)
+                assert [point[0] for point in mirrored["points"]] == [100, 0, 0, 100]
+                assert mirrored["inner_seam_rest"] == [[[[85, 12], [70, 35]]]]
+                assert scene["seams"][:2] == initial["seams"]
+                assert scene["native_seam_groups"][:2] == initial["native_seam_groups"]
+                if with_sewing:
+                    full, partial = scene["native_seam_groups"][2:]
+                    assert full["id"] == 3 and partial["id"] == 4
+                    for copied, source in zip((full, partial), initial["native_seam_groups"], strict=True):
+                        expected = json.loads(json.dumps(source["segments"]))
+                        expected[0][0]["pattern_id"] = mirrored["id"]
+                        assert copied["segments"] == expected
+                    copied_seam, self_seam = scene["seams"][2:]
+                    assert copied_seam["pattern_a"] == mirrored["id"] and copied_seam["native_group"] == full["id"]
+                    assert copied_seam["pattern_b"] == b
+                    assert self_seam["pattern_a"] == self_seam["pattern_b"] == mirrored["id"]
+                else:
+                    assert len(scene["seams"]) == len(scene["native_seam_groups"]) == 2
+                await json_result(rust, "scene_open", {"path": str(path)})
+                assert (await json_result(rust, "seams_list"))["count"] == (6 if with_sewing else 3)
+                if with_sewing:
+                    simulated = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 50})
+                    assert simulated["native_inner_seam_groups"] == 2
+    print(json.dumps({"tools": ["pattern_ops", "seams_list", "scene_open", "simulate"],
+                      "case": "symmetry with sewing", "with_sewing_false_groups": 3,
+                      "with_sewing_true_groups": 6, "solver_inner_seam_groups": 2,
+                      "reopen_and_remap": "pass"}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -1883,6 +1957,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-outline-edit-remaps", action="store_const", dest="comparison",
                              const=verify_outline_edit_remaps,
                              help="verify boundary edits preserve unaffected sewing and edge properties")
+    comparisons.add_argument("--verify-symmetry-sewing", action="store_const", dest="comparison",
+                             const=verify_symmetry_sewing,
+                             help="verify symmetry duplicates native sewing and mirrored rest geometry")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1898,7 +1975,7 @@ if __name__ == "__main__":
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
-                                verify_outline_edit_remaps)
+                                verify_outline_edit_remaps, verify_symmetry_sewing)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

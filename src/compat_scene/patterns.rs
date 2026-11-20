@@ -1,4 +1,5 @@
 use super::{array, flag, index, invalidate_geometry, next_id, number, string, vec_mut, Reply};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -598,6 +599,15 @@ fn flip(pattern: &mut Value, horizontal: bool) -> Result<(), String> {
             }
         }
     }
+    if let Some(rest) = pattern.get_mut("inner_seam_rest") {
+        let mut paths = super::InnerSeamRest::deserialize(&*rest)
+            .map_err(|error| format!("invalid inner seam rest geometry: {error}"))?;
+        let axis = usize::from(!horizontal);
+        for point in paths.iter_mut().flatten().flatten() {
+            point[axis] = 2.0 * centre - point[axis];
+        }
+        *rest = json!(paths);
+    }
     set_points(pattern, pts);
     Ok(())
 }
@@ -772,26 +782,10 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 move_2d(&mut pattern, args, 300.)?;
             }
             let new_index = array(state, "patterns").len();
-            vec_mut(state, "patterns").push(pattern);
             if op == "symmetry" && flag(args, "with_sewing", true) {
-                let mirrored: Vec<_> = array(state, "seams")
-                    .iter()
-                    .filter(|s| s["pattern_a"] == old_id || s["pattern_b"] == old_id)
-                    .cloned()
-                    .map(|mut seam| {
-                        if let Some(record) = seam.as_object_mut() {
-                            record.remove("native_group");
-                        }
-                        for key in ["pattern_a", "pattern_b"] {
-                            if seam[key] == old_id {
-                                seam[key] = id.clone();
-                            }
-                        }
-                        seam
-                    })
-                    .collect();
-                vec_mut(state, "seams").extend(mirrored);
+                super::annotations::duplicate_sewing(state, &old_id, &id)?;
             }
+            vec_mut(state, "patterns").push(pattern);
             invalidate_geometry(state);
             return Ok(if op == "copy" {
                 json!({"new_index": new_index})

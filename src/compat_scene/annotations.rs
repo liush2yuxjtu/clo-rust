@@ -185,9 +185,9 @@ pub(super) fn validate(content: &Value, patterns: &[Value], seams: &[Value]) -> 
     Ok(())
 }
 
-pub(super) fn remap<F>(
+pub(super) fn remap<'a, F>(
     state: &Value,
-    source: &Value,
+    source: impl Iterator<Item = &'a Value>,
     map_id: F,
 ) -> Result<(Vec<Value>, std::collections::HashMap<u64, u64>), String>
 where
@@ -200,11 +200,7 @@ where
         .unwrap_or(0);
     let mut converted = Vec::new();
     let mut mapping = std::collections::HashMap::new();
-    for (i, mut group) in array(source, "native_seam_groups")
-        .iter()
-        .cloned()
-        .enumerate()
-    {
+    for (i, mut group) in source.cloned().enumerate() {
         let id = last
             .checked_add(i as u64 + 1)
             .ok_or("native sewing group ID limit exceeded")?;
@@ -222,4 +218,27 @@ where
         converted.push(group);
     }
     Ok((converted, mapping))
+}
+
+pub(super) fn duplicate_sewing(state: &mut Value, old: &Value, new: &Value) -> Result<(), String> {
+    let map_panel = |id: &Value| Ok(if id == old { new.clone() } else { id.clone() });
+    let groups = array(state, "native_seam_groups").iter()
+        .filter(|group| members(group).contains(&old));
+    let (groups, mapping) = remap(state, groups, map_panel)?;
+    let joins = array(state, "seams").iter()
+        .filter(|seam| seam["pattern_a"] == *old || seam["pattern_b"] == *old)
+        .cloned()
+        .map(|mut seam| {
+            for key in ["pattern_a", "pattern_b"] {
+                seam[key] = map_panel(&seam[key])?;
+            }
+            if let Some(id) = seam["native_group"].as_u64() {
+                seam["native_group"] = json!(mapping.get(&id).ok_or("missing mirrored native seam group")?);
+            }
+            Ok(seam)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    vec_mut(state, "native_seam_groups").extend(groups);
+    vec_mut(state, "seams").extend(joins);
+    Ok(())
 }
