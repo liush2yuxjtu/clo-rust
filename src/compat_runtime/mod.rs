@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 pub type DomainCall = fn(&str, &Value, &mut Value) -> Result<Value, String>;
 pub(crate) type ToolResult = Result<Value, String>;
 
+const START_HELP: &str = "Call clo_launch(with_bridge=true) to start the Rust scripting bridge.";
+
 pub fn dispatch(
     name: &str,
     args: &Value,
@@ -24,11 +26,13 @@ pub fn dispatch(
             if args["with_bridge"].as_bool().unwrap_or(true) {
                 state["runtime"]["bridge"] = json!(true);
             }
-            Ok(json!(if running {
+            let workbench = if running {
                 "CLO Rust is already running."
             } else {
                 "CLO Rust workbench is running."
-            }))
+            };
+            let bridge = if is_up(state) { "Bridge is up." } else { START_HELP };
+            Ok(json!(format!("{workbench} {bridge}")))
         }
         "clo_stop_bridge" => {
             state["runtime"]["bridge"] = json!(false);
@@ -149,8 +153,7 @@ fn status(state: &Value) -> Value {
         "engine_version": env!("CARGO_PKG_VERSION")
     });
     if !is_up(state) {
-        status["how_to_start"] =
-            json!("Call clo_launch(with_bridge=true) to start the Rust scripting bridge.");
+        status["how_to_start"] = json!(START_HELP);
     }
     status
 }

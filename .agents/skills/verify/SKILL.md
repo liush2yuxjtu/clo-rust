@@ -318,6 +318,19 @@ starting CLO. The report preserves each backend's instructions and verifies
 the route from API discovery and invocation through UI inspection, action,
 and state readback.
 
+Run `python -m clo_mcp.smoke_compat --compare-live-bridge-lifecycle` from a
+dedicated CLO session. Start with the official bridge up. Set
+`CLO_SCENE_OPEN_PROJECT` to the shared two-panel fixture and `CLO_MCP_STATE`
+to a fresh writable directory. Verify that repeat launch describes readiness,
+invalid arguments leave the bridge online, stop leaves the app running, and
+scene/API/Python calls fail while offline. Check that checkpoint listing stays
+available. When the script prints the native restart prompt, restart the
+bridge from inside CLO within 60 seconds. Confirm the same process returns
+and both the scene summary and detailed panels match the pre-stop state.
+On Rust, `clo_launch(with_bridge=true)` restarts the embedded bridge.
+Record a native process exit or restart timeout as a failed recovery case.
+The first launch from a closed official application is a separate case.
+
 Run `python -m clo_mcp.smoke_compat --compare-desktop-observation` with
 `CLO_MCP_OFFICIAL_COMMAND` set and the CLO desktop available to the MCP host.
 The case checks the native server's `tools/list` directly against the pinned

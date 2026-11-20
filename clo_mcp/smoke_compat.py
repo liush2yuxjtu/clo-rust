@@ -764,9 +764,17 @@ async def smoke_rust():
         assert partial_script.isError
         expected_count = changed["pattern_count"] + 1
         assert (await json_result(session, "scene_info"))["pattern_count"] == expected_count
-        await successful(session, "clo_stop_bridge")
+        assert (await json_result(session, "clo_stop_bridge"))["result"] == "bridge stopped"
+        down = await json_result(session, "clo_status")
+        assert down["bridge"] == "down" and down["clo_running"]
         assert (await session.call_tool("scene_info", {})).isError
-        await successful(session, "clo_launch", {"with_bridge": True})
+        paused = await json_result(session, "clo_launch", {"with_bridge": False})
+        assert down["how_to_start"] in paused["result"]
+        assert (await json_result(session, "clo_status"))["bridge"] == "down"
+        restarted = await json_result(session, "clo_launch", {"with_bridge": True})
+        assert "Bridge is up." in restarted["result"]
+        up = await json_result(session, "clo_status")
+        assert up["bridge"] == "up" and up["pid"] == down["pid"]
         assert (await json_result(session, "scene_info"))["pattern_count"] == expected_count
     print("Rust MCP: 48 contracts and 11 diagnostics listed. Scene mutation, error, image, export and seam check passed")
 
@@ -830,6 +838,95 @@ async def compare_control_guide():
             guides[backend] = await inspect_control_guide(session)
     print(json.dumps({"tool": "clo_control_guide", "workflow": "pass",
                       "guides": guides}, ensure_ascii=False))
+
+
+async def compare_live_bridge_lifecycle():
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    assert project.is_file(), project
+    reports = {}
+    scenes = {}
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        for name, session in (("rust", rust), ("official", clo)):
+            status = await json_result(session, "clo_status")
+            assert status["bridge"] == "up" and status["clo_running"], status
+            original = await json_result(session, "scene_info")
+            if name == "official":
+                assert original["project_path"] or not (
+                    original["patterns"] or original["avatars"]
+                ), "Use a dedicated CLO window without unsaved garments or avatars."
+            await json_result(session, "scene_open", {"path": str(project)})
+            try:
+                scene = await json_result(session, "scene_info")
+                assert scene["patterns"]
+                scenes[name] = scene["patterns"]
+                panels = await json_result(session, "pattern_list", {"detail": True})
+                offline_list = await json_result(session, "checkpoint_list")
+                active_launches = [
+                    (await json_result(session, "clo_launch", args))["result"]
+                    for args in ({}, {"with_bridge": False}, {"with_bridge": True})
+                ]
+                assert all("already running" in text.lower() and "Bridge is up." in text
+                           for text in active_launches)
+                invalid = await session.call_tool("clo_launch", {"with_bridge": []})
+                assert invalid.isError
+                assert (await json_result(session, "clo_status"))["bridge"] == "up"
+                first_stop = (await json_result(session, "clo_stop_bridge"))["result"]
+                assert first_stop == "bridge stopped", first_stop
+                try:
+                    down = await json_result(session, "clo_status")
+                    assert down["bridge"] == "down" and down["clo_running"] and down["how_to_start"], down
+                    failures = {}
+                    for tool, args in (
+                        ("scene_info", {}),
+                        ("clo_run_python", {"code": "pattern_api.GetPatternCount()", "timeout_seconds": 2}),
+                        ("clo_api_call", {"name": "pattern_api.GetPatternCount", "args": []}),
+                    ):
+                        error = await session.call_tool(tool, args)
+                        assert error.isError, (name, tool, error)
+                        failures[tool] = error.content[0].text
+                    assert await json_result(session, "checkpoint_list") == offline_list
+                    repeated_stop = (await json_result(session, "clo_stop_bridge"))["result"]
+                    assert repeated_stop.startswith(("bridge stopped", "stop requested via stop-file"))
+                    without_bridge = (await json_result(session, "clo_launch", {"with_bridge": False}))["result"]
+                    assert down["how_to_start"] in without_bridge
+                    assert (await json_result(session, "clo_status"))["bridge"] == "down"
+                    with_bridge = (await json_result(session, "clo_launch", {"with_bridge": True}))["result"]
+                    assert (await json_result(session, "clo_status"))["bridge"] == (
+                        "up" if name == "rust" else "down"
+                    )
+                    assert ("Bridge is up." if name == "rust" else down["how_to_start"]) in with_bridge
+                finally:
+                    if name == "official":
+                        print("Native bridge down cases finished. Restart it in CLO now.", file=sys.stderr, flush=True)
+                        deadline = asyncio.get_running_loop().time() + 60
+                        while True:
+                            current = await json_result(session, "clo_status")
+                            if current["bridge"] == "up":
+                                break
+                            assert current["clo_running"], "CLO exited after stopping the bridge"
+                            assert asyncio.get_running_loop().time() < deadline, "Native bridge restart timed out"
+                            await asyncio.sleep(1)
+                restored = await json_result(session, "clo_status")
+                assert restored["bridge"] == "up" and restored["clo_running"], restored
+                assert restored["pid"] == status["pid"], (status, restored)
+                assert await json_result(session, "scene_info") == scene
+                assert await json_result(session, "pattern_list", {"detail": True}) == panels
+                reports[name] = {
+                    "version": status.get("clo") or status["engine_version"],
+                    "already_running": active_launches, "invalid_launch_rejected": True,
+                    "stop": first_stop, "repeat_stop": repeated_stop, "stopped_errors": failures,
+                    "launch_without_bridge": without_bridge, "launch_with_bridge": with_bridge,
+                    "checkpoint_list_available_while_stopped": True, "same_process": True,
+                    "scene_preserved": True, "panels": len(panels["patterns"]),
+                }
+            finally:
+                if name == "official" and (await json_result(session, "clo_status"))["bridge"] == "up":
+                    if original["project_path"]:
+                        await json_result(session, "scene_open", {"path": original["project_path"]})
+                    else:
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+        assert scenes["rust"] == scenes["official"]
+    print(json.dumps({"result": "pass", "backends": reports}, ensure_ascii=False))
 
 
 async def compare_desktop_observation():
@@ -7506,6 +7603,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-fabric-texture-clear", action="store_const", dest="comparison",
                              const=verify_fabric_texture_clear,
                              help="clear one fabric map and verify saved scenes and export")
+    comparisons.add_argument("--compare-live-bridge-lifecycle", action="store_const", dest="comparison",
+                             const=compare_live_bridge_lifecycle,
+                             help="observe stop, down-state calls and same-scene restart in both backends")
     comparisons.add_argument("--compare-desktop-observation", action="store_const", dest="comparison",
                              const=compare_desktop_observation,
                              help="compare desktop state bounds, stale actions and screenshot payloads")
