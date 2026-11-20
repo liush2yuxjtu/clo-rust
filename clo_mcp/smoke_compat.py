@@ -3076,11 +3076,24 @@ async def verify_elastic_parameter_updates():
             assert (await saved_options())["0"] == {"on": False, "total_length": 44}
             result = await json_result(rust, "simulate", {"steps": 0})
             assert result["elastic_constraint_count"] == on["elastic_constraint_count"]
+            await elastic(line=0, on=0, strength=0, total_length=0)
+            assert (await saved_options())["0"] == {"on": False, "total_length": 44}
+            await elastic(line=0, on=False, strength="0")
+            await api("SetPatternPieceElasticTotalLength", 0, 0, 0)
+            assert (await saved_options())["0"] == {"on": False, "total_length": 0, "strength": 0}
+            failure = await rust.call_tool("pattern_ops", {"pattern": "Panel", "op": "elastic",
+                "args": {"line": 0, "on": True, "total_length": "55", "strength": "invalid"}})
+            assert failure.isError
+            staged = await saved_options()
+            assert staged["0"] == {"on": True, "total_length": 55, "strength": 0}
+            await json_result(rust, "scene_open", {"path": archive})
+            assert await saved_options() == staged
     print(json.dumps({"tools": ["pattern_ops", "clo_api_call", "simulate"],
                       "case": "elastic parameters preserve enable flags",
                       "constraints_disabled": off["elastic_constraint_count"],
                       "constraints_enabled_after_reopen": on["elastic_constraint_count"],
-                      "disabled_edge_stayed_disabled": True}))
+                      "disabled_edge_stayed_disabled": True, "public_zero_vs_explicit_zero": "pass",
+                      "late_error_kept_enable_and_length": True}))
 
 
 async def verify_outline_edit_remaps():

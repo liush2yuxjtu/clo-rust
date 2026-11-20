@@ -400,6 +400,9 @@ Set strength and target length through the API on disabled edges, then check
 the saved flags and zero solver constraints. Enable one edge through
 `pattern_ops`, reopen the archive, and check that updating a disabled edge
 still leaves the active constraint count unchanged.
+Check that numeric zero skips the optional public elastic parameters, while
+a string zero or an explicit API setter stores zero. An invalid strength
+after valid enable and length settings retains those completed changes.
 
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and

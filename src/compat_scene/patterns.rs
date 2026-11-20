@@ -711,6 +711,17 @@ fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<(), S
     Ok(())
 }
 
+fn option_truth(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(number) => number.as_f64() != Some(0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(items) => !items.is_empty(),
+    }
+}
+
 fn line_properties(pattern: &mut Value, op: &str, args: &Value, on: Option<bool>) -> Result<(), String> {
     let line = args
         .get("line")
@@ -720,38 +731,39 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value, on: Option<bool>
     if line < -1 || line >= count as i64 {
         return Err("line index is out of range".into());
     }
-    let mut update = json!({});
+    let properties = &mut pattern["line_properties"];
+    let line_key = line.to_string();
+    let mut set = |key: &str, value: Value| {
+        if line == -1 {
+            if let Some(entries) = properties.as_object_mut() {
+                for (index, entry) in entries {
+                    if index == "-1" {
+                        continue;
+                    }
+                    if let Some(setting) = entry.get_mut(op).and_then(Value::as_object_mut) {
+                        setting.remove(key);
+                    }
+                }
+            }
+        }
+        properties[&line_key][op][key] = value;
+    };
     if let Some(on) = on {
-        update["on"] = json!(on);
+        set("on", json!(on));
     }
     if op == "elastic" {
         for key in ["total_length", "strength"] {
-            if let Some(value) = args.get(key) {
-                let value = nested_number(value, key)?;
+            if let Some(value) = args.get(key).filter(|value| on.is_none() || option_truth(value)) {
+                let value = match value.as_bool() {
+                    Some(value) => f64::from(u8::from(value)),
+                    None => nested_number(value, key)?,
+                };
                 if value < 0.0 {
                     return Err(format!("{key} must be nonnegative"));
                 }
-                update[key] = json!(value);
+                set(key, json!(value));
             }
         }
-    }
-    let fields = update.as_object().expect("line property update object");
-    let properties = &mut pattern["line_properties"];
-    if line == -1 {
-        if let Some(entries) = properties.as_object_mut() {
-            for (index, entry) in entries {
-                if index == "-1" {
-                    continue;
-                }
-                if let Some(setting) = entry.get_mut(op).and_then(Value::as_object_mut) {
-                    setting.retain(|key, _| !fields.contains_key(key));
-                }
-            }
-        }
-    }
-    let setting = &mut properties[line.to_string()][op];
-    for (key, value) in fields {
-        setting[key] = value.clone();
     }
     Ok(())
 }
@@ -876,8 +888,13 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             pattern["particle_distance"] = json!(mm);
         }
         "freeze" | "hide" | "strengthen" => pattern[op] = json!(flag(args, "on", true)),
-        "elastic" | "shirring" => {
-            line_properties(&mut pattern, op, args, Some(flag(args, "on", true)))?;
+        "elastic" => {
+            let on = args.get("on").is_none_or(option_truth);
+            line_properties(&mut state["patterns"][i], op, args, Some(on))?;
+            return Ok(result);
+        }
+        "shirring" => {
+            line_properties(&mut pattern, op, args, Some(args.get("on").is_none_or(option_truth)))?;
         }
         "delete_line" | "delete_point" => {
             let corner = index(args, if op == "delete_line" { "line" } else { "point" })?;
