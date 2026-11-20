@@ -367,6 +367,10 @@ velocity at interpolated vertices, and the measured displacement from
 the reset arrangement. Reopen and continue the original step count.
 Read `remesh_preserved_panels` and `remesh_reinitialized_panels` when
 explicitly remeshing a scene that already has a pose.
+Compare `SetParticleDistanceOfPatterns` against the same zero-step public
+remesh. Check that setting distance before simulation affects the initial mesh,
+the same setter on settled cloth retains the step count and pose, and
+`simulate(particle_distance=0)` follows the omitted-distance path.
 
 Set `CLO_RUNTIME_PATTERN_FIXTURE` to a saved `.zprj` containing patterns and
 run `--verify-runtime-pattern-query`. Check two pattern catalog entries, search,

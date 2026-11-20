@@ -2314,10 +2314,16 @@ async def verify_simulation_remesh_keeps_pose():
             await json_result(rust, "pattern_create", {
                 "name": "Panel", "points": [[0, 0], [140, 0], [58, 110]],
             })
-            await json_result(rust, "simulate", {"steps": 0, "particle_distance": 90})
+            async def batch_distance(distance):
+                return await json_result(rust, "clo_api_call", {
+                    "name": "pattern_api.SetParticleDistanceOfPatterns", "args": [distance],
+                })
+
+            assert (await batch_distance(90))["value"] is None
+            await json_result(rust, "simulate", {"steps": 0})
             _, rest = await save("rest")
             await json_result(rust, "simulate", {"steps": 4})
-            _, posed = await save("posed")
+            posed_path, posed = await save("posed")
             result = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 25})
             assert result["remesh_preserved_panels"] == 1 and result["remesh_reinitialized_panels"] == 0
             path, refined = await save("refined")
@@ -2332,6 +2338,20 @@ async def verify_simulation_remesh_keeps_pose():
                 assert old["velocities"][a] == new["velocities"][b]
             for velocity in new["velocities"]:
                 assert all(abs(a-b) < 1e-8 for a, b in zip(velocity, old["velocities"][0], strict=True))
+            await json_result(rust, "scene_open", {"path": str(posed_path)})
+            assert (await batch_distance(25))["value"] is None
+            info = await json_result(rust, "pattern_info", {"pattern": "Panel"})
+            assert info["particle_distance"] == 25
+            _, api_refined = await save("api-refined")
+            assert api_refined == refined
+            denied = await rust.call_tool("clo_api_call", {
+                "name": "pattern_api.SetParticleDistanceOfPatterns", "args": [0],
+            })
+            assert denied.isError
+            result = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 0})
+            assert "remesh_preserved_panels" not in result
+            _, zero_distance = await save("zero-distance")
+            assert zero_distance == refined
             await json_result(rust, "scene_open", {"path": str(path)})
             await json_result(rust, "simulate", {"steps": 1})
             _, resumed = await save("resumed")
@@ -2346,10 +2366,11 @@ async def verify_simulation_remesh_keeps_pose():
             assert offset < 0
             assert all(abs(posed[1] - start[1] - offset) < 1e-8
                        for posed, start in zip(new["positions"], fresh["positions"], strict=True))
-    print(json.dumps({"tools": ["simulate", "simulation_reset", "scene_open"],
+    print(json.dumps({"tools": ["simulate", "simulation_reset", "scene_open", "clo_api_call"],
                       "case": "remesh transfers the current cloth pose",
                       "coarse_vertices": len(old["positions"]), "fine_vertices": len(new["positions"]),
-                      "exact_shared_vertices": len(anchors), "continued_step": 5}))
+                      "exact_shared_vertices": len(anchors), "continued_step": 5,
+                      "api_remesh_matches_simulate": True, "zero_distance_kept_mesh": True}))
 
 
 async def verify_simulation_reset_quality():

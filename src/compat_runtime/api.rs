@@ -1331,8 +1331,16 @@ pub(super) fn invoke(
         "pattern_api.FlipPatternPiece" => pattern_op(state,"flip",json!({"horizontal":arg[1],"each":arg[2]})).map(|result| success(&result)),
         "pattern_api.SetParticleDistanceOfPattern" => pattern_op(state,"particle_distance",json!({"mm":arg[1]})).map(|result| success(&result)),
         "pattern_api.SetParticleDistanceOfPatterns" => {
-            for index in 0..patterns.len() {
-                domain("pattern_ops", &json!({"pattern":index.to_string(),"op":"particle_distance","args":{"mm":arg[0]}}),state)?;
+            let distance = arg[0]
+                .as_f64()
+                .filter(|distance| (3.0..=500.0).contains(distance))
+                .ok_or("particle distance must be 3..500 mm")?;
+            if !array(&state["simulation"]["meshes"]).is_empty() {
+                domain("simulate", &json!({"steps":0,"particle_distance":distance}), state)?;
+            } else {
+                for index in 0..patterns.len() {
+                    domain("pattern_ops", &json!({"pattern":index.to_string(),"op":"particle_distance","args":{"mm":distance}}),state)?;
+                }
             }
             Ok(json!(true))
         }

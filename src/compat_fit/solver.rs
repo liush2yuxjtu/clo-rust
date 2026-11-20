@@ -1395,11 +1395,10 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
     };
     let steps = unsigned("steps", 100)?;
-    let distance = number(
-        args,
-        "particle_distance",
-        number(existing, "particle_distance", 20.0),
-    );
+    let requested_distance = args["particle_distance"]
+        .as_f64()
+        .filter(|distance| *distance != 0.0);
+    let distance = requested_distance.unwrap_or_else(|| number(existing, "particle_distance", 20.0));
     let quality = unsigned(
         "quality",
         state["runtime"]["quality"].as_u64()
@@ -1419,7 +1418,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     if patterns.is_empty() {
         return Err("simulation requires at least one pattern".into());
     }
-    let explicit_distance = args["particle_distance"].is_number();
+    let explicit_distance = requested_distance.is_some();
     let saved_pose = existing["source"] == NATIVE_SAVED_POSE;
     let mixed_pose = !explicit_distance && existing["source"] == "mixed_saved_pose";
     let use_native = !explicit_distance && (saved_pose || existing["source"] == RUST_NATIVE_REST);

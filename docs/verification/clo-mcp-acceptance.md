@@ -37,7 +37,7 @@
 | `fabric_apply` | Rust 底层添加与赋材分开，重开保留姿态和 GLB 材质 | 双端库别名、选片、赋材后的行为和找不到材料 |
 | `fabric_set_color` | Rust 改色区分不透明与薄透面料，原生归档重开验证后置透明度贴图替换 | 双端颜色值、正反面、贴图渲染与无效索引 |
 | `fabric_set_texture` | Rust 单通道清除、工程重开、GLB 及错误后状态 | 双端纹理持久化及原生 CLO 回开 |
-| `simulate` | 本轮 Rust 重划网格、速度和续算 | 双端步数、粒距、缝合与接触量测 |
+| `simulate` | Rust 批量 API 与公开工具重划网格一致，粒距 0 沿用已有网格 | 双端步数、粒距、缝合与接触量测 |
 | `simulation_reset` | Rust 恢复排布、保留设置 | 同一变形场景的双端重置和读回 |
 | `checkpoint_save` | 本轮 Rust 同名保存验证原生源文件 SHA-256 | 双端保存时机、命名和失败路径 |
 | `checkpoint_restore` | Rust 原生名称恢复 36 片及姿态，成功恢复使旧 UI 快照失效 | 原生端现场恢复、双端导出与回开 |
