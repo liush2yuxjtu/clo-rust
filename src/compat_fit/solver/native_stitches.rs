@@ -2,40 +2,105 @@
 
 use super::{array, distance2, length, Mesh, Point};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 struct Span<'a> {
-    vertices: &'a [usize],
+    vertices: Cow<'a, [usize]>,
     lengths: Vec<f64>,
     start: f64,
     end: f64,
     offset: usize,
 }
 
-impl<'a> Span<'a> {
-    fn new(mesh: &'a Mesh, endpoint: &Value, offset: usize) -> Option<Self> {
-        if endpoint["start_line"] != endpoint["end_line"] {
+fn joined_path(
+    lines: &[Vec<usize>],
+    start: usize,
+    end: usize,
+    forward: bool,
+) -> Option<(Vec<usize>, usize, usize)> {
+    let mut path = Vec::new();
+    let mut first_end = 0;
+    let mut line = start;
+    for _ in 0..lines.len() {
+        let vertices = lines.get(line)?;
+        if vertices.len() < 2 {
             return None;
         }
-        let side = usize::try_from(endpoint["start_line"].as_u64()?).ok()?;
-        let vertices = match endpoint["shape_depth"].as_u64()? {
-            1 => mesh.sides.get(side)?,
+        let first = if forward {
+            vertices.first()?
+        } else {
+            vertices.last()?
+        };
+        if path.last().is_some_and(|last| last != first) {
+            // Do not bridge disconnected lines, including the ends of an open internal shape.
+            return None;
+        }
+        let shared = usize::from(!path.is_empty());
+        let line_start = path.len().saturating_sub(shared);
+        if forward {
+            path.extend(vertices.iter().copied().skip(shared));
+        } else {
+            path.extend(vertices.iter().rev().copied().skip(shared));
+        }
+        if line == start {
+            first_end = path.len() - 1;
+        }
+        if line == end {
+            return Some((path, first_end, line_start));
+        }
+        line = if forward {
+            (line + 1) % lines.len()
+        } else {
+            line.checked_sub(1).unwrap_or(lines.len() - 1)
+        };
+    }
+    None
+}
+
+impl<'a> Span<'a> {
+    fn new(mesh: &'a Mesh, endpoint: &Value, offset: usize) -> Option<Self> {
+        let start_line = usize::try_from(endpoint["start_line"].as_u64()?).ok()?;
+        let end_line = usize::try_from(endpoint["end_line"].as_u64()?).ok()?;
+        let lines = match endpoint["shape_depth"].as_u64()? {
+            1 => &mesh.sides,
             2 => {
                 let shape = usize::try_from(endpoint["shape_index"].as_u64()?).ok()?;
-                mesh.inner_seam_paths.get(shape)?.get(side)?
+                mesh.inner_seam_paths.get(shape)?
             }
             _ => return None,
         };
         let start = endpoint["start_ratio"].as_f64()?;
         let end = endpoint["end_ratio"].as_f64()?;
-        if !(0.0..=1.0).contains(&start)
-            || !(0.0..=1.0).contains(&end)
-            || (end - start).abs() < 1e-9
-            || endpoint["direction"].as_bool()? != (end > start)
-            || vertices.len() < 2
-        {
+        let forward = endpoint["direction"].as_bool()?;
+        if !(0.0..=1.0).contains(&start) || !(0.0..=1.0).contains(&end) {
             return None;
         }
+
+        let (vertices, start, end, first_end, last_start) = if start_line == end_line {
+            let vertices = lines.get(start_line)?;
+            if vertices.len() < 2 || forward != (end > start) {
+                return None;
+            }
+            (
+                Cow::Borrowed(vertices.as_slice()),
+                start,
+                end,
+                vertices.len() - 1,
+                0,
+            )
+        } else {
+            let (vertices, first_end, last_start) =
+                joined_path(lines, start_line, end_line, forward)?;
+            let orient = |ratio| if forward { ratio } else { 1.0 - ratio };
+            (
+                Cow::Owned(vertices),
+                orient(start),
+                orient(end),
+                first_end,
+                last_start,
+            )
+        };
         let mut lengths = vec![0.0];
         for pair in vertices.windows(2) {
             lengths.push(
@@ -46,11 +111,16 @@ impl<'a> Span<'a> {
         if !total.is_finite() || total <= 1e-9 {
             return None;
         }
+        let start = start * lengths[first_end];
+        let end = lengths[last_start] + end * (total - lengths[last_start]);
+        if (end - start).abs() <= 1e-9 {
+            return None;
+        }
         Some(Self {
             vertices,
             lengths,
-            start: start * total,
-            end: end * total,
+            start,
+            end,
             offset,
         })
     }
@@ -216,6 +286,46 @@ pub(super) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_span_uses_distance_across_edges_in_either_direction() {
+        let mesh = super::super::new_mesh(
+            &json!({"points":[[0,0],[100,0],[100,50],[0,50]]}),
+            f64::INFINITY,
+            &Value::Null,
+        )
+        .unwrap();
+        let make = |first, last, start_ratio, end_ratio, direction| {
+            Span::new(
+                &mesh,
+                &json!({
+                    "shape_depth":1,"start_line":first,"end_line":last,
+                    "start_ratio":start_ratio,"end_ratio":end_ratio,"direction":direction
+                }),
+                0,
+            )
+            .unwrap()
+        };
+        let forward = make(0, 1, 0.25, 0.5, true);
+        let reverse = make(1, 0, 0.5, 0.25, false);
+        let position = |span: &Span, fraction| {
+            let [(a, wa), (b, wb)] = span.sample(fraction);
+            std::array::from_fn(|axis| mesh.points[a][axis] * wa + mesh.points[b][axis] * wb)
+        };
+        for (fraction, expected) in [
+            (0.0, [25., 0.]),
+            (0.5, [75., 0.]),
+            (0.75, [100., 0.]),
+            (1.0, [100., 25.]),
+        ] {
+            assert_eq!(position(&forward, fraction), expected);
+            assert_eq!(position(&reverse, 1.0 - fraction), expected);
+        }
+        let wrap = make(3, 0, 0.5, 0.25, true);
+        assert_eq!(position(&wrap, 0.5), [0., 0.]);
+        assert!(joined_path(&[vec![0, 1], vec![2, 3]], 0, 1, true).is_none());
+    }
 
     #[test]
     fn interior_samples_project_to_each_other_without_moving_frozen_vertices() {

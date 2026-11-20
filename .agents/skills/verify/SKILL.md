@@ -91,6 +91,12 @@ points along the recorded mesh paths. For a negative control, remove
 `inner_seam_paths` from the saved meshes in a disposable copy and repeat from
 the same starting pose.
 
+For intervals crossing multiple edges, run `cargo test --locked native_span_uses_distance_across_edges_in_either_direction`.
+Use a saved scene with a seam interval that crosses a corner, inspect its
+corresponding positions after `simulate`, and check reversed direction and a
+disconnected path. A generated interval validates the Rust solver; compare a
+native CLO-authored fixture separately before claiming double-backend parity.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.
