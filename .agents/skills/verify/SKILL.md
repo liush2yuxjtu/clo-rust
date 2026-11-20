@@ -112,10 +112,14 @@ claiming parity for `avatar_measurements`.
 For `--compare-saved-avatar-height`, use a saved `.zprj` containing a native
 avatar with accessories. The check requires CLO's mesh fallback on
 `avatar_measurements(refresh=True)`, which exports the current avatar to a
-temporary OBJ. It compares height to within 0.25 mm and reports the differences
-in the other measurements. A CLO editor reading or cached measurement table
-requires a separate case. Check that the Rust avatar still retains its complete
-mesh and arrangement names for collision and display.
+temporary OBJ. It compares height to within 0.25 mm. For a project with
+recognized AVT body-region tags, run `--compare-saved-avatar-mesh` for all
+32 numeric body fields with the same tolerance. A CLO editor reading or
+cached measurement table requires a separate case. Check that the Rust avatar
+still retains its complete mesh and arrangement names for collision and display.
+Refresh a loaded avatar after stepping simulation and verify the pose and step
+count remain intact. If the stored region indices disagree with the physical
+mesh, check that the avatar opens and uses the unclassified mesh estimate.
 
 For saved internal seams, run `cargo test --locked native_inner_seam_uses_saved_mesh_edges`.
 Open a native fixture with internal seams over MCP and use `simulate` without a

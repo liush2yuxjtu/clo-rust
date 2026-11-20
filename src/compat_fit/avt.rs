@@ -1,5 +1,6 @@
 //! Read static Y-up geometry and arrangement names from a native avatar archive.
 
+use super::mesh_measure::{Region, RegionFace};
 use std::{ops::Range, path::Path};
 
 const HEADER: &[u8; 16] = b" AVT        CLO ";
@@ -21,6 +22,7 @@ pub(super) struct RestMesh {
     pub part_count: usize,
     pub arrangements: Vec<String>,
     pub body_faces: Option<Range<usize>>,
+    pub regions: Vec<RegionFace>,
     scene_name: Option<String>,
 }
 
@@ -76,6 +78,68 @@ fn find<'a>(fields: &[Field<'a>], key: &str, kind: u8) -> Option<&'a [u8]> {
 fn require<'a>(fields: &[Field<'a>], key: &str, kind: u8) -> Result<&'a [u8], String> {
     find(fields, key, kind)
         .ok_or_else(|| format!("missing or incorrectly typed native avatar field {key}"))
+}
+
+fn element_name<'a>(record: &[Field<'a>]) -> Option<&'a [u8]> {
+    let element = fields(find(record, "mapElement", MAP)?).ok()?;
+    find(&element, "qsNameUTF8", BYTES).or_else(|| find(&element, "qsName", BYTES))
+}
+
+fn body_regions(root: &[Field<'_>], mesh: &RestMesh) -> Option<Vec<RegionFace>> {
+    let body_faces = &mesh.triangles[mesh.body_faces.clone()?];
+    let root = fields(find(root, "mapTransformer3D", MAP)?).ok()?;
+    let children = list(find(&root, "listChildrenTransformer3D", LIST)?, MAX_PARTS).ok()?;
+    let body = children
+        .into_iter()
+        .filter_map(|raw| fields(raw).ok())
+        .find(|node| element_name(node).is_some_and(|name| name.eq_ignore_ascii_case(b"body")))?;
+    let shapes = list(find(&body, "listMatShape", LIST)?, MAX_PARTS).ok()?;
+    let vertex_start = *body_faces.iter().flatten().min()?;
+    let mut regions = Vec::with_capacity(body_faces.len());
+    for raw_shape in shapes {
+        let shape = fields(raw_shape).ok()?;
+        let materials = list(find(&shape, "listMatMesh", LIST)?, MAX_PARTS).ok()?;
+        let shape = fields(find(&shape, "mapShape", MAP)?).ok()?;
+        let indexed = list(find(&shape, "listIndexedMesh", LIST)?, MAX_PARTS).ok()?;
+        let render_to_mesh = find(&shape, "baRenderToPhysicalPos", BYTES)?;
+        if materials.len() != indexed.len() || render_to_mesh.len() % 4 != 0 {
+            return None;
+        }
+        for (material, indices) in materials.into_iter().zip(indexed) {
+            let material = fields(material).ok()?;
+            let material = fields(find(&material, "mapMaterial", MAP)?).ok()?;
+            let region =
+                Region::from_material(std::str::from_utf8(element_name(&material)?).ok()?)?;
+            let indexed = fields(indices).ok()?;
+            let indices = find(&indexed, "baPositionIndex", BYTES)?;
+            if indices.len() % 12 != 0 || indices.len() / 12 > body_faces.len() - regions.len() {
+                return None;
+            }
+            for triangle in indices.chunks_exact(12) {
+                let mut face = [0; 3];
+                for (index, raw) in face.iter_mut().zip(triangle.chunks_exact(4)) {
+                    let offset = le_uint(raw).ok()?.checked_mul(4)?;
+                    let local =
+                        le_uint(render_to_mesh.get(offset..offset.checked_add(4)?)?).ok()?;
+                    *index = vertex_start.checked_add(local)?;
+                }
+                regions.push((face, region));
+            }
+        }
+    }
+    // Reject partially mapped or mismatched render topology. Measurements
+    // must use the same physical surface as the verified body mesh.
+    let sorted = |faces: &mut Vec<Triangle>| {
+        for face in faces.iter_mut() {
+            face.sort_unstable();
+        }
+        faces.sort_unstable();
+    };
+    let mut expected = body_faces.to_vec();
+    let mut actual = regions.iter().map(|(face, _)| *face).collect();
+    sorted(&mut expected);
+    sorted(&mut actual);
+    (actual == expected).then_some(regions)
 }
 
 fn list(mut data: &[u8], max_items: usize) -> Result<Vec<&[u8]>, String> {
@@ -169,16 +233,13 @@ fn append_mesh(controller: &[u8], result: &mut RestMesh) -> Result<(), String> {
     for position in positions.chunks_exact(12) {
         result.points.push(xyz(position)?);
     }
-    if let Some(element) = find(&ctl, "mapElement", MAP).and_then(|raw| fields(raw).ok()) {
-        let name = find(&element, "qsNameUTF8", BYTES).or_else(|| find(&element, "qsName", BYTES));
-        if name.is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
-            && result
-                .body_faces
-                .as_ref()
-                .is_none_or(|faces| faces.len() < num_triangles)
-        {
-            result.body_faces = Some(first_face..result.triangles.len());
-        }
+    if element_name(&ctl).is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
+        && result
+            .body_faces
+            .as_ref()
+            .is_none_or(|faces| faces.len() < num_triangles)
+    {
+        result.body_faces = Some(first_face..result.triangles.len());
     }
     result.part_count += 1;
     Ok(())
@@ -193,6 +254,7 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         part_count: 0,
         arrangements: arr_names(&root).unwrap_or_default(),
         body_faces: None,
+        regions: Vec::new(),
         scene_name: find(&root, "qsNameUTF8", BYTES)
             .or_else(|| find(&root, "qsName", BYTES))
             .and_then(|raw| std::str::from_utf8(raw).ok())
@@ -206,6 +268,7 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
     if result.part_count == 0 {
         return Err("native avatar DAN contains no nonempty rest meshes".into());
     }
+    result.regions = body_regions(&root, &result).unwrap_or_default();
     Ok(result)
 }
 
@@ -399,6 +462,12 @@ mod tests {
         let world = solver::avatar_geometry(&state["avatar"]);
         assert_eq!(world[0].0[0], [-86.25, 20.5, 3.5]);
         assert_eq!(world[0].1, vec![[0, 1, 2], [1, 2, 3], [4, 5, 6]]);
+        state["simulation"] = json!({"steps": 5});
+        let refreshed = dispatch("avatar_measurements", &json!({"refresh": true}), &mut state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed, measures);
+        assert_eq!(state["simulation"]["steps"], 5);
         let prior = state.clone();
         fs::write(&path, zip_fixture(&file, true)).unwrap();
         assert!(

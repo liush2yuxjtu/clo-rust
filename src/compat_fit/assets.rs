@@ -359,6 +359,7 @@ struct NativeAvatar {
     parts: usize,
     arrangements: Vec<String>,
     body_faces: Option<Range<usize>>,
+    regions: Vec<super::mesh_measure::RegionFace>,
 }
 
 pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
@@ -412,6 +413,7 @@ fn avatar_from_avt(name: &str, path: Option<&Path>, rest: avt::RestMesh) -> Resu
             parts: rest.part_count,
             arrangements: rest.arrangements,
             body_faces: rest.body_faces,
+            regions: rest.regions,
         }),
     )
 }
@@ -477,18 +479,24 @@ fn avatar_from_mesh(
         }
     }
     let mut body = scaled_body(measure_height, measure_height / 1755.0, "rust_mesh_estimate");
-    for (measurement, height_key) in [
+    if let Some(measurements) = rest_details.as_ref().and_then(|details| {
+        super::mesh_measure::measure(&points, &details.regions, floor, measure_height)
+    }) {
+        body = measurements;
+    } else {
+        for (measurement, height_key) in [
         ("bust", "h_apex"),
         ("underbust", "h_underbust"),
         ("waist", "h_waist"),
         ("high_hip", "h_high_hip"),
         ("hip", "h_hip"),
     ] {
-        let level = body[height_key].as_f64().unwrap() + floor;
-        if let Some(circumference) =
-            mesh_section(&points, measure_faces, level, center_x, measure_height)
-        {
-            body[measurement] = json!(circumference);
+            let level = body[height_key].as_f64().unwrap() + floor;
+            if let Some(circumference) =
+                mesh_section(&points, measure_faces, level, center_x, measure_height)
+            {
+                body[measurement] = json!(circumference);
+            }
         }
     }
     let mut avatar = json!({
@@ -577,7 +585,7 @@ fn mesh_section(
     best
 }
 
-fn tape_perimeter(mut section: Vec<[f64; 2]>) -> Option<f64> {
+pub(super) fn tape_perimeter(mut section: Vec<[f64; 2]>) -> Option<f64> {
     if section.len() < 3 {
         return None;
     }
@@ -748,8 +756,9 @@ pub(super) fn measurement_source(avatar: &Value) -> &str {
 pub fn avatar_measurements(args: &Value, state: &mut Value) -> Result<Value, String> {
     if boolean(args, "refresh", false) {
         if let Some(path) = state["avatar"]["path"].as_str() {
-            state["avatar"] = avatar_from_path(Path::new(path))?;
-            state["simulation"] = Value::Null;
+            let refreshed = avatar_from_path(Path::new(path))?;
+            state["avatar"]["body"] = refreshed["body"].clone();
+            state["avatar"]["measurement_source"] = json!(measurement_source(&refreshed));
         }
     }
     let avatar = &state["avatar"];
