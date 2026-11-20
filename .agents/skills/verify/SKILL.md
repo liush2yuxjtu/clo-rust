@@ -111,24 +111,34 @@ inputs, results, state changes, and error cases pass the dual-backend comparison
 
 From the repository root, use a Python 3.11+ environment with `clo_mcp/requirements.txt`
 installed. Replace the example Python path with the reference MCP's venv interpreter.
-Build the binary and save each run's exit status, JSON on stdout, and log on stderr:
+Build the binary and keep the candidate revision, exit status, JSON on stdout,
+and log on stderr together. The three commands below run even if one fails.
+The final status is nonzero if any check failed.
 
 ```sh
-cargo build --release --locked
+cargo build --release --locked || exit 1
 export CLO_RUST_BINARY="$PWD/target/release/pattern-native"
 export CLO_MCP_OFFICIAL_COMMAND='["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp.server"]'
-evidence_dir="$(mktemp -d)"
+evidence_dir="$(mktemp -d)" || exit 1
 git rev-parse HEAD > "$evidence_dir/revision.txt"
-python -m clo_mcp.smoke_compat --verify-tool-contracts \
-  > "$evidence_dir/contracts.json" 2> "$evidence_dir/contracts.log"
-printf 'contract exit: %s\n' "$?"
-python -m clo_mcp.sweep_compat \
-  > "$evidence_dir/rust-tool-calls.json" 2> "$evidence_dir/rust-tool-calls.log"
-printf 'Rust sweep exit: %s\n' "$?"
-python -m clo_mcp.smoke_compat --compare-strapped-draft-preview \
-  > "$evidence_dir/strapped-preview.json" 2> "$evidence_dir/strapped-preview.log"
-printf 'preview comparison exit: %s\n' "$?"
+"$CLO_RUST_BINARY" --version > "$evidence_dir/runtime.txt"
+status=0
+record() {
+  name="$1"
+  shift
+  code=0
+  "$@" > "$evidence_dir/$name.json" 2> "$evidence_dir/$name.log" || code=$?
+  printf '%s %s\n' "$name" "$code" >> "$evidence_dir/exit-status.txt"
+  if [ "$code" -ne 0 ]; then
+    status=1
+  fi
+}
+record contracts python -m clo_mcp.smoke_compat --verify-tool-contracts
+record rust-tool-calls python -m clo_mcp.sweep_compat
+record strapped-preview python -m clo_mcp.smoke_compat --compare-strapped-draft-preview
+cat "$evidence_dir/exit-status.txt"
 printf 'Evidence: %s\n' "$evidence_dir"
+test "$status" -eq 0
 ```
 
 The sweep exits nonzero for missing, unexpected, or failed calls. Its success criterion
@@ -253,6 +263,15 @@ CLO_REORDERED_ZPRJ=/absolute/path/to/multi-colorway-colored.zprj \
 The Rust replay also checks the stored GLB material color and negative controls
 for invalid selection and a false refresh. Label those assertions as Rust
 regression evidence unless the native run has matching observations.
+
+A native file case needs a writer/reader matrix. Save to separate paths on both
+backends, then reopen each file with both readers. For each of the four
+writer/reader pairs, assert that the expected panels, seams, materials or
+avatars are actually present. Check the file contents or exported geometry as
+applicable. An open response can report success even when the expected scene
+data is missing. The [same-name texture case](../../../docs/verification/clo-mcp-acceptance.md#同名贴图的组合写入)
+applies this matrix to two colorways and checks the archive PNG bytes and the
+decoded RGBA bound to each exported GLB primitive.
 
 #### Additional verification recipes
 

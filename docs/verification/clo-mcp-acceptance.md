@@ -16,6 +16,25 @@
 
 以其中一条为例，给两端发送 `garment_plan_preview({"spec":{"silhouette":"strapless","length":"mini"},"use_scene_measurements":false})`，两端都返回 4 片纸样、6 组缝线，比较器还断言每个返回字段相等。再向两端发送 `{"spec":[]}`，均收到 MCP 错误，随后各自读回的 `garment_last_spec` 与请求前相同。这个验收结果计入该起版场景。逐项证据看下方的 48 项记录。
 
+### 复跑证据
+
+本轮用 Rust 提交 `9876e172cfebc6396d20981b3de6804bab991152` 和参考 MCP
+`d1af0b151e7f20be205102ffcb39d99f7c42d15d` 复跑。三个命令退出码均为 0。
+验收输出中的关键字段如下。
+
+| 记录 | 实际输出 |
+| --- | --- |
+| `contracts.json` | `public_tool_count=48`，参考 MCP、官方适配器、Rust 适配器均为 `pass` |
+| `rust-tool-calls.json` | 预期、实调、成功均为 48，缺失、额外调用和错误列表均为空 |
+| `strapped-preview.json` | 7 组通过，`invalid_spec_error=pass`，`last_spec_unchanged=true` |
+
+原生文件还要验收重新打开后的实际内容。Boat 上的 CLO 2026.1.382
+曾在打开只保留内嵌 ZPAC 的矩形测试工程时返回 `isError=false`，
+随后 `scene_info` 读到 0 片纸样和 0 块面料。保留工作区 OSW、ZPAC
+和归档清单的对照组读回 1 片纸样及 1 块面料。
+成功用例可复跑[同名贴图的组合写入](#同名贴图的组合写入)。
+三个场景共 24 组色组读回，包含双端写出、双端交叉重开及逐裁片 GLB 像素对照。
+
 ## Boat 原生多色组导出基准
 
 CLO 2026.1.382 通过官方 MCP 在空白工程创建了 Front、Back 和一组反向缝线。复制默认色组后得到 `Original` 和 `Alternate`，分别设为 `#990033` 和 `#245fdd`。原生 API 读回了两组独立 RGBA，保存时当前色组为索引 1。
