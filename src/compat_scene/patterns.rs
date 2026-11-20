@@ -1137,33 +1137,55 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
 }
 
 pub(super) fn sew(args: &Value, state: &mut Value) -> Reply {
-    let ia = pattern_index(state, &args["pattern_a"])?;
-    let ib = pattern_index(state, &args["pattern_b"])?;
-    let la = index(args, "line_a")?;
-    let lb = index(args, "line_b")?;
+    let panels = array(state, "patterns");
+    let panel_index = |key| bridge_pattern_index(panels, &args[key]);
+    let line_index = |key: &str| args[key].as_i64()
+        .ok_or_else(|| format!("{key} must be a 32-bit integer"));
+    let (ia, ib, la, lb) = (
+        panel_index("pattern_a")?, panel_index("pattern_b")?,
+        line_index("line_a")?, line_index("line_b")?,
+    );
+    let checked = [ia, ib, la, lb].map(i32::try_from);
+    let [ia, ib, la, lb] = match checked {
+        [Ok(ia), Ok(ib), Ok(la), Ok(lb)] => [ia, ib, la, lb],
+        _ => return Err("sewing indices must fit in 32 bits".into()),
+    };
     let count = super::annotations::count(state);
-    if la >= lines(&state["patterns"][ia])?.len()
-        || lb >= lines(&state["patterns"][ib])?.len()
-        || (ia == ib && la == lb)
+    let invalid = || Ok(json!({"ok": false, "seam_groups": count}));
+    let [Some(ia), Some(ib), Some(la), Some(lb)] = [ia, ib, la, lb].map(|n| usize::try_from(n).ok()) else {
+        return invalid();
+    };
+    let (Some(panel_a), Some(panel_b)) = (panels.get(ia), panels.get(ib)) else {
+        return invalid();
+    };
+    if la >= corner_offsets(&points(panel_a)?).len()
+        || lb >= corner_offsets(&points(panel_b)?).len()
     {
-        return Ok(json!({"ok": false, "seam_groups": count}));
+        return invalid();
     }
-    let a = state["patterns"][ia]["id"].clone();
-    let b = state["patterns"][ib]["id"].clone();
+    let a = &panel_a["id"];
+    let b = &panel_b["id"];
     let duplicate = array(state, "seams").iter().any(|s| {
-        (s["pattern_a"] == a && s["line_a"] == la && s["pattern_b"] == b && s["line_b"] == lb)
-            || (s["pattern_a"] == b
+        (&s["pattern_a"] == a && s["line_a"] == la && &s["pattern_b"] == b && s["line_b"] == lb)
+            || (&s["pattern_a"] == b
                 && s["line_a"] == lb
-                && s["pattern_b"] == a
+                && &s["pattern_b"] == a
                 && s["line_b"] == la)
     });
     if duplicate {
-        return Ok(json!({"ok": false, "seam_groups": count}));
+        return Ok(json!({"ok": true, "seam_groups": count}));
     }
+    let existing: BTreeSet<_> = super::annotations::seam_group_names(state)
+        .filter_map(Value::as_str)
+        .filter_map(|name| name.strip_prefix("Sewing_"))
+        .filter_map(|suffix| suffix.parse::<usize>().ok())
+        .collect();
+    let suffix = (count + 1..).find(|suffix| !existing.contains(suffix))
+        .expect("the number of occupied names is finite");
     let seam = json!({
         "pattern_a": a, "line_a": la, "pattern_b": b, "line_b": lb,
         "dir_a": flag(args, "dir_a", true), "dir_b": flag(args, "dir_b", true),
-        "name": format!("Seamline Pair Group {}", count + 1)
+        "name": format!("Sewing_{suffix}")
     });
     vec_mut(state, "seams").push(seam);
     // Sewing adds constraints without changing the fabric mesh. The next

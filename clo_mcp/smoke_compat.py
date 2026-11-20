@@ -1062,9 +1062,7 @@ async def compare_saved_seams():
         rust = await json_result(session, "seams_list")
         rust_panels = await json_result(session, "pattern_list", {"detail": True})
     assert official["count"] == rust["count"] > 0, (official["count"], rust["count"])
-    for expected, observed in zip(official["groups"], rust["groups"], strict=True):
-        for key in ("index", "name", "patterns"):
-            assert expected[key] == observed[key], (expected["index"], key, expected[key], observed[key])
+    assert official == rust, (official, rust)
     assert official_panels["seam_groups"] == rust_panels["seam_groups"] == rust["count"]
     for expected, observed in zip(official_panels["patterns"], rust_panels["patterns"], strict=True):
         assert expected["name"] == observed["name"]
@@ -1073,6 +1071,127 @@ async def compare_saved_seams():
         )
     print(json.dumps({"tool": "seams_list", "ordered_groups_matched": rust["count"],
                       "panel_memberships_matched": rust_panels["count"]}))
+
+
+async def compare_native_sewing():
+    fixture = Path(os.environ["CLO_SEW_FIXTURE"])
+    reference_archive = os.environ.get("CLO_SEW_REFERENCE_ARCHIVE")
+    include_self = os.environ.get("CLO_SEW_CONFIRM_SELF") == "1"
+    assert not reference_archive or include_self, "the native reference includes a same-edge seam"
+    join = {"pattern_a": "Edit Front", "line_a": 0, "pattern_b": "Edit Back", "line_b": 0,
+            "dir_a": True, "dir_b": False}
+    cases = [
+        ("existing_group", join | {"pattern_a": "Back", "pattern_b": "Front"}, True, 0),
+        ("join", join, True, 1),
+        ("duplicate", join, True, 0),
+        ("change_duplicate_directions", join | {"dir_a": False, "dir_b": True}, True, 0),
+        ("reverse_duplicate", join | {"pattern_a": "Edit Back", "pattern_b": "Edit Front",
+                                     "dir_a": False, "dir_b": True}, True, 0),
+        ("share_edge_with_third_panel", join | {"pattern_b": "Third", "dir_a": False, "dir_b": False}, True, 1),
+        ("share_edge_with_other_line", join | {"line_b": 1, "dir_a": False}, True, 1),
+        ("same_panel", join | {"pattern_b": "Edit Front", "line_a": 2, "line_b": 3,
+                               "dir_a": False, "dir_b": True}, True, 1),
+    ]
+    if include_self:
+        cases.append(("same_edge", join | {"pattern_b": "Edit Front", "line_a": 1, "line_b": 1}, True, 1))
+    cases.extend([
+        ("out_of_range_line", join | {"line_a": 90}, False, 0),
+        ("negative_line", join | {"line_a": -1}, False, 0),
+        ("missing_panel", join | {"pattern_b": "no-such-panel"}, None, 0),
+        ("negative_panel_index", join | {"pattern_a": "-1"}, False, 0),
+        ("high_panel_index", join | {"pattern_a": "99"}, False, 0),
+        ("overflowing_line", join | {"line_b": 2**31}, None, 0),
+        ("numeric_panel_indices", join | {"pattern_a": "04", "line_a": 2, "pattern_b": "2", "line_b": 3}, True, 1),
+    ])
+
+    def public_groups(listing):
+        assert listing["count"] == len(listing["groups"])
+        assert listing.keys() == {"count", "groups"}
+        assert all(group.keys() == {"index", "name", "patterns"} for group in listing["groups"])
+        return listing["groups"]
+
+    recorded = {}
+    backend_names = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            current = await json_result(session, "scene_info")
+            path = str(fixture if backend == "official" else fixture.resolve(strict=True))
+            await json_result(session, "scene_open", {"path": path})
+            try:
+                baseline = public_groups(await json_result(session, "seams_list"))
+                assert len(baseline) == 1 and baseline[0]["patterns"] == ["Front", "Back"], baseline
+                initial = [group["name"] for group in baseline]
+                for name, x in (("Edit Front", 0), ("Edit Back", 180), ("Third", 360)):
+                    await json_result(session, "pattern_create", {
+                        "name": name, "points": [[x, 150], [x + 100, 150], [x + 90, 220], [x + 10, 230]],
+                    })
+                await json_result(session, "pattern_edit_points", {
+                    "pattern": "Edit Front", "moves": [{"point": 1, "dx": 10, "dy": 3}],
+                })
+                before, observations = baseline, {}
+                for label, args, ok, added in cases:
+                    result = await session.call_tool("sew", args)
+                    if ok is None:
+                        assert result.isError, (backend, label, result.content)
+                        reply = {"is_error": True}
+                    else:
+                        assert not result.isError, (backend, label, result.content)
+                        reply = result.structuredContent or json.loads(result.content[0].text)
+                        assert reply == {"ok": ok, "seam_groups": len(before) + added}, (backend, label, reply)
+                    after = public_groups(await json_result(session, "seams_list"))
+                    assert len(after) == len(before) + added and after[:len(before)] == before, (backend, label, after)
+                    observations[label] = {"request": args, "reply": reply, "memberships": [
+                        {"index": group["index"], "patterns": group["patterns"]} for group in after
+                    ]}
+                    before = after
+                names = [group["name"] for group in after]
+                assert len(set(names)) == len(names) and all(re.fullmatch(r"Sewing_\d+", name) for name in names[1:])
+                api = await json_result(session, "clo_api_call", {
+                    "name": "pattern_api.GetSeamlinePairGroupIndexFromName", "args": [names[-1]],
+                })
+                assert api["value"] == len(names) - 1
+                for pattern in ("Edit Front", "Edit Back", "Third"):
+                    expected = [group["index"] for group in after if pattern in group["patterns"]]
+                    info = await json_result(session, "pattern_info", {"pattern": pattern})
+                    assert info["seam_groups"] == expected
+                if backend == "rust":
+                    with TemporaryDirectory(prefix="clo-sew-live-") as directory:
+                        portable = Path(directory) / "joined.clorust"
+                        await json_result(session, "scene_save", {"path": str(portable), "thumbnail": False})
+                        seams = json.loads(portable.read_text())["scene"]["seams"]
+                        await json_result(session, "scene_open", {"path": str(portable)})
+                        assert public_groups(await json_result(session, "seams_list")) == after
+                    rust_edges = [
+                        [(seam[f"pattern_{side}"], seam[f"line_{side}"], seam[f"dir_{side}"]) for side in ("a", "b")]
+                        for seam in seams
+                    ]
+                await json_result(session, "pattern_delete", {"patterns": ["Third"]})
+                retained = [group for group in after if "Third" not in group["patterns"]]
+                expected = [group | {"index": index} for index, group in enumerate(retained)]
+                assert public_groups(await json_result(session, "seams_list")) == expected
+                recorded[backend] = observations
+                backend_names[backend] = {"original": initial, "all": names}
+            finally:
+                if backend == "official":
+                    await json_result(session, "scene_open", {"path": current["project_path"]})
+    assert recorded["official"] == recorded["rust"], recorded
+    assert backend_names["official"]["original"] == backend_names["rust"]["original"]
+    if reference_archive:
+        with TemporaryDirectory(prefix="clo-sew-reference-") as directory:
+            async with open_backend("rust") as session:
+                await json_result(session, "scene_open", {"path": str(Path(reference_archive).resolve(strict=True))})
+                path = Path(directory) / "official.clorust"
+                await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+                groups = json.loads(path.read_text())["scene"]["native_seam_groups"]
+        archived_edges = []
+        for group in groups:
+            pair, = group["segments"]
+            assert group["restored"] and all(side["start_line"] == side["end_line"] for side in pair)
+            archived_edges.append([(side["pattern_id"], side["start_line"], side["direction"]) for side in pair])
+        assert archived_edges == rust_edges, (archived_edges, rust_edges)
+    print(json.dumps({"fixture": fixture.name, "cases": recorded["rust"], "names": backend_names,
+                      "directions": rust_edges, "native_archive_directions_matched": bool(reference_archive),
+                      "portable_reopen": True, "delete_removed_only_incident_groups": True}))
 
 
 async def compare_saved_scene_info():
@@ -3195,9 +3314,9 @@ async def verify_sew_keeps_drape():
             duplicate = await json_result(rust, "sew", {
                 "pattern_a": "Back", "line_a": 0, "pattern_b": "Front", "line_b": 0,
             })
-            assert duplicate == {"ok": False, "seam_groups": 1}
+            assert duplicate == {"ok": True, "seam_groups": 1}
             invalid = await json_result(rust, "sew", seam | {"line_a": 99})
-            assert invalid == duplicate
+            assert invalid == {"ok": False, "seam_groups": 1}
             path, stitched = await save("stitched")
             assert stitched["simulation"] == before["simulation"]
             await json_result(rust, "scene_open", {"path": str(path)})
@@ -3906,9 +4025,10 @@ async def verify_outline_edit_remaps():
                 groups = await json_result(rust, "seams_list")
                 group, = groups["groups"]
                 assert group["name"] == "Keep"
-                endpoint = group["native_segments"][0][0]
-                assert endpoint["start_line"] == endpoint["end_line"] == line
                 edited = json.loads(path.read_text())["scene"]
+                native_group, = edited["native_seam_groups"]
+                endpoint = native_group["segments"][0][0]
+                assert endpoint["start_line"] == endpoint["end_line"] == line
                 seam, = edited["seams"]
                 assert seam["line_a"] == line and seam["native_group"] == 1
                 properties = edited["patterns"][0]["line_properties"]
@@ -4381,8 +4501,6 @@ async def verify_reordered_native_archives():
                 groups = await json_result(session, "seams_list")
                 group, = groups["groups"]
                 assert group["name"] == "Sewing_8359" and group["patterns"] == ["Front", "Back"]
-                pair, = group["native_segments"]
-                assert [edge["direction"] for edge in pair] == [True, False]
                 for name in ("Front", "Back"):
                     panel = await json_result(session, "pattern_info", {"pattern": name})
                     lines = panel["line_info"]["lines"]
@@ -4391,6 +4509,9 @@ async def verify_reordered_native_archives():
                 path = Path(directory) / f"{kind}.clorust"
                 await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
                 saved = json.loads(path.read_text())["scene"]
+                native_group, = saved["native_seam_groups"]
+                pair, = native_group["segments"]
+                assert [edge["direction"] for edge in pair] == [True, False]
                 pose = saved["simulation"]
                 assert pose["source"] == "native_saved_pose"
                 assert sum(len(mesh["positions"]) for mesh in pose["meshes"]) == vertices
@@ -5298,6 +5419,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-seams", action="store_const", dest="comparison",
                              const=compare_saved_seams,
                              help="compare ordered seam groups and panel membership in a saved CLO project")
+    comparisons.add_argument("--compare-native-sewing", action="store_const", dest="comparison",
+                             const=compare_native_sewing,
+                             help="compare sewing replies, memberships and direction on a disposable native fixture")
     comparisons.add_argument("--compare-saved-scene-info", action="store_const", dest="comparison",
                              const=compare_saved_scene_info,
                              help="compare scene metadata for the same saved CLO project")

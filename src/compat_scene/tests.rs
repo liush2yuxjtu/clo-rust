@@ -98,7 +98,7 @@ fn seams_survive_pattern_index_changes_and_round_trip() {
     piece(&mut state, "Back");
     let request = json!({"pattern_a":"Front","line_a":0,"pattern_b":"2","line_b":2,"dir_b":false});
     assert_eq!(tool(&mut state, "sew", request.clone())["seam_groups"], 1);
-    assert_eq!(tool(&mut state, "sew", request)["ok"], false);
+    assert_eq!(tool(&mut state, "sew", request), json!({"ok":true,"seam_groups":1}));
     tool(
         &mut state,
         "pattern_delete",

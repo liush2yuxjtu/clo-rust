@@ -53,8 +53,7 @@ pub(super) fn list(state: &Value) -> Value {
     };
     let native = array(state, "native_seam_groups");
     let descriptions = native.iter().enumerate().map(|(i, group)| {
-        json!({"index": i, "name": group["name"], "patterns": names(&members(group)),
-            "native_segments": group["segments"], "restored": group["restored"], "active": group["active"]})
+        json!({"index": i, "name": group["name"], "patterns": names(&members(group))})
     });
     let direct = user_seams(state).enumerate().map(|(i, seam)| {
         json!({"index": native.len() + i, "name": seam["name"], "patterns": names(&[&seam["pattern_a"], &seam["pattern_b"]])})

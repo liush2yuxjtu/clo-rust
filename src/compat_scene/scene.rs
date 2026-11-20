@@ -596,7 +596,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             let mut warnings = vec![
                 "Loaded native outlines from saved mesh samples. Verified curve metrics, child shapes and internal seam paths are available for supported records.".to_owned(),
                 "Saved arrangement settings may be present. Official placement calibration and solver continuation state are unavailable.".to_owned(),
-                "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list.".to_owned(),
+                "Full single outline-edge seams were restored where verified. Other recovered intervals remain in the portable project data.".to_owned(),
             ];
             if embedded_avatar {
                 warnings.push("The embedded avatar was loaded as static rest geometry. Native skinning, pose and textures were not recovered.".into());

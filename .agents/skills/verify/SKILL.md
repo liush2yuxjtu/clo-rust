@@ -449,8 +449,9 @@ verify absolute placement and visibility changes on archived meshes.
 Run `--verify-sew-keeps-drape` to add sewing to a settled scene, reopen
 it, and assemble the additional stitch constraints at zero steps.
 Check that the saved positions and velocities match the pre-sewing
-scene, then advance one simulation step. Verify duplicate and
-out-of-range seam rejection. Set `CLO_DISPLAY_FIXTURE` to check
+scene, then advance one simulation step. Verify that a duplicate reports
+success without adding or changing sewing, and that an out-of-range edge
+reports false. Set `CLO_DISPLAY_FIXTURE` to check
 sewing and reopening with a native pose archive as well.
 Compare the Python seam-group count, API names and name lookups, and panel
 memberships against `seams_list` and `pattern_info`. Check the native groups
@@ -825,6 +826,19 @@ and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains
 non-panel objects. This case verifies query results. Solver coverage requires
 separate drape and seam-gap evidence.
+
+Use `--compare-native-sewing` with `CLO_SEW_FIXTURE` pointing to the same
+disposable `multi-colorway-colored.zprj` on both hosts. It starts with Front
+and Back joined on edge 0. The case creates three panels, moves an endpoint,
+and adds seams in both directions. Compare repeated and reversed requests,
+edge and panel index boundaries, missing names, shared edges, group names,
+memberships, and group removal after deleting the third panel. Compare the
+format and uniqueness of generated `Sewing_` names and check their lookup.
+Set `CLO_SEW_CONFIRM_SELF=1` for the same-edge case and dismiss the native
+overlap warning on the dedicated desktop. To check directions against the
+saved official groups, set `CLO_SEW_REFERENCE_ARCHIVE` to the captured
+`sewing-live-probe.zpac`. The Rust run preserves directions and memberships
+through portable save and reopen before deleting the panel.
 
 For `scene_info`, leave a saved `.zprj` open in CLO 3D with no unsaved changes.
 Set the official stdio command as above and point Rust to the same asset folder.
