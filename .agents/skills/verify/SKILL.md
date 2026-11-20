@@ -338,6 +338,14 @@ the reset arrangement. Reopen and continue the original step count.
 Read `remesh_preserved_panels` and `remesh_reinitialized_panels` when
 explicitly remeshing a scene that already has a pose.
 
+Set `CLO_RUNTIME_PATTERN_FIXTURE` to a saved `.zprj` containing patterns and
+run `--verify-runtime-pattern-query`. Check two pattern catalog entries, search,
+description and doc lookup, structured calls, Python output, and release of an
+`ImportExportOption` handle twice. Verify rejected inputs leave the scene intact.
+With the official command configured, load the same saved fixture in CLO first.
+The case reads that scene without editing it. A down bridge or a different open
+project is recorded as `BLOCKED` with exit 2, alongside the Rust observations.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

@@ -9,8 +9,8 @@
 | `clo_status` | 本轮分别读到原生 `down` 和 Rust `up` | 双端就绪、停桥和重启状态 |
 | `clo_launch` | Rust 实调 | 首次、重复启动与原生桥接恢复 |
 | `clo_stop_bridge` | Rust 实调和会话重启案例 | 现场停桥后工具错误和场景保留 |
-| `clo_run_python` | Rust 脚本导出与公开截图字节一致 | 双端表达式、赋值、输出、报错后的状态 |
-| `clo_api_search` | Rust 搜索和目录交叉验证 | 双端名称、文档搜索及限制参数 |
+| `clo_run_python` | Rust 纸样计数及名称的表达式、赋值和输出，报错后场景保持 | 现场双端结果及可观察写入 |
+| `clo_api_search` | Rust 搜索和目录交叉验证，纸样查询摘要匹配原生目录留档 | 现场双端名称、文档搜索及限制参数 |
 | `clo_api_doc` | Rust 短名和限定名返回同一记录 | 双端名称歧义、缺失项和重载 |
 | `scene_info` | 历史 Carlita 对照匹配 10 个工程字段 | 新版本相同工程、空场景和切换 |
 | `scene_clear` | Rust 清场与历史保留用例 | 双端 `keep_avatar`、材料和缝组读回 |
@@ -46,10 +46,10 @@
 | `garment_build` | Rust 实调和构建、检查点、快照用例 | 双端加载人台、替换和追加、缝合和模拟读回 |
 | `garment_rebuild` | 本轮 Rust 会话历史用例 | 双端改规格重建、失败后历史和场景 |
 | `garment_last_spec` | 本轮双端空会话和预览后不变 | 完成构建和重建之后的双端历史 |
-| `clo_api_catalog` | Rust 查询、分页及导出 API 用例 | 双端实际工作流的可调用目录及翻页 |
+| `clo_api_catalog` | Rust 查询、分页及导出 API 用例；2 个纸样条目匹配原生目录留档 | 双端实际工作流的可调用目录及翻页 |
 | `clo_api_describe` | Rust 文档字段和导出 API 用例 | 双端实用类型、枚举、重载及缺失项 |
 | `clo_api_call` | Rust 调用、导出回开及相机变更 | 双端读写、参数类型和错误的状态读回 |
-| `clo_api_release` | Rust 实调 | 双端对象句柄释放、失效及重新获取 |
+| `clo_api_release` | Rust 重复释放 `ImportExportOption` 句柄返回 1 和 0 | 现场双端释放、失效及重新获取 |
 | `clo_control_guide` | 本轮双端指南结构和工具路径 | 路径所述的现场操作读回 |
 | `clo_ui_state` | 本轮双端节点树、上下界及 6 个非法输入 | 可见窗口与运行中场景、选区和对话框 |
 | `clo_ui_action` | 本轮双端过期快照拒绝 | 双端可执行动作和效果读回 |

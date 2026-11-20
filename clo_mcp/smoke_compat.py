@@ -1341,6 +1341,90 @@ async def compare_curved_skirt_preview():
                       "comparisons": results, "last_spec_unchanged": True}))
 
 
+async def verify_runtime_pattern_query():
+    fixture = os.environ.get("CLO_RUNTIME_PATTERN_FIXTURE")
+    assert fixture, "set CLO_RUNTIME_PATTERN_FIXTURE to a saved .zprj with at least one pattern"
+    project = Path(fixture).resolve(strict=True)
+    expected = {
+        "GetPatternCount": "GetPatternCount() -> int",
+        "GetPatternPieceName": "GetPatternPieceName(arg0: int) -> str",
+    }
+
+    async def observe(session, scene):
+        findings = {}
+        for short, summary in expected.items():
+            name = f"pattern_api.{short}"
+            entry = {"name": name, "kind": "function", "signature": None, "summary": summary}
+            page = await json_result(session, "clo_api_catalog", {
+                "query": short, "module": "pattern_api", "limit": 1,
+            })
+            assert page == {"entries": [entry], "total": 1, "next_offset": None, "unavailable_modules": {}}, page
+            search = await json_result(session, "clo_api_search", {"query": short.lower(), "limit": 1})
+            assert json.loads(search["result"]) == page
+            description = await json_result(session, "clo_api_describe", {"name": name})
+            assert description["name"] == name and description["members"] == []
+            assert description["doc"].splitlines()[0] == summary
+            for query in (short, name):
+                doc = await json_result(session, "clo_api_doc", {"function_name": query})
+                assert json.loads(doc["result"]) == description
+            findings[short] = {"catalog": entry, "doc": description["doc"].splitlines()[0]}
+
+        count = scene["pattern_count"]
+        assert count > 0
+        first = scene["patterns"][0]["name"]
+        for short, args, value in (("GetPatternCount", [], count), ("GetPatternPieceName", [0], first)):
+            name = f"pattern_api.{short}"
+            assert await json_result(session, "clo_api_call", {"name": name, "args": args}) == {
+                "name": name, "value": value,
+            }
+        assert await json_result(session, "clo_run_python", {"code": "pattern_api.GetPatternCount()"}) == {
+            "value": count, "stdout": "",
+        }
+        assert await json_result(session, "clo_run_python", {
+            "code": "print(pattern_api.GetPatternCount()); result = pattern_api.GetPatternPieceName(0)",
+        }) == {"value": first, "stdout": f"{count}\n"}
+        handle_type = "ApiTypes.ImportExportOption"
+        handle = (await json_result(session, "clo_api_call", {"name": handle_type}))["value"]
+        assert handle["$handle"] and handle["type"] == "ImportExportOption"
+        for released in (1, 0):
+            assert await json_result(session, "clo_api_release", {"handles": [handle["$handle"]]}) == {
+                "released": released,
+            }
+        for tool, args in (
+            ("clo_api_catalog", {"module": "pattern_api", "offset": -1}),
+            ("clo_api_search", {"query": "GetPatternCount", "limit": 0}),
+            ("clo_api_call", {"name": "pattern_api.GetPatternCount", "args": [42]}),
+            ("clo_run_python", {"code": "raise ValueError('verification control')"}),
+        ):
+            assert (await session.call_tool(tool, args)).isError, (tool, args)
+        after = await json_result(session, "scene_info")
+        for key in ("project_path", "patterns", "pattern_count", "avatars", "fabric_count", "seam_groups"):
+            assert after[key] == scene[key], key
+        return {"apis": findings, "pattern_count": count, "first_pattern": first,
+                "handle_release_counts": [1, 0], "errors_rejected": 4, "scene_unchanged": True}
+
+    async with open_backend("rust") as rust:
+        await inspect_contract(rust)
+        await json_result(rust, "scene_open", {"path": str(project)})
+        observations = await observe(rust, await json_result(rust, "scene_info"))
+    reference = {"status": "NOT_RUN"}
+    if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+        async with open_backend("official") as clo:
+            await inspect_contract(clo)
+            if (await json_result(clo, "clo_status"))["bridge"] != "up":
+                reference = {"status": "BLOCKED", "reason": "CLO bridge is down"}
+            else:
+                scene = await json_result(clo, "scene_info")
+                if Path(scene.get("project_path") or ".").resolve() != project:
+                    reference = {"status": "BLOCKED", "reason": "CLO has not opened the saved fixture"}
+                else:
+                    assert await observe(clo, scene) == observations
+                    reference = {"status": "PASS"}
+    print(json.dumps({"case": "read-only pattern API workflow", "rust": observations, "official": reference}))
+    if reference["status"] == "BLOCKED":
+        raise SystemExit(2)
+
+
 async def verify_runtime_export_workflow():
     names = (
         "export_api.ExportFBX", "export_api.ExportSnapshot2D",
@@ -2842,6 +2926,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
+    comparisons.add_argument("--verify-runtime-pattern-query", action="store_const", dest="comparison",
+                             const=verify_runtime_pattern_query,
+                             help="verify pattern discovery, calls, Python and handles against a saved .zprj")
     comparisons.add_argument("--verify-runtime-export-workflow", action="store_const", dest="comparison",
                              const=verify_runtime_export_workflow,
                              help="verify Rust discovery and calls for the snapshot and FBX workflow")
@@ -2909,7 +2996,7 @@ if __name__ == "__main__":
                              const=verify_mixed_native_append,
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
+    if (args.comparison not in (None, verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,

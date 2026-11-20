@@ -608,6 +608,14 @@ const TYPES: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+fn pattern_query_doc(name: &str) -> Option<&'static str> {
+    match name {
+        "pattern_api.GetPatternCount" => Some("GetPatternCount() -> int"),
+        "pattern_api.GetPatternPieceName" => Some("GetPatternPieceName(arg0: int) -> str"),
+        _ => None,
+    }
+}
+
 pub(super) fn catalog(args: &Value) -> ToolResult {
     let module = args["module"].as_str().unwrap_or_default();
     let query = args["query"].as_str().unwrap_or_default().to_lowercase();
@@ -640,7 +648,11 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
         }
     };
     for entry in FUNCTIONS {
-        add(entry.name, "function", Some(entry.signature), entry.doc);
+        if let Some(doc) = pattern_query_doc(entry.name) {
+            add(entry.name, "function", None, doc);
+        } else {
+            add(entry.name, "function", Some(entry.signature), entry.doc);
+        }
     }
     for (name, _) in TYPES {
         add(name, "type", Some("()"), "Structured API value.");
@@ -677,10 +689,10 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
 
 pub(super) fn describe(name: &str) -> ToolResult {
     if let Some(entry) = FUNCTIONS.iter().find(|entry| entry.name == name) {
-        let doc = match name {
-            "pattern_api.GetPatternCount" => "GetPatternCount() -> int".to_owned(),
-            _ => format!("{name}{}\n{}", entry.signature, entry.doc),
-        };
+        let doc = pattern_query_doc(name).map_or_else(
+            || format!("{name}{}\n{}", entry.signature, entry.doc),
+            str::to_owned,
+        );
         return Ok(json!({"name":name,"doc":doc,"members":[]}));
     }
     if let Some((_, fields)) = TYPES.iter().find(|(qualified, _)| *qualified == name) {
