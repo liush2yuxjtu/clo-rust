@@ -35,6 +35,12 @@ pub(super) struct ColorwayTextureEdit {
     pub clear: bool,
 }
 
+#[derive(Default)]
+pub(super) struct TextureAssets {
+    pub replaced: HashMap<String, Vec<u8>>,
+    pub added: BTreeMap<String, Vec<u8>>,
+}
+
 fn integer(field: &Fields<'_>, key: &[u8]) -> Result<i32, String> {
     let raw = field
         .get(key, 4)?
@@ -346,11 +352,9 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
             if let Some((asset, label)) = &edit.new_asset {
                 let bytes = record.as_deref().unwrap_or_else(|| texture.encoded());
                 let mut updated = label_texture(&Fields::read(bytes)?, label, asset)?;
-                if edit.kind == 0 {
-                    let size = image_physical_size(edit.image.as_deref().ok_or("texture image is missing")?)?;
-                    updated = Fields::read(&updated)?.replace(b"v2Size", 10, &size)?;
-                    updated = Fields::read(&updated)?.replace(b"v2PhysicalSize", 10, &size)?;
-                }
+                let size = image_physical_size(edit.image.as_deref().ok_or("texture image is missing")?)?;
+                updated = Fields::read(&updated)?.replace(b"v2Size", 10, &size)?;
+                updated = Fields::read(&updated)?.replace(b"v2PhysicalSize", 10, &size)?;
                 record = Some(updated);
             }
             if let Some(record) = record {
@@ -360,8 +364,10 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
         if let Some(image) = &edit.image {
             let name = match (found, &edit.new_asset) {
                 (Some(name), _) => name,
-                (None, Some((asset, label))) if edit.kind == 0 => {
-                    added.push(Cow::Owned(new_base_texture(label, asset, image)?));
+                (None, Some((asset, label))) => {
+                    added.push((edit.kind, Cow::Owned(new_texture_record(
+                        face, edit.kind, label, asset, image,
+                    )?)));
                     asset
                 }
                 _ => return Err("native save requires an existing texture slot on the fabric".into()),
@@ -381,18 +387,28 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     } else {
         face.encoded().to_vec()
     };
+    if added.iter().any(|(kind, _)| *kind == 4) {
+        // CLO enables normal mapping on the face when it adds the first normal image.
+        updated = Fields::read(&updated)?.replace(b"fBumpMode", 6, &2.0f32.to_le_bytes())?;
+        updated = Fields::read(&updated)?.replace(b"iNormalIntensityInPercentage", 4, &10i32.to_le_bytes())?;
+    }
     if !converted.is_empty() || !removed.is_empty() || !added.is_empty() {
-        let textures: Vec<_> = list
+        let mut textures = list
             .iter()
             .enumerate()
             .filter(|(index, _)| !removed.contains(index))
             .map(|(index, texture)| {
-                converted
+                let data = converted
                     .remove(&index)
-                    .map_or(Cow::Borrowed(texture.encoded()), Cow::Owned)
+                    .map_or(Cow::Borrowed(texture.encoded()), Cow::Owned);
+                Ok((integer(texture, b"enType")?, data))
             })
-            .chain(added)
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
+        if !added.is_empty() {
+            textures.extend(added);
+            textures.sort_by_key(|(kind, _)| *kind);
+        }
+        let textures: Vec<_> = textures.into_iter().map(|(_, data)| data).collect();
         updated = Fields::read(&updated)?.replace(
             b"listTexture",
             LIST_TYPE,
@@ -414,7 +430,9 @@ fn image_physical_size(image: &[u8]) -> Result<Vec<u8>, String> {
         }).collect())
 }
 
-fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, String> {
+fn new_texture_record(
+    face: &Fields<'_>, kind: i32, label: &str, asset: &str, image: &[u8],
+) -> Result<Vec<u8>, String> {
     let size = image_physical_size(image)?;
     let white: Vec<u8> = [1.0f32; 4].into_iter().flat_map(f32::to_le_bytes).collect();
     let color = encode_map(&[
@@ -425,7 +443,12 @@ fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, S
     let zero = 0i32.to_le_bytes();
     let minus_one = (-1i32).to_le_bytes();
     let repeat = 10497i32.to_le_bytes();
-    encode_map(&[
+    let kind_bytes = kind.to_le_bytes();
+    let one = 1.0f32.to_le_bytes();
+    let min_filter = 9987i32.to_le_bytes();
+    let mag_filter = 9729i32.to_le_bytes();
+    let millimeters_to_meters = 0.001f32.to_le_bytes();
+    let mut fields: Vec<(&[u8], u8, &[u8])> = vec![
         (b"v2Translation", 10, &[0; 8]),
         (b"qsFileName", BYTE_TYPE, label.as_bytes()),
         (b"bAIFindBR", 1, &[0]), (b"enWrapS", 4, &repeat),
@@ -433,22 +456,34 @@ fn new_base_texture(label: &str, asset: &str, image: &[u8]) -> Result<Vec<u8>, S
         (b"qsAIFileName", BYTE_TYPE, b""), (b"qsAIFileNameUTF8", BYTE_TYPE, b""),
         (b"isSubstanceExtract", 1, &[0]), (b"qsAIFileImageType", 4, &zero),
         (b"qsAIFileLayerNo", 4, &minus_one), (b"qsAIFilePageNo", 4, &minus_one),
-        (b"enImageType", 4, &5i32.to_le_bytes()), (b"bUseManualOriginColor", 1, &[0]),
+        (b"enImageType", 4, &[5, 0, 0, 0]), (b"bUseManualOriginColor", 1, &[0]),
         (b"qsUniqueFileName", BYTE_TYPE, asset.as_bytes()),
         (b"qsUniqueFileNameUTF8", BYTE_TYPE, asset.as_bytes()),
-        (b"bIsJeanFile", 1, &[0]), (b"enType", 4, &zero),
-        (b"fIntensity", 6, &1.0f32.to_le_bytes()), (b"enWrapT", 4, &repeat),
-        (b"enMinFilter", 4, &9987i32.to_le_bytes()), (b"enMagFilter", 4, &9729i32.to_le_bytes()),
+        (b"bIsJeanFile", 1, &[0]), (b"enType", 4, &kind_bytes),
+        (b"fIntensity", 6, &one), (b"enWrapT", 4, &repeat),
+        (b"enMinFilter", 4, &min_filter), (b"enMagFilter", 4, &mag_filter),
         (b"v4BorderColor", 12, &[0; 16]), (b"bUseOverallColorSwitch", 1, &[0]),
         (b"enMappingType", 4, &zero), (b"fSignedAngle", 6, &zero),
         (b"bAppliedTransformToThumbnail", 1, &[0]), (b"bColorInverted", 1, &[1]),
         (b"iAlphaMode", 4, &zero), (b"v2Size", 10, &size),
         (b"bButtonUnified", 1, &[1]), (b"v2PhysicalSize", 10, &size),
-        (b"v2UvSize", 10, &white[..8]), (b"fUnifiedScale", 6, &0.001f32.to_le_bytes()),
+        (b"v2UvSize", 10, &white[..8]), (b"fUnifiedScale", 6, &millimeters_to_meters),
         (b"listLayer", LIST_TYPE, &zero), (b"bCanvasTransparency", 1, &[1]),
         (b"mapOverallColorSwitchColor", MAP_TYPE, &color),
         (b"mapManualOriginColor", MAP_TYPE, &color), (b"bTileTexture", 1, &[0]),
-    ])
+    ];
+    if kind == 5 {
+        for (key, field_type) in [
+            (b"fDisplacementAmount".as_slice(), 6),
+            (b"fDisplacementEdgeLength", 6),
+            (b"fDisplacementShift", 6),
+            (b"bDisplacementKeepContinuity", 1),
+            (b"fDisplacementWaterLevel", 6),
+        ] {
+            fields.push((key, field_type, face.get(key, field_type)?));
+        }
+    }
+    encode_map(&fields)
 }
 
 fn label_texture(texture: &Fields<'_>, label: &str, asset: &str) -> Result<Vec<u8>, String> {
@@ -474,7 +509,8 @@ pub(super) fn replacements(
     baseline: &[Value],
     recolored: &[Value],
     retextured: &[Value],
-) -> Result<(Option<Vec<u8>>, HashMap<String, Vec<u8>>), String> {
+    mut occupied: HashSet<String>,
+) -> Result<(Option<Vec<u8>>, TextureAssets), String> {
     let mut edits = HashMap::new();
     let fabrics = super::super::array(state, "fabrics");
     if fabrics.len() != baseline.len() {
@@ -498,12 +534,18 @@ pub(super) fn replacements(
             {
                 continue;
             }
-            let image = if current.is_null() && explicit.is_some_and(|edit| edit["clear"] == true) {
-                None
+            let (image, new_asset) = if current.is_null() && explicit.is_some_and(|edit| edit["clear"] == true) {
+                (None, None)
             } else {
                 let path = current.as_str().filter(|path| !path.is_empty())
                     .ok_or("native texture removal requires an explicit texture edit")?;
-                Some(crate::compat_fit::png_for_export(Path::new(path), false)?)
+                let path = Path::new(path);
+                let new_asset = if explicit.is_some() && baseline[index][key].is_null() {
+                    Some(allocate_asset(path, &mut occupied)?)
+                } else {
+                    None
+                };
+                (Some(crate::compat_fit::png_for_export(path, false)?), new_asset)
             };
             image_bytes += image.as_ref().map_or(0, Vec::len);
             if image_bytes > 256 * 1024 * 1024 {
@@ -512,7 +554,7 @@ pub(super) fn replacements(
             edits.entry(index).or_insert_with(Vec::new).push(Edit {
                 kind,
                 image,
-                new_asset: None,
+                new_asset,
                 matches: RefCell::new(Vec::new()),
                 desaturated: fabric["base_texture_desaturated"] == true,
             });
@@ -525,9 +567,9 @@ fn apply_edits(
     pac: &[u8],
     edits: HashMap<usize, Vec<Edit>>,
     multiple: bool,
-) -> Result<(Option<Vec<u8>>, HashMap<String, Vec<u8>>), String> {
+) -> Result<(Option<Vec<u8>>, TextureAssets), String> {
     let updated = edit_materials_in_active_colorway(pac, &edits, update_face, multiple)?;
-    let mut images = HashMap::new();
+    let mut images = TextureAssets::default();
     for edit in edits.into_values().flatten() {
         let Some(image) = edit.image else { continue };
         let matches = edit.matches.into_inner();
@@ -537,15 +579,34 @@ fn apply_edits(
         if matches.len() < 4
             || matches.iter().any(|candidate| candidate != name)
             || edit.new_asset.is_none() && occurrences(pac, name.as_bytes()) != matches.len() * 2
-            || images.contains_key(name)
         {
             return Err(
                 "native texture asset is shared or its references could not be verified".into(),
             );
         }
-        images.insert(name.clone(), image);
+        let previous = if edit.new_asset.is_some() {
+            images.added.insert(name.clone(), image)
+        } else {
+            images.replaced.insert(name.clone(), image)
+        };
+        if previous.is_some() {
+            return Err("native texture asset is shared by edited materials".into());
+        }
     }
     Ok((updated, images))
+}
+
+fn allocate_asset(path: &Path, occupied: &mut HashSet<String>) -> Result<(String, String), String> {
+    let label = path.file_name().and_then(|name| name.to_str())
+        .ok_or("native texture replacement needs a UTF-8 filename")?;
+    let mut next = occupied.len();
+    loop {
+        let asset = format!("clo-rust-texture-{next}.png");
+        if occupied.insert(asset.clone()) {
+            return Ok((asset, label.to_owned()));
+        }
+        next += 1;
+    }
 }
 
 pub(super) fn replace_colorways(
@@ -559,7 +620,6 @@ pub(super) fn replace_colorways(
     let fabrics = super::super::array(state, "fabrics");
     let mut edits = BTreeMap::<usize, HashMap<usize, Vec<Edit>>>::new();
     let mut image_bytes = 0;
-    let mut next_asset = occupied.len();
     for target in targets {
         let material = super::super::fabric_for_colorway(
             state, fabrics.get(target.fabric).ok_or("native fabric index no longer exists")?,
@@ -573,16 +633,8 @@ pub(super) fn replace_colorways(
             let path = material["texture_maps"][&target.map].as_str()
                 .ok_or("native texture replacement is missing its image")?;
             let path = Path::new(path);
-            let name = path.file_name().and_then(|name| name.to_str())
-                .ok_or("native texture replacement needs a UTF-8 filename")?;
-            let asset = loop {
-                let asset = format!("clo-rust-texture-{next_asset}.png");
-                next_asset += 1;
-                if occupied.insert(asset.clone()) {
-                    break asset;
-                }
-            };
-            (Some(crate::compat_fit::png_for_export(path, false)?), Some((asset, name.to_owned())))
+            let asset = allocate_asset(path, &mut occupied)?;
+            (Some(crate::compat_fit::png_for_export(path, false)?), Some(asset))
         };
         image_bytes += image.as_ref().map_or(0, Vec::len);
         if image_bytes > 256 * 1024 * 1024 {
@@ -604,7 +656,7 @@ pub(super) fn replace_colorways(
         if let Some(updated) = updated {
             result = Cow::Owned(updated);
         }
-        for (name, data) in assets {
+        for (name, data) in assets.added {
             if images.insert(name, data).is_some() {
                 return Err("native texture replacement asset is shared by edited colorways".into());
             }

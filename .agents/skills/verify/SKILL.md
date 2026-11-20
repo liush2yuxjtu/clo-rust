@@ -32,7 +32,9 @@ that an unknown map or unreadable image leaves the valid target selected.
 An invalid fabric index keeps the previously selected fabric.
 Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
 base and normal maps to also check native archive reopen and preservation of the
-other maps. A live CLO reopen is a separate comparison.
+other maps. Add the missing channels after reopening and verify that all new
+images and the preexisting maps survive another save. A live CLO reopen is a
+separate comparison.
 
 Run `--verify-fabric-recolor-opacity` to recolor opaque and sheer fabrics with
 base, normal and opacity maps. Verify the base image stays bound, its
@@ -536,8 +538,11 @@ image and its decoded pixels. Check that the replacement retains its source
 label. Add a base image back to the cleared colorway and verify both colorways
 after reopening. Repeat with a non-square PNG with explicit pixel density.
 Compare the stored physical size, the UV bounds and the decoded image against
-official CLO. Trying to add an unsupported map to a missing slot must leave the
-previous save intact.
+official CLO. Add normal, roughness, displacement, opacity and metalness to the
+active colorway. Check the normal mode and strength, retained displacement
+settings, original labels and decoded images after official reopen. Remove a
+staged PNG before attempting another save and verify that the previous archive
+remains intact.
 
 Set `CLO_SHARED_COLORWAY_FIXTURE` to the official three-colorway archive
 created by copying `Original` from a textured two-colorway ZPAC. Compare

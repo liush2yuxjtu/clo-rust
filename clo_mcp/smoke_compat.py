@@ -540,7 +540,19 @@ async def verify_fabric_texture_clear():
                 await json_result(rust, "scene_open", {"path": str(path)})
                 remaining = await maps(index)
                 assert remaining == {key: path for key, path in before.items() if key != "base"}
-                native = {"suffix": path.suffix, "unchanged_maps": sorted(remaining)}
+                channels = ("base", "normal", "roughness", "displacement", "opacity", "metalness")
+                added = [kind for kind in channels if kind not in remaining]
+                for kind in added:
+                    await texture(index, kind, image)
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                await json_result(rust, "scene_open", {"path": str(path)})
+                restored = await maps(index)
+                for key, original in remaining.items():
+                    assert restored[key] == original, key
+                for key in added:
+                    assert Path(restored[key]).read_bytes() == image.read_bytes(), key
+                native = {"suffix": path.suffix, "unchanged_maps": sorted(remaining),
+                          "added_maps": added}
     print(json.dumps({"tool": "fabric_set_texture", "case": "clear only the selected map",
                       "portable_reopen": True, "glb_without_base_texture": True,
                       "native_reopen": native, "api_clear": True, "invalid_clear_preserves_maps": True,
@@ -4191,7 +4203,7 @@ async def verify_native_colorway_refresh():
                 assert (await json_result(session, "scene_info"))["current_colorway"] == 0
                 assert [await api(color, i, 0, 0) for i in range(2)] == [original, alternate]
                 assert await api(color, 0, 0) == original
-                async def base_images():
+                async def texture_images(kind="base"):
                     portable_path = saved.with_suffix(".clorust")
                     await json_result(session, "scene_save", {"path": str(portable_path)})
                     scene = json.loads(portable_path.read_text())["scene"]
@@ -4199,7 +4211,7 @@ async def verify_native_colorway_refresh():
                     results = []
                     for index, variant in enumerate(fabric["native_colorway_materials"]["values"]):
                         material = fabric if index == scene["current_colorway"] else variant
-                        path = material["texture_maps"].get("base")
+                        path = material["texture_maps"].get(kind)
                         results.append(Path(path).read_bytes() if path else None)
                     return results
 
@@ -4208,7 +4220,7 @@ async def verify_native_colorway_refresh():
                         "fabric_index": 0, "map": "base", "image_path": str(path),
                     })
 
-                baseline = await base_images()
+                baseline = await texture_images()
                 if all(baseline) and baseline[0] != baseline[1]:
                     replacement = saved.with_suffix(".png")
                     replacement.write_bytes(baseline[0])
@@ -4218,16 +4230,29 @@ async def verify_native_colorway_refresh():
                     await set_base("")
                     await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
                     await json_result(session, "scene_open", {"path": str(saved)})
-                    assert await base_images() == [None, baseline[0]]
+                    assert await texture_images() == [None, baseline[0]]
                     assert (await json_result(session, "scene_info"))["current_colorway"] == 0
                     await set_base(replacement)
                     await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
                     await json_result(session, "scene_open", {"path": str(saved)})
-                    assert await base_images() == [baseline[0], baseline[0]]
+                    assert await texture_images() == [baseline[0], baseline[0]]
+                    channels = ("normal", "roughness", "displacement", "opacity", "metalness")
+                    original = {kind: await texture_images(kind) for kind in channels}
+                    for kind in channels:
+                        await json_result(session, "fabric_set_texture", {
+                            "fabric_index": 0, "map": kind, "image_path": str(replacement),
+                        })
+                    await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                    await json_result(session, "scene_open", {"path": str(saved)})
+                    for kind in channels:
+                        assert await texture_images(kind) == [baseline[0], original[kind][1]], kind
                     target_bytes = saved.read_bytes()
+                    missing = replacement.with_name("missing.png")
+                    missing.write_bytes(baseline[0])
                     await json_result(session, "fabric_set_texture", {
-                        "fabric_index": 0, "map": "normal", "image_path": str(replacement),
+                        "fabric_index": 0, "map": "normal", "image_path": str(missing),
                     })
+                    missing.unlink()
                     rejected = await session.call_tool("scene_save", {"path": str(saved), "thumbnail": False})
                     assert rejected.isError and saved.read_bytes() == target_bytes
                     texture_archives.append(fixture.name)

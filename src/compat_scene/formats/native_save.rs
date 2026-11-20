@@ -6,9 +6,9 @@ use super::{
     native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
-use native_textures::ColorwayTextureEdit;
+use native_textures::{ColorwayTextureEdit, TextureAssets};
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Read, Write};
@@ -348,12 +348,6 @@ fn join_archive(mut prefix: Vec<u8>, archive: &[u8]) -> Result<Vec<u8>, String> 
     Ok(prefix)
 }
 
-#[derive(Default)]
-struct TextureAssets {
-    replaced: HashMap<String, Vec<u8>>,
-    added: BTreeMap<String, Vec<u8>>,
-}
-
 fn replace_member(
     input: &[u8],
     header: &[u8],
@@ -546,6 +540,10 @@ pub(in crate::compat_scene) fn encode(
     };
     let mut garment_archive = open_archive(Cursor::new(garment.as_slice()), ZPAC)?;
     let pac = member(&mut garment_archive, "pac")?;
+    let asset_names = || {
+        garment_archive.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
+            .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
+    };
     let renamed = renamed_pac(&pac, state)?;
     let (edited, assets) = if write_colorways {
         let index = state["current_colorway"]
@@ -565,11 +563,8 @@ pub(in crate::compat_scene) fn encode(
             };
             (Some(pac), TextureAssets::default())
         } else {
-            let occupied = garment_archive.file_names()
-                .map(|name| name.map(|name| name.to_ascii_lowercase()))
-                .collect::<Result<_, _>>().map_err(|error| error.to_string())?;
             let (pac, added) = native_textures::replace_colorways(
-                recolored.as_deref().unwrap_or(pac), state, &texture_edits, index, occupied,
+                recolored.as_deref().unwrap_or(pac), state, &texture_edits, index, asset_names()?,
             )?;
             (Some(pac), TextureAssets { added, ..TextureAssets::default() })
         }
@@ -581,14 +576,17 @@ pub(in crate::compat_scene) fn encode(
             super::super::array(source, "retextured"),
         )?;
         let edited = recolored.or(renamed);
+        let retextured = super::super::array(source, "retextured");
+        let occupied = if retextured.is_empty() { HashSet::new() } else { asset_names()? };
         let (textures, assets) = native_textures::replacements(
             edited.as_deref().unwrap_or(&pac),
             state,
             super::super::array(source, "textures"),
             super::super::array(source, "recolored"),
-            super::super::array(source, "retextured"),
+            retextured,
+            occupied,
         )?;
-        (textures.or(edited), TextureAssets { replaced: assets, ..TextureAssets::default() })
+        (textures.or(edited), assets)
     };
     let has_edits = edited.is_some();
     let garment = match edited {
