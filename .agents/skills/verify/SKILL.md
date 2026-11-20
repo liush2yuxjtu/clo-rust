@@ -190,6 +190,14 @@ same-name panels. Compare the build's `a`, `b`, and `ok` sewing rows to the
 plan, then reopen the project to verify the distinct panel IDs, actual
 fabric and seam assignments, and the particle distance set by a zero-step build.
 
+Run `--verify-calibrated-build-arrangement` to exercise a controlled
+`CLO_MCP_STATE/calibration/<avatar>.json` fixture. Compare the reported
+front and back arrangement points, the penalty for candidate points below
+the target, and the saved initial mesh centres. Check that an unrelated
+avatar cache is ignored, the saved placement is available after reopening
+without the cache, and a manually changed arrangement takes precedence.
+The standard-measurement preview stays independent of calibration.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

@@ -1355,6 +1355,69 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_calibrated_build_arrangement():
+    with TemporaryDirectory(prefix="clo-build-arrangement-") as directory:
+        root = Path(directory)
+        cache = root / "calibration"
+        cache.mkdir()
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+                       "CLO_MCP_STATE": directory, "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints")}
+        request = {"spec": {"garment": "top", "length": "waist", "particle_distance": 100},
+                   "snapshots": False, "simulate_steps": 0}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            loaded = await json_result(rust, "avatar_load", {"name_or_path": "mia"})
+            avatar, = loaded["avatars"]
+            preview = await json_result(rust, "garment_plan_preview", {"spec": request["spec"]})
+            front, back = (piece["centre_height"] for piece in preview["pieces"])
+            points = {
+                "Body_Front_Center_1": [8, front - 20, 155],
+                "Body_Front_Center_2": [24, front + 30, 170],
+                "Body_Front_Center_3": [0, front + 30, 155],
+                "Body_Back_Center_1": None,
+                "Body_Back_Center_2": {"x": -12, "y": back + 12, "z": -162},
+                "Body_Back_Center_3": {"y": "invalid"},
+            }
+            cache_path = cache / f"{avatar}.json"
+            cache_path.write_text(json.dumps({"avatar": "other avatar", "points": points}))
+            fallback = await json_result(rust, "garment_build", request)
+            assert fallback["arrangement"] == []
+            assert fallback["pieces"]["Front"]["arrangement"] == "Body_Front_Center_3"
+            cache_path.write_text(json.dumps({"avatar": avatar, "points": points}))
+            result = await json_result(rust, "garment_build", request)
+            assert result["arrangement"] == [
+                f"Front: centre {front:.0f} -> Body_Front_Center_2 ({front + 30:.0f})",
+                f"Back: centre {back:.0f} -> Body_Back_Center_2 ({back + 12:.0f})",
+            ]
+            assert await json_result(rust, "garment_plan_preview", {"spec": request["spec"]}) == preview
+
+            path = root / "arranged.clorust"
+            await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+            cache_path.unlink()
+            await json_result(rust, "scene_open", {"path": str(path)})
+            for side in ("Front", "Back"):
+                panel = await json_result(rust, "pattern_info", {"pattern": side})
+                assert panel["arrangement"]["ArrangementName"] == f"Body_{side}_Center_2"
+            await json_result(rust, "simulate", {"steps": 0})
+            await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+            scene = json.loads(path.read_text())["scene"]
+            expected = {"Front": [24, front + 30, 170], "Back": [-12, back + 12, -162]}
+            for mesh in scene["simulation"]["meshes"]:
+                coordinates = zip(*mesh["positions"])
+                center = [(min(axis) + max(axis)) / 2 for axis in coordinates]
+                assert all(abs(a - b) < 1e-6 for a, b in zip(center, expected[mesh["name"]], strict=True))
+            await json_result(rust, "pattern_set_arrangement", {"pattern": "Front", "point": "Body_Front_Center_3"})
+            await json_result(rust, "simulate", {"steps": 0})
+            await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+            mesh = json.loads(path.read_text())["scene"]["simulation"]["meshes"][0]
+            heights = [p[1] for p in mesh["positions"]]
+            assert abs((min(heights) + max(heights)) / 2 - front) < 0.1
+    print(json.dumps({"tools": ["garment_build", "pattern_info", "pattern_set_arrangement", "simulate"],
+                      "case": "calibrated build arrangement",
+                      "arrangements": result["arrangement"], "saved_mesh_centres_mm": expected,
+                      "mismatched_cache_and_manual_override": "pass"}))
+
+
 async def verify_appended_build_report():
     with TemporaryDirectory(prefix="clo-appended-build-") as directory:
         root = Path(directory)
@@ -1740,6 +1803,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-appended-build-report", action="store_const", dest="comparison",
                              const=verify_appended_build_report,
                              help="verify public build sewing rows and append beside same-name pieces")
+    comparisons.add_argument("--verify-calibrated-build-arrangement", action="store_const", dest="comparison",
+                             const=verify_calibrated_build_arrangement,
+                             help="verify build placement using saved avatar arrangement calibration")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1754,7 +1820,7 @@ if __name__ == "__main__":
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,
-                                verify_appended_build_report)
+                                verify_appended_build_report, verify_calibrated_build_arrangement)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

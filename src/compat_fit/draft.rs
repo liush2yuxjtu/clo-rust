@@ -1291,6 +1291,49 @@ pub fn last_spec(state: &Value) -> Value {
         .map_or_else(|| json!({"spec":null,"pieces":[]}), |record| json!(record))
 }
 
+fn calibrate_arrangement(draft: &mut Value, avatar: &Value) -> Vec<String> {
+    let Some(calibration) = avatar["name"].as_str().and_then(super::measurement_cache::read_arrangement)
+    else {
+        return Vec::new();
+    };
+    let front = ["Body_Front_Center_1", "Body_Front_Center_2", "Body_Front_Center_3",
+        "Body_Front_Waist", "Body_Front_Center_5", "Leg_Skirt_Front"];
+    let back = ["Body_Back_Center_1", "Body_Back_Center_2", "Body_Back_Center_3",
+        "Body_Back_Waist", "Body_Back_Center_5", "Leg_Skirt_Back"];
+    let mut notes = Vec::new();
+    for panel in array_mut(draft, "pieces") {
+        let candidates = match panel["role"].as_str() {
+            Some("bodice_front" | "skirt_front") => front,
+            Some("bodice_back" | "skirt_back") => back,
+            _ => continue,
+        };
+        let target = panel["centre_height"].as_f64().expect("drafted centre height");
+        let position = |name: &str| {
+            let point = &calibration[name];
+            let axis = |index, key| {
+                point.get(index).or_else(|| point.get(key))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && value.abs() < 100_000.0)
+            };
+            let y = axis(1usize, "y")?;
+            let penalty = (y - target).abs() + if y < target - 15.0 { 60.0 } else { 0.0 };
+            Some((name.to_owned(), [axis(0usize, "x"), Some(y), axis(2usize, "z")], y, penalty))
+        };
+        if let Some((name, coordinates, height, _)) = candidates
+            .into_iter()
+            .filter_map(position)
+            .min_by(|a, b| a.3.total_cmp(&b.3))
+        {
+            let piece = panel["name"].as_str().expect("drafted piece name");
+            notes.push(format!("{piece}: centre {target:.0} -> {name} ({height:.0})"));
+            panel["arrangement"] = json!(name);
+            panel["initial_arrangement"] =
+                json!({"name":name,"avatar":avatar["name"],"center_mm":coordinates});
+        }
+    }
+    notes
+}
+
 pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, String> {
     let mut next = state.clone();
     let spec = if rebuild {
@@ -1313,7 +1356,8 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         )?;
     }
     let (body, source) = assets::body_measurements(&next["avatar"], false);
-    let draft = plan(&spec, &body, &source)?;
+    let mut draft = plan(&spec, &body, &source)?;
+    let arrangement_notes = calibrate_arrangement(&mut draft, &next["avatar"]);
     let material = assets::load_material(string(&draft["spec"], "fabric", ""))?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
@@ -1438,6 +1482,6 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     };
     Ok(json!({"spec":draft["spec"],"avatar":state["avatar"]["name"],"measurements":source,
         "pieces":summary,"seams":sewing_report,"fabric":{"file":fabric["file"],"matched":fabric["matched"],"color":draft["fabric"]["color"]},
-        "arrangement":[],"warnings":draft["warnings"],"notes":draft["notes"],"simulation":sim,"checkpoint_before_build":checkpoint,
+        "arrangement":arrangement_notes,"warnings":draft["warnings"],"notes":draft["notes"],"simulation":sim,"checkpoint_before_build":checkpoint,
         "images":images}))
 }

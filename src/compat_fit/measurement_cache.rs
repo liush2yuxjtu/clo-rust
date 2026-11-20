@@ -37,6 +37,21 @@ const DRAFT_FIELDS: [(&str, &str); 32] = [
 ];
 
 pub(super) fn read(avatar: &str) -> Option<(Value, String)> {
+    let filename = cache_filename(avatar)?;
+    let record = read_record("measurements", &filename)?;
+    let body = draft_body(avatar, &record)?;
+    Some((body, format!("cached CLO measurements ({filename})")))
+}
+
+pub(super) fn read_arrangement(avatar: &str) -> Option<Value> {
+    let record = read_record("calibration", &cache_filename(avatar)?)?;
+    if record["avatar"] != avatar || !record["points"].is_object() {
+        return None;
+    }
+    Some(record["points"].clone())
+}
+
+fn read_record(directory: &str, filename: &str) -> Option<Value> {
     let state = env::var_os("CLO_MCP_STATE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -44,11 +59,8 @@ pub(super) fn read(avatar: &str) -> Option<(Value, String)> {
                 .or_else(|| env::var_os("USERPROFILE"))
                 .map(|home| PathBuf::from(home).join(".clo3d-mcp"))
         })?;
-    let filename = cache_filename(avatar)?;
-    let raw = fs::read(state.join("measurements").join(&filename)).ok()?;
-    let record = serde_json::from_slice(&raw).ok()?;
-    let body = draft_body(avatar, &record)?;
-    Some((body, format!("cached CLO measurements ({filename})")))
+    let raw = fs::read(state.join(directory).join(filename)).ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 fn cache_filename(avatar: &str) -> Option<String> {

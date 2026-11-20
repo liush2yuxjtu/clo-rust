@@ -429,15 +429,21 @@ fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
     } else {
         number(body, "h_shoulder", 1454.0) - (high[1] - low[1]) / 2.0 + 45.0
     };
+    let layer_offset = number(pattern, "layer", 0.0) * 5.0;
     let depth = body_radius(body, number(body, "h_apex", 1290.0)).map_or(110.0, |r| r[1].max(80.0))
-        + 20.0
-        + number(pattern, "layer", 0.0) * 5.0;
+        + 20.0 + layer_offset;
     let side = if arrangement.contains("left") || arrangement.ends_with("_l") {
         -1.0
     } else {
         1.0
     };
     let drafted = pattern.get("draft_offset_x").is_some();
+    let initial = &pattern["initial_arrangement"];
+    let calibrated = initial.get("center_mm").filter(|point| {
+        initial["name"] == pattern["arrangement"]
+            && initial["avatar"] == avatar["name"]
+            && point[1].as_f64().is_some()
+    });
     points
         .iter()
         .map(|&[u, v]| {
@@ -446,7 +452,14 @@ fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
             } else {
                 u - center[0]
             };
-            let y = if drafted { v } else { v - center[1] + anchor };
+            let y = calibrated.and_then(|point| point[1].as_f64())
+                .map_or(if drafted { v } else { v - center[1] + anchor }, |height| v - center[1] + height);
+            if let Some(point) = calibrated {
+                let sign = if arrangement.contains("back") { -1.0 } else { 1.0 };
+                let x = point[0].as_f64().map_or(sign * local_x, |x| x + sign * (u - center[0]));
+                let z = point[2].as_f64().map_or(sign * depth, |z| z + sign * layer_offset);
+                return [x, y, z];
+            }
             if arrangement.contains("arm") {
                 [
                     side * (number(body, "across_shoulder", 377.0) * 0.5 + 42.0),
