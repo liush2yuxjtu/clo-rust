@@ -2,6 +2,7 @@
 //! Only single, full outline-edge joins are translated into editable Rust seams.
 
 use super::clo_native::{consume, find, sized_list, sizes, take, token, uint};
+use super::native_pose::{map_list, panel_records_with_slots, Fields, BYTE_TYPE, LIST_TYPE};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -135,7 +136,124 @@ fn full_edge(endpoint: &Value) -> bool {
         && endpoint["end_ratio"].as_f64() == Some(if forward { 1. } else { 0. })
 }
 
-pub(super) fn read(mut data: &[u8], edge_counts: &[usize]) -> Result<Decoded, String> {
+impl Decoded {
+    fn add(&mut self, name: &str, active: Option<bool>, pairs: Vec<[Value; 2]>) {
+        let id = self.annotations.len() + 1;
+        let restored = active == Some(true) && pairs.len() == 1 && pairs[0].iter().all(full_edge);
+        if restored {
+            let [a, b] = &pairs[0];
+            self.constraints.push(json!({
+                "pattern_a": a["pattern_id"], "line_a": a["start_line"], "dir_a": a["direction"],
+                "pattern_b": b["pattern_id"], "line_b": b["start_line"], "dir_b": b["direction"],
+                "name": name, "native_group": id
+            }));
+        }
+        self.annotations.push(json!({"id": id, "name": name, "segments": pairs, "restored": restored, "active": active}));
+    }
+}
+
+fn unsigned(record: &Fields<'_>, key: &[u8]) -> Result<usize, String> {
+    let field = record.get(key, 5)?;
+    uint(field, &mut 0)
+}
+
+fn ordered_endpoint(
+    record: &Fields<'_>,
+    slots: &BTreeMap<usize, usize>,
+    edge_counts: &[usize],
+) -> Result<Value, String> {
+    let direction = match record.get(b"bDirection", 1)? {
+        [0] => false,
+        [1] => true,
+        _ => return Err("invalid native seam direction".into()),
+    };
+    let read_ratio = |key: &[u8]| {
+        let value = f32::from_bits(uint(record.get(key, 6)?, &mut 0)? as u32);
+        (0.0..=1.0)
+            .contains(&value)
+            .then_some(value)
+            .ok_or_else(|| "invalid native seam ratio".to_string())
+    };
+    let start = unsigned(record, b"uiStartIndex")?;
+    let end = unsigned(record, b"uiEndIndex")?;
+    let depth = unsigned(record, b"uiDepth")?;
+    let slot = unsigned(record, b"uiSelfIndex")?;
+    let &panel = slots
+        .get(&slot)
+        .ok_or("native seam references an unreadable panel slot")?;
+    if depth == 1 && (start >= edge_counts[panel] || end >= edge_counts[panel]) {
+        return Err("native sewing references an out-of-range outline edge".into());
+    }
+    Ok(json!({
+        "pattern_id":panel+1,"shape_depth":depth,"shape_index":unsigned(record,b"uiShapeIndex").ok(),
+        "start_line":start,"end_line":end,"start_ratio":read_ratio(b"fRatioStart")?,
+        "end_ratio":read_ratio(b"fRatioEnd")?,"direction":direction
+    }))
+}
+
+fn ordered_group<'a>(
+    record: &Fields<'a>,
+    slots: &BTreeMap<usize, usize>,
+    edge_counts: &[usize],
+) -> Result<(&'a str, Option<bool>, Vec<[Value; 2]>), String> {
+    let element = record.map(b"mapElement")?;
+    let name = std::str::from_utf8(element.get(NAME, BYTE_TYPE)?).map_err(|e| e.to_string())?;
+    let active = match record.map(b"mapSeamLinePairProperty")?.get(b"bActive", 1)? {
+        [0] => Some(false),
+        [1] => Some(true),
+        _ => None,
+    };
+    let pair_list = record.map(GROUP)?;
+    let pairs = map_list(pair_list.get(LIST, LIST_TYPE)?, LIMIT)?
+        .iter()
+        .map(|pair| {
+            let a = pair.map(b"mapSeamLine0")?.map(ENDPOINT)?;
+            let b = pair.map(b"mapSeamLine1")?.map(ENDPOINT)?;
+            Ok([
+                ordered_endpoint(&a, slots, edge_counts)?,
+                ordered_endpoint(&b, slots, edge_counts)?,
+            ])
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if pairs.is_empty() {
+        return Err("native seam group has no endpoints".into());
+    }
+    Ok((name, active, pairs))
+}
+
+pub(super) fn read(
+    data: &[u8],
+    panels: &[Value],
+    edge_counts: &[usize],
+) -> Result<Decoded, String> {
+    let table = Fields::read(data).and_then(|root| {
+        let editor = root.map(b"mapPatternEditor")?;
+        let group = editor.map(b"mapSeamLinePairGroup")?;
+        Ok((root, group))
+    });
+    let Ok((root, table)) = table else {
+        return read_legacy(data, edge_counts);
+    };
+    let slots = panel_records_with_slots(&root, panels)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, (slot, _))| (slot, index))
+        .collect();
+    let mut decoded = Decoded {
+        annotations: Vec::new(),
+        constraints: Vec::new(),
+        unreadable: 0,
+    };
+    for record in map_list(table.get(b"listSeamLinePairGroup", LIST_TYPE)?, LIMIT)? {
+        match ordered_group(&record, &slots, edge_counts) {
+            Ok((name, active, pairs)) => decoded.add(name, active, pairs),
+            Err(_) => decoded.unreadable += 1,
+        }
+    }
+    Ok(decoded)
+}
+
+fn read_legacy(mut data: &[u8], edge_counts: &[usize]) -> Result<Decoded, String> {
     let mut decoded = Decoded {
         annotations: Vec::new(),
         constraints: Vec::new(),
@@ -166,17 +284,7 @@ pub(super) fn read(mut data: &[u8], edge_counts: &[usize]) -> Result<Decoded, St
                         return Err("native PAC has too many sewing groups".into());
                     }
                     seen.insert(uuid, id - 1);
-                    let restored =
-                        active == Some(true) && pairs.len() == 1 && pairs[0].iter().all(full_edge);
-                    if restored {
-                        let [a, b] = &pairs[0];
-                        decoded.constraints.push(json!({
-                            "pattern_a": a["pattern_id"], "line_a": a["start_line"], "dir_a": a["direction"],
-                            "pattern_b": b["pattern_id"], "line_b": b["start_line"], "dir_b": b["direction"],
-                            "name": name, "native_group": id
-                        }));
-                    }
-                    decoded.annotations.push(json!({"id": id, "name": name, "segments": json_pairs, "restored": restored, "active": active}));
+                    decoded.add(name, active, pairs);
                 }
             }
             Err(_) => decoded.unreadable += 1,
@@ -192,6 +300,36 @@ pub(super) fn read(mut data: &[u8], edge_counts: &[usize]) -> Result<Decoded, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_endpoint_uses_raw_panel_slots() {
+        let values: &[(&[u8], u8, &[u8])] = &[
+            (b"uiSelfIndex", 5, &47u32.to_le_bytes()),
+            (b"fRatioStart", 6, &0.0f32.to_le_bytes()),
+            (b"uiDepth", 5, &2u32.to_le_bytes()),
+            (b"bDirection", 1, &[1]),
+            (b"uiEndIndex", 5, &0u32.to_le_bytes()),
+            (b"uiStartIndex", 5, &0u32.to_le_bytes()),
+            (b"fRatioEnd", 6, &1.0f32.to_le_bytes()),
+            (b"uiShapeIndex", 5, &6u32.to_le_bytes()),
+        ];
+        let mut bytes = vec![values.len() as u8];
+        bytes.extend(values.iter().map(|(key, _, _)| key.len() as u8));
+        bytes.extend(values.iter().map(|(_, tag, _)| *tag));
+        for (_, _, value) in values {
+            bytes.extend((value.len() as u32).to_le_bytes());
+        }
+        for (key, _, value) in values {
+            bytes.extend(*key);
+            bytes.extend(*value);
+        }
+        let record = Fields::read(&bytes).unwrap();
+        let endpoint = ordered_endpoint(&record, &BTreeMap::from([(47, 41)]), &[4; 42]).unwrap();
+        assert_eq!(endpoint["pattern_id"], 42);
+        assert_eq!(endpoint["shape_index"], 6);
+        assert!(!full_edge(&endpoint));
+        assert!(ordered_endpoint(&record, &BTreeMap::new(), &[4; 42]).is_err());
+    }
 
     fn numeric(data: &mut Vec<u8>, tag: &[u8], value: u32) {
         data.extend_from_slice(tag);
@@ -248,7 +386,7 @@ mod tests {
             2,
             1.,
         ));
-        let decoded = read(&records, &[3, 3]).unwrap();
+        let decoded = read_legacy(&records, &[3, 3]).unwrap();
         assert_eq!(decoded.unreadable, 0);
         assert_eq!(decoded.annotations.len(), 3);
         assert_eq!(decoded.constraints.len(), 1);

@@ -369,7 +369,7 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         }));
     }
     let panel_settings_error = super::native_pose::restore_panel_settings(pac, &mut patterns).err();
-    let sewing = super::native_seams::read(pac, &edge_counts)?;
+    let sewing = super::native_seams::read(pac, &patterns, &edge_counts)?;
     let (fabrics, fabric_error) = match super::native_materials::read(pac, &patterns) {
         Ok(materials) => {
             for (pattern, index) in patterns.iter_mut().zip(materials.assignments) {

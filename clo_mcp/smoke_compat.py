@@ -398,6 +398,32 @@ async def main(comparison=None):
         await smoke_official()
 
 
+async def compare_saved_seams():
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        project = Path((await json_result(session, "scene_info"))["project_path"])
+        official = await json_result(session, "seams_list")
+        official_panels = await json_result(session, "pattern_list", {"detail": True})
+    assert project.is_file() and project.suffix.lower() in {".zprj", ".zpac"}, project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust = await json_result(session, "seams_list")
+        rust_panels = await json_result(session, "pattern_list", {"detail": True})
+    assert official["count"] == rust["count"] > 0, (official["count"], rust["count"])
+    for expected, observed in zip(official["groups"], rust["groups"], strict=True):
+        for key in ("index", "name", "patterns"):
+            assert expected[key] == observed[key], (expected["index"], key, expected[key], observed[key])
+    assert official_panels["seam_groups"] == rust_panels["seam_groups"] == rust["count"]
+    for expected, observed in zip(official_panels["patterns"], rust_panels["patterns"], strict=True):
+        assert expected["name"] == observed["name"]
+        assert expected["seam_groups"] == observed["seam_groups"], (
+            expected["name"], expected["seam_groups"], observed["seam_groups"],
+        )
+    print(json.dumps({"tool": "seams_list", "ordered_groups_matched": rust["count"],
+                      "panel_memberships_matched": rust_panels["count"]}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -413,6 +439,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-pattern-settings", action="store_const", dest="comparison",
                              const=compare_saved_pattern_settings,
                              help="compare live pattern settings against the same saved CLO project in Rust")
+    comparisons.add_argument("--compare-saved-seams", action="store_const", dest="comparison",
+                             const=compare_saved_seams,
+                             help="compare ordered seam groups and panel membership in a saved CLO project")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

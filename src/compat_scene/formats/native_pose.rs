@@ -176,11 +176,21 @@ pub(super) fn panel_records<'a>(
     root: &Fields<'a>,
     panels: &[Value],
 ) -> Result<Vec<Fields<'a>>, String> {
+    Ok(panel_records_with_slots(root, panels)?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
+}
+
+pub(super) fn panel_records_with_slots<'a>(
+    root: &Fields<'a>,
+    panels: &[Value],
+) -> Result<Vec<(usize, Fields<'a>)>, String> {
     let editor = root.map(b"mapPatternEditor")?;
     let patterns = editor.map(b"mapPatternList")?;
     let records = map_list(patterns.get(b"listPattern", LIST_TYPE)?, LIMIT)?;
     let mut result = Vec::new();
-    for record in records {
+    for (slot, record) in records.into_iter().enumerate() {
         let mut offset = 0;
         if uint(record.get(b"uiPatternType", UINT_TYPE)?, &mut offset)? != 0 {
             continue;
@@ -194,7 +204,7 @@ pub(super) fn panel_records<'a>(
         {
             return Err("native editable records do not match the imported panel order".into());
         }
-        result.push(record);
+        result.push((slot, record));
     }
     if result.len() != panels.len() {
         return Err("native editable records do not match the imported panel count".into());

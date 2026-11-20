@@ -77,6 +77,12 @@ names for every panel, checks detailed arrangement, layer and particle distance
 for up to eight panels, and exercises a missing panel. The reported seam-group
 counts are separate observations. The case does not assert line geometry or sewing parity.
 
+Use `--compare-saved-seams` to compare each saved sewing group's index, name
+and member list against the live CLO project, and check every panel's group
+indices in `pattern_list(detail=True)`. Test with a saved project that contains
+non-panel objects. This case verifies query results. Solver coverage requires
+separate drape and seam-gap evidence.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.
