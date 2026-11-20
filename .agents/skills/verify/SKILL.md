@@ -126,6 +126,11 @@ separate from the behavioral count.
 
 #### Read the evidence and reproduce a matched case
 
+Report three independent results: 48 pinned tool definitions, 48 representative
+Rust calls, and case-level behavior on both backends. Derive the matched-tool
+total from the case records only after every applicable case for a tool has a
+passing verdict. Keep failed, blocked, and unrun cases visible.
+
 The contract command reads `tools/list` directly from the reference MCP and
 from both adapters without opening the CLO desktop or using its Python bridge.
 Expect `public_tool_count: 48` and three `pass` fields. `sweep_compat` sends
@@ -163,6 +168,38 @@ avatars, fabrics, and seam groups. For a mutation, also read back the affected
 state after successful and rejected requests and compare with the expected changes.
 For a file or image, reopen or parse it and check the relevant properties. Report
 the three results separately and link the case evidence behind the behavioral tally.
+
+#### Worked example from a live CLO scene
+
+Use independent copies of the two-colorway ZPRJ from the
+[Boat evidence record](../../../docs/verification/clo-mcp-acceptance.md#boat-原生多色组导出基准).
+Confirm both starting archives match the recorded SHA-256 and both scenes
+report active index `1`. Use a dedicated CLO session and a writable output
+directory on each host. Boat file paths are resolved on the CLO host. For a
+forwarded bridge, set `CLO_MCP_PORT` to the local forwarded port and confirm
+`clo_status.bridge` using the same reference command.
+
+| MCP calls in order | Expected observations on both backends |
+| --- | --- |
+| Open the fixture, select active index `1` with `clo_api_call`, then call `scene_export` with `colorways: true` and a GLB target | Two GLBs with `_Original` and `_Alternate` suffixes, in that order. |
+| Call `scene_save` to a fresh native archive with `thumbnail: false`, then repeat the export for fresh GLB and glTF targets | One unsuffixed GLB and one glTF with its BIN companion. OBJ still produces both colorways. |
+| Call `clo_api_call` with `name: "utility_api.SetCurrentColorwayIndex"` and `args: [1]`, then export GLB again | Both colorway files return. `scene_info.current_colorway` is still `1`. |
+
+Compare the ordered filenames separately from their host paths. Record the raw
+MCP results, then inspect actual files when claiming artifact compatibility.
+For the Rust replay, use the ZPRJ and ZPAC checksums in the evidence record:
+
+```sh
+CLO_REORDERED_ZPRJ=/absolute/path/to/multi-colorway-colored.zprj \
+  CLO_REORDERED_ZPAC=/absolute/path/to/multi-colorway-simulated.zpac \
+  python -m clo_mcp.smoke_compat --verify-native-colorway-refresh
+```
+
+The Rust replay also checks the stored GLB material color and negative controls
+for invalid selection and a false refresh. Label those assertions as Rust
+regression evidence unless the native run has matching observations.
+
+#### Additional verification recipes
 
 Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
 to include the official backend smoke. Run it with the CLO 3D bridge connected.
