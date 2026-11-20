@@ -715,40 +715,48 @@ pub(crate) fn checkpoint_before_build(state: &Value) -> Reply {
 }
 
 fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
-    if let Some(name) = name {
-        let portable = checkpoint_path(name)?;
-        let native = portable.with_extension("zprj");
-        // A compatible project can publish a new native checkpoint in the shared directory.
-        // Existing native checkpoints are protected and portable snapshots cover other scenes.
-        if env::var_os("CLO_MCP_STATE").is_some()
-            && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none()
-            && !portable.exists()
-            && !native.exists()
-        {
-            if let Ok(bytes) = formats::native_save::encode(state, true, false) {
-                if formats::write_new(&native, &bytes)? {
-                    return Ok(json!({"name": name, "path": native}));
-                }
-            }
+    let started = SystemTime::now();
+    let named = name.map(checkpoint_path).transpose()?;
+    let shared = env::var_os("CLO_MCP_STATE").is_some()
+        && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none();
+    // Portable snapshots cover scenes that cannot be written as a native project.
+    let native = if shared
+        && named.as_ref().is_none_or(|path| !path.exists() && !path.with_extension("zprj").exists())
+    {
+        formats::native_save::encode(state, true, false).ok()
+    } else {
+        None
+    };
+    if let (Some(name), Some(portable), Some(bytes)) = (name, named.as_ref(), native.as_ref()) {
+        let path = portable.with_extension("zprj");
+        if formats::write_new(&path, bytes)? {
+            return Ok(json!({"name": name, "path": path}));
         }
     }
-    let mut document = scene_document(state)?;
-    if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
-        // Keep the original fingerprint and edit lists so undo doesn't
-        // remove the ability to re-export a still-compatible native scene.
-        document[formats::native_save::SOURCE] = source.clone();
-    }
-    if let Some(name) = name {
-        let path = checkpoint_path(name)?;
-        formats::write_json(&path, &document)?;
-        return Ok(json!({"name": name, "path": path}));
-    }
-    let [year, month, day, hour, min, sec] = calendar(SystemTime::now());
+    let (bytes, extension) = if let (None, Some(bytes)) = (name, native) {
+        (bytes, "zprj")
+    } else {
+        let mut document = scene_document(state)?;
+        if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
+            // Preserve the source and edit records so an undo can still be exported as native.
+            document[formats::native_save::SOURCE] = source.clone();
+        }
+        if let (Some(name), Some(path)) = (name, named) {
+            formats::write_json(&path, &document)?;
+            return Ok(json!({"name": name, "path": path}));
+        }
+        (serde_json::to_vec_pretty(&document).map_err(|err| err.to_string())?, "clorust")
+    };
+    let [year, month, day, hour, min, sec] = calendar(started);
     let base = format!("{prefix}_{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}");
-    let bytes = serde_json::to_vec_pretty(&document).map_err(|err| err.to_string())?;
     for suffix in 0u64.. {
         let name = if suffix == 0 { base.clone() } else { format!("{base}_{suffix}") };
-        let path = checkpoint_path(&name)?;
+        let portable = checkpoint_path(&name)?;
+        let native = portable.with_extension("zprj");
+        if portable.exists() || native.exists() {
+            continue;
+        }
+        let path = if extension == "zprj" { native } else { portable };
         if formats::write_new(&path, &bytes)? {
             return Ok(json!({"name": name, "path": path}));
         }

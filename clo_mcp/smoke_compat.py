@@ -12,7 +12,7 @@ import struct
 import sys
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -3377,6 +3377,29 @@ async def compare_shared_checkpoint_folder():
             else:
                 assert previous_avatar == restored_avatar
 
+            # Occupy timestamp-only names around the call so the suffix path is exercised.
+            occupied = set()
+            automatic = []
+            for args in ({}, {"name": ""}):
+                now = datetime.now()
+                for offset in range(-1, 16):
+                    stem = (now + timedelta(seconds=offset)).strftime("cp_%Y%m%d_%H%M%S")
+                    path = directory / (stem + ".zprj")
+                    if not path.exists():
+                        path.write_text("existing timestamp checkpoint")
+                        occupied.add(path)
+                automatic.append(await json_result(rust, "checkpoint_save", args))
+            first_auto, second_auto = automatic
+            assert first_auto["name"] != second_auto["name"]
+            new_paths = {Path(result["path"]) for result in automatic}
+            assert new_paths.isdisjoint(occupied)
+            assert all(path.suffix == ".zprj" and path.stem.count("_") == 3 for path in new_paths)
+            assert all(path.read_text() == "existing timestamp checkpoint" for path in occupied)
+            for session in (clo, rust):
+                assert new_paths <= {Path(row["path"]) for row in await listing(session)}
+            auto_readback = await json_result(rust, "checkpoint_restore", {"name": second_auto["name"]})
+            assert auto_readback["pattern_count"] == direct["pattern_count"]
+
             (directory / "corrupt.zprj").write_text("not a CLO project")
             before_error = await json_result(rust, "scene_info")
             for name in ("missing", "corrupt"):
@@ -3384,6 +3407,10 @@ async def compare_shared_checkpoint_folder():
                 assert await json_result(rust, "scene_info") == before_error
 
             await json_result(rust, "scene_clear", {"keep_avatar": False})
+            auto_portable = await json_result(rust, "checkpoint_save")
+            auto_portable_path = Path(auto_portable["path"])
+            assert auto_portable_path.suffix == ".clorust"
+            assert not auto_portable_path.with_suffix(".zprj").exists()
             portable = await json_result(rust, "checkpoint_save", {"name": "native-drape"})
             assert Path(portable["path"]) == native.with_suffix(".clorust")
             rust_name, = [row for row in await listing(rust) if row["name"] == "native-drape"]
@@ -3397,7 +3424,9 @@ async def compare_shared_checkpoint_folder():
                       "restored_patterns": direct["pattern_count"],
                       "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
                       "corrupt_and_missing_preserve_scene": True, "portable_name_precedence": True,
-                      "rust_native_checkpoint_listed_by_reference": True}))
+                      "rust_native_checkpoint_listed_by_reference": True,
+                      "auto_native_checkpoints_listed_by_reference": 2,
+                      "auto_collision_preserves_existing": True}))
 
 
 async def verify_native_append():
