@@ -26,7 +26,7 @@
 | `clo_api_doc` | Rust 短名和限定名返回同一记录 | 双端名称歧义、缺失项和重载 |
 | `scene_info` | 历史 Carlita 对照匹配 10 个工程字段 | 新版本相同工程、空场景和切换 |
 | `scene_clear` | Rust 两种清场、材料索引重置和旧 UI 快照拒绝，最后规格仍可读 | 双端 `keep_avatar`、材料和缝组读回 |
-| `scene_open` | Rust 原生、DXF、JSON 追加及保存姿态，成功打开使旧 UI 快照失效 | 双端替换、追加、损坏文件和场景读回 |
+| `scene_open` | Rust 原生、DXF、JSON 追加及保存姿态。真实 AVT 默认与追加模式均保留已有裁片、布料与姿态，成功打开使旧 UI 快照失效 | 双端替换、追加、损坏文件和场景读回 |
 | `scene_save` | Rust 工程保存重开 | 双端原生工程回开、缩略图和失败路径 |
 | `scene_export` | Rust 导出实调及 FBX 回开 | 双端格式、单位、材质、色组和人台 |
 | `snapshot` | Rust 默认视角、别名与 PNG，末视角与 API 缩略图逐字节一致 | 双端正侧背面、视角顺序和错误 |
@@ -60,7 +60,7 @@
 | `garment_last_spec` | 本轮双端空会话和预览后不变 | 完成构建和重建之后的双端历史 |
 | `clo_api_catalog` | 4 个纸样条目匹配原生目录留档。Rust 实测按参数类型过滤，`GetPatternIndex` 和 `GetPatternIndexW` 分两页读回 | 现场双端可调用目录及翻页 |
 | `clo_api_describe` | Rust 文档字段和导出 API 用例 | 双端实用类型、枚举、重载及缺失项 |
-| `clo_api_call` | Rust 从保存的工程实测纸样名称与索引双向读回，另有导出回开及相机变更记录 | 双端读写、参数类型和错误的状态读回 |
+| `clo_api_call` | Rust 从保存的工程实测纸样名称与索引双向读回，实测带类型选项的 AVT 导入保留已有场景，另有导出回开及相机变更记录 | 双端读写、参数类型和错误的状态读回 |
 | `clo_api_release` | Rust 重复释放 `ImportExportOption` 句柄返回 1 和 0。使用旧句柄被拒绝，场景读回一致 | 现场双端释放、失效及重新获取 |
 | `clo_control_guide` | 本轮双端实测四步指南，覆盖 API 查找与调用、检查 UI、执行操作和读回状态 | 路径所述的现场操作读回 |
 | `clo_ui_state` | 历史双端节点树、上下界及 6 个非法输入；本轮 Rust 复测通过 | 参考端本次未找到运行中的 CLO 应用。待复测选区、窗口和对话框 |

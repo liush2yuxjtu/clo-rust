@@ -389,8 +389,10 @@ still leaves the active constraint count unchanged.
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the
-new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to also check
-the native avatar path through `scene_open`.
+new collider. Set `CLO_AVATAR_FIXTURE` to a supported AVT to verify append
+and default `scene_open` mode, direct typed `ImportAvatar`, and the equivalent
+Python call. All four add an avatar and leave panels, fabrics, and drape intact.
+Verify an import of a missing AVT preserves the avatar list.
 Delete the primary avatar from Python and check that the remaining avatar is
 promoted and the saved positions and velocities stay identical. Verify an
 invalid batch leaves the avatars intact. Set `CLO_AVATAR_LIBRARY_FIXTURE` to an

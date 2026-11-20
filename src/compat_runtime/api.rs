@@ -609,8 +609,9 @@ const TYPES: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-fn native_pattern_doc(name: &str) -> Option<&'static str> {
+fn native_function_doc(name: &str) -> Option<&'static str> {
     match name {
+        "import_api.ImportAvatar" => Some("ImportAvatar(arg0: str, arg1: Marvelous::ImportExportOption) -> bool"),
         "pattern_api.GetPatternCount" => Some("GetPatternCount() -> int"),
         "pattern_api.GetPatternIndex" => Some("GetPatternIndex(arg0: str) -> int"),
         "pattern_api.GetPatternIndexW" => Some("GetPatternIndexW(arg0: str) -> int"),
@@ -652,7 +653,7 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
         }
     };
     for entry in FUNCTIONS {
-        if let Some(doc) = native_pattern_doc(entry.name) {
+        if let Some(doc) = native_function_doc(entry.name) {
             add(entry.name, "function", None, doc);
         } else {
             add(entry.name, "function", Some(entry.signature), entry.doc);
@@ -693,7 +694,7 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
 
 pub(super) fn describe(name: &str) -> ToolResult {
     if let Some(entry) = FUNCTIONS.iter().find(|entry| entry.name == name) {
-        let doc = native_pattern_doc(name).map_or_else(
+        let doc = native_function_doc(name).map_or_else(
             || format!("{name}{}\n{}", entry.signature, entry.doc),
             str::to_owned,
         );
@@ -1161,7 +1162,10 @@ pub(super) fn invoke(
     let patterns = array(&state["patterns"]);
     let fabrics = array(&state["fabrics"]);
     let outcome = match name {
-        "import_api.ImportAvatar" => domain("avatar_load", &json!({"name_or_path":arg[0],"replace":!arg[1]["bAdd"].as_bool().unwrap_or(false)}),state).map(|result| success(&result)),
+        "import_api.ImportAvatar" => {
+            domain("avatar_load", &json!({"name_or_path":arg[0],"replace":false}),state)
+                .map(|result| success(&result))
+        }
         "import_api.ImportDXF" | "import_api.ImportZpac" | "import_api.ImportZprj" => {
             let option = &arg[1];
             let append = ["bAdd","bAppend","m_bAppend"].iter().any(|key| option[*key] == json!(true));

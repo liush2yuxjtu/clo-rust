@@ -2677,6 +2677,7 @@ async def verify_avatar_changes_keep_drape():
             await json_result(rust, "avatar_load", {"name_or_path": "mia"})
             await json_result(rust, "pattern_create", {"name": "Panel", "arrangement": "Front",
                                                       "points": [[0, 0], [120, 0], [50, 90]]})
+            await json_result(rust, "fabric_apply", {"fabric": "cotton", "color": "navy"})
             control = await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
             assert control["mesh_initial_overlap_corrections"] == 0
             _, before = await save("before")
@@ -2715,9 +2716,30 @@ async def verify_avatar_changes_keep_drape():
             if fixture := os.environ.get("CLO_AVATAR_FIXTURE"):
                 opened = await json_result(rust, "scene_open", {"path": fixture, "mode": "append"})
                 assert len(opened["avatars"]) == 2 and opened["avatars"][0] == "luka"
+                name = opened["avatars"][-1]
+                default_open = await json_result(rust, "scene_open", {"path": fixture})
+                assert default_open["avatars"] == ["luka", name, name]
+                function = "import_api.ImportAvatar"
+                description = await json_result(rust, "clo_api_describe", {"name": function})
+                assert description["doc"] == "ImportAvatar(arg0: str, arg1: Marvelous::ImportExportOption) -> bool"
+                result = await json_result(rust, "clo_api_call", {"name": function, "args": [
+                    fixture, {"$type": "ApiTypes.ImportExportOption"},
+                ]})
+                assert result["value"] is True
+                code = f"import_api.ImportAvatar({fixture!r}, ApiTypes.ImportExportOption())"
+                assert (await json_result(rust, "clo_run_python", {"code": code}))["value"] is True
+                assert (await json_result(rust, "avatar_list"))["in_scene"] == ["luka", name, name, name, name]
                 _, with_native = await save("native")
                 assert with_native["simulation"] == continued["simulation"]
-                native_append = "pass"
+                assert with_native["patterns"] == continued["patterns"]
+                assert with_native["fabrics"] == continued["fabrics"]
+                invalid = await rust.call_tool("clo_api_call", {
+                    "name": function, "args": [str(root / "missing.avt"), {"$type": "ApiTypes.ImportExportOption"}],
+                })
+                assert invalid.isError
+                assert (await json_result(rust, "avatar_list"))["in_scene"] == ["luka", name, name, name, name]
+                native_append = {"scene_open_modes": ["append", "default"],
+                                 "typed_call_and_python": "pass", "missing_import_preserved_avatars": True}
         alias_directory = None
         if library := os.environ.get("CLO_AVATAR_LIBRARY_FIXTURE"):
             relative = Path("Female/FV2.1_Mia.avt")
