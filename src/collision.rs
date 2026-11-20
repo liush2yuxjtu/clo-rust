@@ -344,37 +344,72 @@ impl MeshCollider {
         corrected
     }
 
-    pub(crate) fn sweep<'a>(
+    fn first_contact<'a>(
         surfaces: impl IntoIterator<Item = &'a Self>,
         start: Point,
-        end: &mut Point,
-        clearance: f64,
-    ) -> bool {
-        if start == *end {
-            return false;
+        end: Point,
+    ) -> Option<(f64, Point)> {
+        if start == end {
+            return None;
         }
-        let bounds = Bounds::segment(start, *end);
+        let bounds = Bounds::segment(start, end);
         let mut nearest = None;
         for collider in surfaces {
             for surface in &collider.0 {
-                surface
-                    .tree
-                    .first_contact(bounds, start, *end, &mut nearest);
+                surface.tree.first_contact(bounds, start, end, &mut nearest);
             }
         }
-        let Some((t, normal)) = nearest else {
+        nearest
+    }
+
+    pub(crate) fn sweep<'a>(
+        surfaces: impl IntoIterator<Item = &'a Self> + Clone,
+        start: Point,
+        end: &mut Point,
+        clearance: f64,
+        friction: Option<f64>,
+    ) -> bool {
+        let Some((t, normal)) = Self::first_contact(surfaces.clone(), start, *end) else {
             return false;
         };
         let movement = sub(*end, start);
-        let sign = if dot(movement, normal) > 0.0 {
-            -1.0
-        } else {
-            1.0
-        };
-        let scale = clearance * sign / dot(normal, normal).sqrt();
-        *end = std::array::from_fn(|i| start[i] + t * movement[i] + scale * normal[i]);
+        let normal = facing(movement, normal);
+        let contact = std::array::from_fn(|i| start[i] + t * movement[i] + clearance * normal[i]);
+        *end = contact;
+        if let Some(friction) = friction {
+            let remainder = movement.map(|value| (1.0 - t) * value);
+            let inward = (-dot(remainder, normal)).max(0.0);
+            let tangent: Point = std::array::from_fn(|i| remainder[i] + inward * normal[i]);
+            let tangent_length = dot(tangent, tangent).sqrt();
+            if tangent_length > 1e-9 {
+                let factor = (1.0 - friction * inward / tangent_length).max(0.0);
+                let slide = tangent.map(|value| value * factor);
+                *end = std::array::from_fn(|i| contact[i] + slide[i]);
+                // A separate surface can block the tangent displacement at a corner.
+                if let Some((t, second_normal)) = Self::first_contact(surfaces, contact, *end) {
+                    let second_normal = facing(slide, second_normal);
+                    let approach = -dot(slide, second_normal);
+                    let fraction = if approach > 0.0 {
+                        (t - clearance / approach).max(0.0)
+                    } else {
+                        t
+                    };
+                    *end = std::array::from_fn(|i| contact[i] + fraction * slide[i]);
+                }
+            }
+        }
         true
     }
+}
+
+fn facing(movement: Point, normal: Point) -> Point {
+    let sign = if dot(movement, normal) > 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let scale = sign / dot(normal, normal).sqrt();
+    normal.map(|value| value * scale)
 }
 
 #[derive(Default, Serialize)]
@@ -573,10 +608,46 @@ mod tests {
         let near = plane(3.0, [2, 1, 0]);
         let start = [0.0, 10.0, 0.0];
         let mut end = [0.0, -3.0, 0.0];
-        assert!(MeshCollider::sweep([&far, &near], start, &mut end, 0.5));
+        assert!(MeshCollider::sweep(
+            [&far, &near],
+            start,
+            &mut end,
+            0.5,
+            None
+        ));
         assert!((end[1] - 3.5).abs() < 1e-9);
         let mut clear = [5.0, 10.0, 0.0];
-        assert!(!MeshCollider::sweep([&near], start, &mut clear, 0.5));
+        assert!(!MeshCollider::sweep([&near], start, &mut clear, 0.5, None));
+    }
+
+    #[test]
+    fn sweep_uses_friction_to_limit_tangent_motion_and_checks_corners() {
+        let floor = MeshCollider::new([(
+            vec![[-30.0, 0.0, -30.0], [30.0, 0.0, -30.0], [0.0, 0.0, 30.0]],
+            vec![[0, 1, 2]],
+        )])
+        .unwrap();
+        let wall = MeshCollider::new([(
+            vec![[7.0, -10.0, -10.0], [7.0, 10.0, -10.0], [7.0, 0.0, 10.0]],
+            vec![[0, 1, 2]],
+        )])
+        .unwrap();
+        for (surfaces, mu, expected) in [
+            ([&floor, &floor], 0.0, 10.0),
+            ([&floor, &floor], 0.5, 7.5),
+            ([&floor, &floor], 1.0, 5.0),
+            ([&floor, &wall], 0.0, 6.5),
+        ] {
+            let mut end = [10.0, -5.0, 0.0];
+            assert!(MeshCollider::sweep(
+                surfaces,
+                [0.0, 5.0, 0.0],
+                &mut end,
+                0.5,
+                Some(mu)
+            ));
+            assert_eq!(end, [expected, 0.5, 0.0]);
+        }
     }
 
     #[test]

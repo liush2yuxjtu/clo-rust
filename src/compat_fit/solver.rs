@@ -16,12 +16,16 @@ struct ClothMaterial {
     stretch: [f64; 3],
     bend: [f64; 3],
     density_g_per_mm2: Option<f64>,
+    friction: Option<f64>,
 }
 
 impl ClothMaterial {
     fn for_panel(pattern: &Value, state: &Value) -> Self {
         let fabric = assets::assigned_material(state, &pattern["fabric_index"]);
         let properties = &fabric["info"]["physical_properties"];
+        let friction = properties["friction"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0);
         let density_g_per_mm2 = properties["density"]
             .as_f64()
             .filter(|value| (f64::from(f32::from_bits(1))..=f64::from(f32::MAX)).contains(value));
@@ -30,6 +34,7 @@ impl ClothMaterial {
                 stretch: [0.995; 3],
                 bend: [0.995 * 0.12; 3],
                 density_g_per_mm2,
+                friction,
             };
         }
         let fallback = number(fabric, "stiffness", 0.9).clamp(0.0, 1.0);
@@ -45,6 +50,7 @@ impl ClothMaterial {
             stretch: ["stretch_u", "stretch_v", "shear"].map(|key| response(key, 20_000.0)),
             bend: ["bend_u", "bend_v", "bend_bias"].map(|key| 0.12 * response(key, 2_000.0)),
             density_g_per_mm2,
+            friction,
         }
     }
 
@@ -1240,17 +1246,26 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let dt = 1.0 / 30.0;
     let mut contacts = 0usize;
     let use_mesh_collision = colliders.iter().any(Option::is_some);
+    let frictions: Vec<_> = if use_mesh_collision {
+        meshes
+            .iter()
+            .flat_map(|mesh| std::iter::repeat_n(mesh.material.friction, mesh.points.len()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut start_of_iteration = if use_mesh_collision {
         positions.clone()
     } else {
         Vec::new()
     };
-    let reserve_contact = |start: Point, end: &mut Point| {
+    let reserve_contact = |start: Point, end: &mut Point, index: usize| {
         usize::from(MeshCollider::sweep(
             colliders.iter().flatten().copied(),
             start,
             end,
             0.5,
+            frictions[index],
         ))
     };
     let using_proxy = !body.is_null();
@@ -1279,9 +1294,11 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             }
         }
         if use_mesh_collision {
-            for ((p, &start), &weight) in positions.iter_mut().zip(&old).zip(&weights) {
+            for (index, ((p, &start), &weight)) in
+                positions.iter_mut().zip(&old).zip(&weights).enumerate()
+            {
                 if weight > 0.0 {
-                    contacts += reserve_contact(start, p);
+                    contacts += reserve_contact(start, p, index);
                 }
             }
         }
@@ -1299,7 +1316,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 if weight > 0.0 {
                     project_proxy(p, body, &proxies);
                     if use_mesh_collision {
-                        contacts += reserve_contact(start_of_iteration[i], p);
+                        contacts += reserve_contact(start_of_iteration[i], p, i);
                     }
                 }
             }
