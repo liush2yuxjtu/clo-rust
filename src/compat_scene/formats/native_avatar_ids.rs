@@ -43,7 +43,7 @@ fn visit(record: &Fields<'_>, depth: usize, ids: &mut BTreeSet<u32>) -> Result<(
     Ok(())
 }
 
-fn uuid(value: &[u8], salt: usize) -> Vec<u8> {
+pub(super) fn record_uuid(value: &[u8], salt: usize) -> Vec<u8> {
     let hash = |half| {
         let mut hasher = DefaultHasher::new();
         (value, salt, half).hash(&mut hasher);
@@ -116,7 +116,7 @@ fn rewrite(
                     Cow::Owned(remap_array(data, ids)?)
                 }
                 BYTE_TYPE if matches!(key, b"qsUuid" | b"qsUuidUTF8") && data.len() == 36 => {
-                    Cow::Owned(uuid(data, salt))
+                    Cow::Owned(record_uuid(data, salt))
                 }
                 _ => Cow::Borrowed(data),
             };
@@ -162,12 +162,12 @@ impl AvatarIdentities {
             })
             .collect::<Result<HashMap<_, _>, String>>()?;
         let mut salt = self.uuids.len();
-        while self.uuids.contains(&uuid(original_uuid, salt)) {
+        while self.uuids.contains(&record_uuid(original_uuid, salt)) {
             salt += 1;
         }
         let updated = rewrite(&root, &ids, salt, MAX_DEPTH)?;
         self.ids.extend(ids.into_values());
-        self.uuids.insert(uuid(original_uuid, salt));
+        self.uuids.insert(record_uuid(original_uuid, salt));
         Ok(Some(updated))
     }
 }

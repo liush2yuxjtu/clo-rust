@@ -1,5 +1,7 @@
 //! Write the native garment records of an editable Rust scene.
 
+mod seams;
+
 use super::mesh::triangulate;
 use super::native_pose::{encode_map, encoded_list, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use crate::compat_scene::{array, patterns};
@@ -61,12 +63,17 @@ fn gid(panel: u32, line: u32) -> Result<Vec<u8>, String> {
     ])
 }
 
+struct Panel {
+    record: Vec<u8>,
+    edge_vertices: Vec<Vec<u32>>,
+}
+
 fn panel(
     value: &Value,
     slot: u32,
     next_id: &mut u32,
     materials: &[Vec<u8>],
-) -> Result<Vec<u8>, String> {
+) -> Result<Panel, String> {
     let name = value["name"]
         .as_str()
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
@@ -155,6 +162,7 @@ fn panel(
     let mut point_records = Vec::with_capacity(edges.len());
     let mut line_records = Vec::with_capacity(edges.len());
     let mut boundaries = Vec::with_capacity(edges.len());
+    let mut edge_vertices = Vec::with_capacity(edges.len());
     for (index, edge) in edges.iter().enumerate() {
         let following = (index + 1) % edges.len();
         let first = corners[index];
@@ -169,14 +177,19 @@ fn panel(
             (b"v2Position", VEC2, coords),
             (b"arrSizeSpecificPosition", ARRAY, &size_specific),
         ])?);
-        let mut nodes = Vec::new();
-        for vertex in first..=last {
-            let vertex = (vertex % perimeter.len()) as u32;
-            nodes.push(encode_map(&[
-                (b"uiMeshPointIndex", UINT, &vertex.to_le_bytes()),
-                (b"bMeshEdgeList", BOOL, TRUE),
-            ])?);
-        }
+        let vertices: Vec<_> = (first..=last)
+            .map(|vertex| (vertex % perimeter.len()) as u32)
+            .collect();
+        let nodes = vertices
+            .iter()
+            .map(|vertex| {
+                encode_map(&[
+                    (b"uiMeshPointIndex", UINT, &vertex.to_le_bytes()),
+                    (b"bMeshEdgeList", BOOL, TRUE),
+                ])
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        edge_vertices.push(vertices);
         let boundary = records(&nodes)?;
         let controls = &edge[1..edge.len() - 1];
         let kind: i32 = match controls {
@@ -289,7 +302,7 @@ fn panel(
         (b"uiSpiralType", UINT, &1u32.to_le_bytes()),
     ])?;
     let distance = float_bytes([value["particle_distance"].as_f64().unwrap_or(20.)])?;
-    encode_map(&[
+    let record = encode_map(&[
         (b"mapFabricShape2D", MAP_TYPE, &shape),
         (b"mapArrange", MAP_TYPE, &arrangement),
         (b"mapElement", MAP_TYPE, &entry),
@@ -309,7 +322,11 @@ fn panel(
         (b"baPosition3D", BYTE_TYPE, &world),
         (b"m4OffsetMatrix", MAT4, &placement),
         (b"bVisible3D", BOOL, TRUE),
-    ])
+    ])?;
+    Ok(Panel {
+        record,
+        edge_vertices,
+    })
 }
 
 fn physical(fabric: &Value) -> Result<Vec<u8>, String> {
@@ -451,13 +468,13 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
     if panels.is_empty() || panels.len() > 4096 || fabrics.is_empty() || fabrics.len() > 4096 {
         return Err("native authoring requires editable panels and materials".into());
     }
-    if ["seams", "native_seam_groups", "imported_meshes"]
+    if ["native_seam_groups", "imported_meshes"]
         .into_iter()
         .any(|name| !array(state, name).is_empty())
         || !array(&state["simulation"], "meshes").is_empty()
     {
         return Err(
-            "native authoring cannot yet preserve sewing or solved mesh records; save as .clorust"
+            "native authoring cannot yet preserve imported geometry or solved mesh records; save as .clorust"
                 .into(),
         );
     }
@@ -493,20 +510,23 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
         Cow::Borrowed(empty_instance.as_slice());
         panels.len()
     ])?;
+    let recorded_patterns = encoded_list(
+        &panel_records
+            .iter()
+            .map(|panel| Cow::Borrowed(panel.record.as_slice()))
+            .collect::<Vec<_>>(),
+    )?;
     let table = encode_map(&[
         (b"listSizeName", LIST_TYPE, &ZERO),
-        (b"listPattern", LIST_TYPE, &records(&panel_records)?),
+        (b"listPattern", LIST_TYPE, &recorded_patterns),
         (b"arrSymmetricIndex", ARRAY, &symmetric),
         (b"listInstance", LIST_TYPE, &instances),
     ])?;
-    let no_seams = encode_map(&[
-        (b"listSeamLinePairGroup", LIST_TYPE, &ZERO),
-        (b"arrSelfIndex", ARRAY, &ZERO),
-    ])?;
+    let sewing = seams::encode(state, &panel_records, &mut next_id)?;
     let editor = encode_map(&[
         (b"mapPatternList", MAP_TYPE, &table),
-        (b"mapSeamLinePairGroup", MAP_TYPE, &no_seams),
-        (b"mapSeamLinePairGroupWithHalfSymmetry", MAP_TYPE, &no_seams),
+        (b"mapSeamLinePairGroup", MAP_TYPE, &sewing),
+        (b"mapSeamLinePairGroupWithHalfSymmetry", MAP_TYPE, &sewing),
         (b"uiMaxGID", UINT, &count.to_le_bytes()),
     ])?;
     let palette = encode_map(&[

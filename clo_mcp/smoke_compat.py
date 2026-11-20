@@ -6736,6 +6736,100 @@ async def compare_live_authored_curves():
                       "endpoint_tolerance_mm": 0.001}))
 
 
+async def compare_live_authored_seams():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert root.is_dir() and not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    names = ["Front", "后片"]
+    outlines = (
+        [[0, 0], [120, 0], [120, 100], [0, 100]],
+        [[220, 0], [280, -15, 2], [340, 0], [340, 100], [220, 100]],
+    )
+    directions = [(0, True, False), (2, False, True)]
+
+    async def verify_segments(session, label):
+        path = root / f"{label}-decoded.clorust"
+        await json_result(session, "scene_save", {"path": str(path)})
+        scene = json.loads(path.read_text())["scene"]
+        groups = scene["native_seam_groups"]
+        assert len(groups) == len(scene["seams"]) == len(directions), (label, groups)
+        for group, (line_index, forward_a, forward_b) in zip(groups, directions, strict=True):
+            assert group["active"] and group["restored"], (label, group)
+            [pair] = group["segments"]
+            for endpoint, panel, direction in zip(pair, scene["patterns"], (forward_a, forward_b), strict=True):
+                assert endpoint == {
+                    "pattern_id": panel["id"], "shape_depth": 1, "shape_index": None,
+                    "start_line": line_index, "end_line": line_index, "direction": direction,
+                    "start_ratio": 0 if direction else 1, "end_ratio": 1 if direction else 0,
+                }, (label, endpoint)
+
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            outputs = {}
+            for writer, session in backends:
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                for name, points in zip(names, outlines, strict=True):
+                    await json_result(session, "pattern_create", {"name": name, "points": points})
+                for index, (line, forward_a, forward_b) in enumerate(directions):
+                    request = {"pattern_a": names[0], "line_a": line, "pattern_b": names[1], "line_b": line,
+                               "dir_a": forward_a, "dir_b": forward_b}
+                    assert await json_result(session, "sew", request) == {"ok": True, "seam_groups": index + 1}
+                expected = await json_result(session, "seams_list")
+                assert expected["count"] == 2 and all(row["patterns"] == names for row in expected["groups"])
+                for suffix in ("zprj", "zpac"):
+                    path = root / f"sewn-{writer}.{suffix}"
+                    assert await json_result(session, "scene_save", {"path": str(path), "thumbnail": False}) == {
+                        "path": str(path)}
+                    outputs[writer, suffix] = (path, expected)
+                checkpoint = await json_result(session, "checkpoint_save", {"name": f"sewn-{writer}"})
+                path = Path(checkpoint["path"])
+                assert path.suffix == ".zprj" and path.is_file()
+                outputs[writer, "checkpoint"] = (path, expected)
+
+            async with open_backend("rust") as verifier:
+                for (writer, kind), (path, expected) in outputs.items():
+                    for reader, session in backends:
+                        label = f"{writer}-{kind}-{reader}"
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        if kind == "checkpoint":
+                            opened = await json_result(session, "checkpoint_restore", {"name": f"sewn-{writer}"})
+                        else:
+                            opened = await json_result(session, "scene_open", {"path": str(path)})
+                        assert opened["pattern_count"] == len(names), (label, opened)
+                        assert await json_result(session, "seams_list") == expected, label
+                        for name in names:
+                            detail = await json_result(session, "pattern_info", {"pattern": name})
+                            assert detail["seam_groups"] == [0, 1], (label, detail["seam_groups"])
+                        if reader == "official":
+                            exported = root / f"{label}-official-resave.zpac"
+                            await json_result(session, "scene_save", {"path": str(exported), "thumbnail": False})
+                            await json_result(verifier, "scene_open", {"path": str(exported)})
+                            await verify_segments(verifier, label)
+                        else:
+                            await verify_segments(session, label)
+                            if writer == "rust" and kind == "zprj":
+                                initial = await json_result(session, "simulate", {"steps": 0})
+                                settled = await json_result(session, "simulate", {"steps": 15})
+                                assert initial["stitch_count"] > 0
+                                assert settled["stitch_count"] == initial["stitch_count"]
+                                assert 0 <= settled["max_stitch_gap_mm"] < initial["max_stitch_gap_mm"]
+                                reports.append({
+                                    "rust_stitches": initial["stitch_count"],
+                                    "gap_before_mm": initial["max_stitch_gap_mm"],
+                                    "gap_after_mm": settled["max_stitch_gap_mm"],
+                                })
+                        reports.append({"writer": writer, "format": kind, "reader": reader, "seam_groups": 2})
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": reports, "result": "pass"}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -7378,6 +7472,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-authored-curves", action="store_const", dest="comparison",
                              const=compare_live_authored_curves,
                              help="cross-open ZPRJ and ZPAC containing newly authored editable curves")
+    comparisons.add_argument("--compare-live-authored-seams", action="store_const", dest="comparison",
+                             const=compare_live_authored_seams,
+                             help="write fresh seams to native archives and verify both readers and stitch constraints")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

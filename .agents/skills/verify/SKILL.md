@@ -1043,6 +1043,20 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-authored-seams` with the native bridge up and
+`CLO_MCP_STATE` set to a fresh shared directory. Leave
+`CLO_RUST_CHECKPOINT_DIR` unset. Create two panels and sew two whole edges
+with opposite directions, including one curved edge. Cross-open the ZPRJ,
+ZPAC, and named checkpoint from both writers. Check the group names and
+membership against the writer's in-memory scene. Decode both readers'
+saved output to verify exact panel slots, edge indices, directions, and
+ratios. For Rust's reopened project verify that simulation reconstructs
+the stitch constraints and reduces the maximum seam gap in 15 steps.
+For the official simulation check, open each writer's ZPRJ in CLO and save a
+ZPAC before and after `simulate(steps=15)`. Read the panel positions from
+each saved archive. Measure the distance between the two panels' mean vertex
+positions and verify that both projects draw together.
+
 Run `--compare-live-authored-curves` with the native bridge up and
 `CLO_MCP_STATE` set to a fresh shared directory. Create spline, Bézier and
 mixed-control panels from scratch, save ZPRJ and ZPAC on both backends, and
