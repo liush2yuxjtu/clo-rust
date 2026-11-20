@@ -816,10 +816,8 @@ fn native_fabric_path(reference: &str) -> Result<Option<(PathBuf, &'static str)>
     {
         return Ok(None);
     }
-    let mut files = fabric_root()
-        .as_deref()
-        .map(fabric_paths)
-        .unwrap_or_default();
+    let root = fabric_root();
+    let mut files = root.as_deref().map(fabric_paths).unwrap_or_default();
     files.retain(|path| {
         path.extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"))
@@ -835,13 +833,10 @@ fn native_fabric_path(reference: &str) -> Result<Option<(PathBuf, &'static str)>
             })
             .cloned()
     };
-    if let Some(path) = find(reference) {
-        return Ok(Some((path, "path")));
-    }
     if explicit {
-        return Err(format!(
-            "no fabric file matching {reference:?}; see fabric_library"
-        ));
+        return find(reference).map(|path| Some((path, "path"))).ok_or_else(|| {
+            format!("no fabric file matching {reference:?}; see fabric_library")
+        });
     }
     if files.is_empty() {
         return Ok(None);
@@ -862,8 +857,12 @@ fn native_fabric_path(reference: &str) -> Result<Option<(PathBuf, &'static str)>
             })
             .flatten()
     };
-    let found = find(stem)
+    let found = root
+        .map(|root| root.join(format!("{stem}.zfab")))
+        .filter(|path| path.is_file())
+        .or_else(|| find(stem))
         .or_else(|| partial(stem))
+        .or_else(|| find(reference))
         .or_else(|| partial(reference))
         .map(|path| (path, matched));
     found.map(Some).ok_or_else(|| {
@@ -945,7 +944,7 @@ pub(super) fn planned_material(reference: &Value, color: &Value) -> Result<Value
 }
 
 pub fn fabric_library(args: &Value) -> Value {
-    let query = string(args, "filter", "").to_ascii_lowercase();
+    let query = string(args, "filter", "").to_lowercase();
     let root = fabric_root();
     let custom = root.as_deref().map(fabric_paths).unwrap_or_default();
     let native = custom.iter().any(|p| {
@@ -964,11 +963,16 @@ pub fn fabric_library(args: &Value) -> Value {
     fabric_names.extend(
         custom
             .iter()
+            .filter(|path| {
+                !native || path.extension().is_some_and(|ext| ext == "zfab")
+            })
             .filter_map(|p| p.file_name().and_then(|s| s.to_str()))
-            .filter(|s| s.to_ascii_lowercase().contains(&query))
+            .filter(|s| s.to_lowercase().contains(&query))
             .map(str::to_owned),
     );
-    fabric_names.sort();
+    if !native {
+        fabric_names.sort();
+    }
     let mut keywords: Vec<_> = LIBRARY_KEYWORDS
         .iter()
         .flat_map(|(keys, _)| *keys)

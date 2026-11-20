@@ -43,7 +43,11 @@ Run `--verify-fabric-assignment-workflow` to register a fabric through
 fabric to another panel. Check that adding leaves both original assignments
 and the drape intact. Reopen at zero steps, compare positions and velocities,
 and check each GLB mesh's material. Optionally set `CLO_FABRIC_ASSIGN_FIXTURE`
-to the absolute path of a real `.zfab` for the registration step.
+to the absolute path of a real denim `.zfab` for the registration step and a
+nested library case. Check that `fabric_library` follows path order, preserves
+duplicate basenames, filters accented names case-insensitively, and skips
+Rust material JSON when the library contains CLO fabrics. The `denim` keyword
+must load the standard file at the library root even with a same-named nested file.
 
 For release-download, checksum, or cache changes, use an existing release with the required assets and run `CLO_RUST_RELEASE=<tag> python -m clo_mcp.smoke_release` with GitHub CLI access. The smoke test exercises the actual published download, checksum verification, cache hit, seam audit, and replay through stdio. For new releases, build and test on each target platform, run the binary's `--version`, compute its SHA-256 checksum, and confirm the published tag and assets. Run the release-download smoke test against the published tag.
 

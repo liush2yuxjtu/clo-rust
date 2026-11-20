@@ -195,6 +195,7 @@ async def check_material_export(session, directory, png):
 
 
 async def verify_fabric_assignment_workflow():
+    library_report = {}
     with TemporaryDirectory(prefix="clo-fabric-assignment-") as directory:
         root = Path(directory)
         async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": "", "CLO_RUST_AVATAR_DIR": ""}) as rust:
@@ -245,10 +246,32 @@ async def verify_fabric_assignment_workflow():
             model, _ = read_gltf_export(glb)
             material_names = [model["materials"][mesh["primitives"][0]["material"]]["name"] for mesh in model["meshes"]]
             assert material_names == [updated["fabrics"][index]["name"] for index in (new_index, back_index)]
+        if os.environ.get("CLO_FABRIC_ASSIGN_FIXTURE"):
+            library = root / "Fabric"
+            (library / "A-nested").mkdir(parents=True)
+            stem = "V2_Woven_Denim_1.zfab"
+            canonical = library / stem
+            shutil.copyfile(source, canonical)
+            shutil.copyfile(source, library / "A-nested" / "Écru Denim.zfab")
+            (library / "A-nested" / stem).write_bytes(b"not a fabric archive")
+            (library / "extra.json").write_text("{}")
+            async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": str(library)}) as rust:
+                listing = await json_result(rust, "fabric_library")
+                assert listing["fabrics"] == [stem, "Écru Denim.zfab", stem], listing
+                filtered = await json_result(rust, "fabric_library", {"filter": "ÉCRU"})
+                assert filtered["fabrics"] == ["Écru Denim.zfab"], filtered
+                applied = await json_result(rust, "fabric_apply", {"fabric": "denim"})
+                assert applied["matched"] == "denim" and Path(applied["file"]) == canonical.resolve()
+                readback = await json_result(rust, "fabric_list")
+                assert readback["fabrics"][applied["fabric"]["index"]]["name"] == applied["fabric"]["name"]
+                library_report = {"native_filenames": listing["fabrics"],
+                                  "native_keyword_file": canonical.name,
+                                  "unicode_filter": filtered["fabrics"]}
     print(json.dumps({"tools": ["fabric_apply", "clo_api_call", "clo_run_python", "simulate", "scene_export"],
                       "case": "add fabric, assign one panel, preserve drape", "add_kept_assignments": True,
                       "assigned_indices": [new_index, back_index], "retained_step": 3,
-                      "invalid_assignment_preserved_scene": True, "glb_materials": material_names}))
+                      "invalid_assignment_preserved_scene": True, "glb_materials": material_names}
+                     | library_report, ensure_ascii=False))
 
 
 async def verify_fabric_recolor_opacity():
