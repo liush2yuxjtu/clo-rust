@@ -214,7 +214,7 @@ internal seam groups reach the Rust solver after reopening.
 Run `--verify-display-edits-keep-drape` to verify that 2D movement,
 3D visibility and strengthening preserve an existing pose and velocities.
 Compare the 2D and 3D snapshots, visible OBJ objects, saved state, and
-step count after reopening. Use a geometric flip as the reset control.
+step count after reopening. A geometric flip discards only the flipped panel's pose.
 Set `CLO_DISPLAY_FIXTURE` to a native project with saved drape to also
 verify absolute placement and visibility changes on archived meshes.
 
@@ -237,6 +237,12 @@ beside settled cloth. Verify the OBJ contains both posed and newly
 placed panels, then reopen and assemble the new meshes at zero steps.
 Check the original mesh, velocities and step count, then resume simulation.
 Set `CLO_DISPLAY_FIXTURE` to also verify a new panel beside archived meshes.
+
+Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
+arrangement changes, flips, point deletion and particle distance edits.
+Save and reopen after each edit. At zero steps, rebuild the edited panel
+and verify that the other panel's saved mesh and velocities match exactly.
+Check that a subsequent step continues the original simulation.
 
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,

@@ -1616,7 +1616,7 @@ async def verify_display_edits_keep_drape():
             assert continued["simulation"]["steps"] == 4
             await operate("Front", "flip", {"horizontal": True})
             _, flipped = await save("flipped")
-            assert flipped["simulation"] is None
+            assert flipped["simulation"]["meshes"] == [continued["simulation"]["meshes"][1]]
 
             native_meshes = None
             if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
@@ -1638,6 +1638,72 @@ async def verify_display_edits_keep_drape():
                       "case": "layout and display edits preserve drape",
                       "pose_and_velocities": "unchanged", "continue_and_flip_control": "pass",
                       "native_pose_meshes_preserved": native_meshes}))
+
+
+async def verify_geometry_edits_rebuild_one_panel():
+    with TemporaryDirectory(prefix="clo-rebuild-edited-panel-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            await json_result(rust, "avatar_load", {"name_or_path": "mia"})
+            for name, x in (("Front", 0), ("Back", 180)):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 55, 90], [x, 60]],
+                    "arrangement": name,
+                })
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+            initial, original = await save("initial")
+            first, remaining = original["simulation"]["meshes"]
+            results = []
+            for tool, args in (
+                ("pattern_edit_points", {"moves": [{"point": 1, "dx": 40}]}),
+                ("pattern_set_arrangement", {"point": "Back"}),
+                ("pattern_ops", {"op": "flip", "args": {"horizontal": True}}),
+                ("pattern_ops", {"op": "delete_point", "args": {"point": 1}}),
+                ("pattern_ops", {"op": "particle_distance", "args": {"mm": 24}}),
+            ):
+                await json_result(rust, "scene_open", {"path": str(initial)})
+                await json_result(rust, tool, {"pattern": "Front"} | args)
+                path, edited = await save("edited")
+                partial = edited["simulation"]
+                assert partial["source"] == "mixed_saved_pose" and partial["meshes"] == [remaining]
+                await json_result(rust, "scene_open", {"path": str(path)})
+                await json_result(rust, "simulate", {"steps": 0})
+                _, initialized = await save("initialized")
+                simulation = initialized["simulation"]
+                new, kept = simulation["meshes"]
+                assert simulation["steps"] == 3 and kept == remaining
+                assert new["id"] == first["id"] and new["positions"] != first["positions"]
+                results.append(args.get("op", tool))
+            await json_result(rust, "simulate", {"steps": 1})
+            _, continued = await save("continued")
+            assert continued["simulation"]["steps"] == 4
+            native_count = None
+            if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                _, native = await save("native-before")
+                panel_id = native["patterns"][0]["id"]
+                saved_meshes = native["simulation"]["meshes"]
+                expected = [mesh | {"texcoords_units": "mm"} for mesh in saved_meshes if mesh["id"] != panel_id]
+                assert 0 < len(expected) < len(saved_meshes)
+                await json_result(rust, "pattern_edit_points", {
+                    "pattern": "0", "moves": [{"point": 0, "dx": 1}],
+                })
+                path, _ = await save("native-edited")
+                await json_result(rust, "scene_open", {"path": str(path)})
+                _, edited = await save("native-reopened")
+                assert edited["simulation"]["meshes"] == expected
+                native_count = len(expected)
+    print(json.dumps({"tools": ["pattern_edit_points", "pattern_set_arrangement", "pattern_ops", "simulate"],
+                      "case": "rebuild only the edited panel", "edits": results,
+                      "unaffected_pose_and_velocities": "unchanged", "continued_step": 4,
+                      "native_meshes_preserved": native_count}))
 
 
 async def verify_symmetry_sewing():
@@ -2257,6 +2323,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-new-panels-keep-drape", action="store_const", dest="comparison",
                              const=verify_new_panels_keep_drape,
                              help="verify newly created or copied panels can join settled cloth")
+    comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
+                             const=verify_geometry_edits_rebuild_one_panel,
+                             help="verify geometric edits preserve other panels and their continuation")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2274,7 +2343,8 @@ if __name__ == "__main__":
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
-                                verify_delete_keeps_drape, verify_new_panels_keep_drape)
+                                verify_delete_keeps_drape, verify_new_panels_keep_drape,
+                                verify_geometry_edits_rebuild_one_panel)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

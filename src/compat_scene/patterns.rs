@@ -454,11 +454,11 @@ pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
         "arrangement": point, "fabric_index": 0
     });
     vec_mut(state, "patterns").push(pattern);
-    retain_pose_after_append(state);
+    use_partial_pose(state);
     Ok(json!({"index": i, "name": name}))
 }
 
-fn retain_pose_after_append(state: &mut Value) {
+fn use_partial_pose(state: &mut Value) {
     let pose = &mut state["simulation"];
     let uses_mm = pose["source"] == "native_saved_pose" || pose["texcoords_units"] == "mm";
     let Some(meshes) = pose.get_mut("meshes").and_then(Value::as_array_mut) else {
@@ -474,6 +474,18 @@ fn retain_pose_after_append(state: &mut Value) {
         pose.as_object_mut().expect("simulation record").remove("texcoords_units");
     }
     pose["source"] = json!("mixed_saved_pose");
+}
+
+fn discard_panel_pose(state: &mut Value, id: &Value) {
+    let Some(meshes) = state["simulation"].get_mut("meshes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    meshes.retain(|mesh| mesh["id"] != *id);
+    if meshes.is_empty() {
+        invalidate_geometry(state);
+    } else {
+        use_partial_pose(state);
+    }
 }
 
 pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
@@ -515,7 +527,8 @@ pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
         .as_object_mut()
         .expect("pattern record")
         .remove("saved_arrangement");
-    invalidate_geometry(state);
+    let id = state["patterns"][i]["id"].clone();
+    discard_panel_pose(state, &id);
     Ok(json!({"index": i, "arrangement": details}))
 }
 
@@ -554,7 +567,8 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     }
     if !moved.is_empty() {
         set_points(&mut state["patterns"][i], points);
-        invalidate_geometry(state);
+        let id = state["patterns"][i]["id"].clone();
+        discard_panel_pose(state, &id);
     }
     Ok(json!({"index": i, "moved": moved}))
 }
@@ -809,7 +823,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 super::annotations::duplicate_sewing(state, &old_id, &id)?;
             }
             vec_mut(state, "patterns").push(pattern);
-            retain_pose_after_append(state);
+            use_partial_pose(state);
             return Ok(if op == "copy" {
                 json!({"new_index": new_index})
             } else {
@@ -865,7 +879,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
         op,
         "elastic" | "shirring" | "freeze" | "layer" | "move_2d" | "hide" | "strengthen"
     ) {
-        invalidate_geometry(state);
+        discard_panel_pose(state, &pattern["id"]);
     }
     state["patterns"][i] = pattern;
     Ok(result)
