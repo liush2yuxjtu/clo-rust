@@ -1,7 +1,10 @@
 //! Read static Y-up geometry and arrangement points from a native avatar archive.
 
+pub(super) mod arrangement;
+
 use super::mesh_measure::{Region, RegionFace};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::{ops::Range, path::Path};
 
 const HEADER: &[u8; 16] = b" AVT        CLO ";
@@ -22,6 +25,7 @@ pub(super) struct RestMesh {
     pub triangles: Vec<Triangle>,
     pub part_count: usize,
     pub arrangements: Vec<Value>,
+    pub native_arrangements: BTreeMap<String, arrangement::CurvedPlacement>,
     pub body_faces: Option<Range<usize>>,
     pub regions: Vec<RegionFace>,
     pub(super) scene_name: Option<String>,
@@ -272,6 +276,7 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         triangles: Vec::new(),
         part_count: 0,
         arrangements: arrangement_records(&root).unwrap_or_default(),
+        native_arrangements: arrangement::read(&root),
         body_faces: None,
         regions: Vec::new(),
         scene_name: find(&root, "qsNameUTF8", BYTES)

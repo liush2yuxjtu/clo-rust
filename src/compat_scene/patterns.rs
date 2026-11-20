@@ -208,12 +208,17 @@ pub(crate) fn sampled_perimeter(pattern: &Value, max_samples: usize) -> Result<(
     Ok((vertices, corners))
 }
 
-fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
-    if let Ok([left, bottom, right, top]) = serde_json::from_value::<[f64; 4]>(pattern["native_outline_bounds"].clone()) {
-        let [dx, dy] = offset(pattern);
-        return Ok([left + dx, bottom + dy, right + dx, top + dy]);
+pub(crate) fn pattern_rest_bounds(pattern: &Value) -> Result<[f64; 4], String> {
+    if let Ok(bounds) = serde_json::from_value::<[f64; 4]>(pattern["native_outline_bounds"].clone()) {
+        return Ok(bounds);
     }
-    Ok(point_bounds(outline(pattern)?, offset(pattern)))
+    Ok(point_bounds(outline(pattern)?, [0.; 2]))
+}
+
+fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
+    let [dx, dy] = offset(pattern);
+    let [left, bottom, right, top] = pattern_rest_bounds(pattern)?;
+    Ok([left + dx, bottom + dy, right + dx, top + dy])
 }
 
 pub(super) fn point_bounds(points: impl IntoIterator<Item = Point>, [dx, dy]: [f64; 2]) -> [f64; 4] {

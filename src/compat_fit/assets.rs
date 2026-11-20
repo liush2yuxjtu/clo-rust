@@ -439,7 +439,12 @@ fn avatar_from_avt(name: &str, path: Option<&Path>, rest: avt::RestMesh) -> Resu
             body_faces: rest.body_faces,
             regions: rest.regions,
         }),
-    )
+    ).map(|mut avatar| {
+        if !rest.native_arrangements.is_empty() {
+            avatar["native_arrangements"] = json!(rest.native_arrangements);
+        }
+        avatar
+    })
 }
 
 fn avatar_from_mesh(

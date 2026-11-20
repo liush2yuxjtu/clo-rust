@@ -3,7 +3,7 @@ mod remesh;
 mod shirring;
 pub(super) mod weld;
 
-use super::{array, assets, boolean, number, string};
+use super::{array, assets, avt::arrangement, boolean, number, string};
 use crate::collision::MeshCollider;
 use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde::{Deserialize, Serialize};
@@ -430,9 +430,12 @@ fn flat_arrangement(pattern: &Value, points: &[Point2]) -> Vec<Point> {
     points.iter().map(|&[x, y]| [x + dx, y + dy, 200.0]).collect()
 }
 
-pub(crate) fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
+fn placement(pattern: &Value, points: &[Point2], avatar: &Value) -> Vec<Point> {
     if avatar.is_null() && pattern.get("draft_offset_x").is_none() {
         return flat_arrangement(pattern, points);
+    }
+    if let Some(positions) = arrangement::place(pattern, points, avatar) {
+        return positions;
     }
     let (low, high) = bounds(points);
     let center = std::array::from_fn::<_, 2, _>(|i| (low[i] + high[i]) / 2.0);
@@ -887,6 +890,21 @@ pub(crate) struct ArchivePoseMesh {
     pub positions: Vec<Point>,
     pub triangles: Vec<[u32; 3]>,
     pub sides: Vec<Vec<u32>>,
+}
+
+pub(crate) fn place_archive_mesh(
+    mut mesh: ArchivePoseMesh, pattern: &Value, avatar: &Value,
+) -> Result<ArchivePoseMesh, String> {
+    let distance = particle_distance(number(pattern, "particle_distance", 20.))?;
+    let mut triangles = mesh.triangles.into_iter()
+        .map(|triangle| triangle.map(|i| i as usize)).collect();
+    let mut sides = mesh.sides.into_iter()
+        .map(|side| side.into_iter().map(|i| i as usize).collect()).collect::<Vec<_>>();
+    refine_adaptive(&mut mesh.rest, &mut triangles, &mut sides, distance);
+    mesh.positions = placement(pattern, &mesh.rest, avatar);
+    mesh.triangles = triangles.into_iter().map(|triangle| triangle.map(|i| i as u32)).collect();
+    mesh.sides = sides.into_iter().map(|side| side.into_iter().map(|i| i as u32).collect()).collect();
+    Ok(mesh)
 }
 
 pub(crate) fn archive_pose_mesh(
@@ -1483,12 +1501,12 @@ pub(super) fn reset_arrangement(state: &mut Value) -> Result<Value, String> {
     state["runtime"]["quality"] = json!(quality);
     let existing = &state["simulation"];
     let native_rest = matches!(existing["source"].as_str(), Some(NATIVE_SAVED_POSE | RUST_NATIVE_REST));
-    if !state["avatar"].is_null() || !native_rest {
+    if !native_rest {
         state["simulation"] = Value::Null;
         return Ok(json!({"ok": true}));
     }
 
-    // Retain the native rest topology for a flat arrangement with no avatar.
+    // Keep the original rest topology when all placements can use it.
     let mut reset = existing.clone();
     let meshes = reset["meshes"].as_array_mut().ok_or("missing native rest meshes")?;
     for mesh in meshes {
@@ -1496,7 +1514,15 @@ pub(super) fn reset_arrangement(state: &mut Value) -> Result<Value, String> {
             .ok_or("native rest mesh refers to a missing panel")?;
         let rest: Vec<Point2> = Vec::deserialize(&mesh["texcoords"])
             .map_err(|error| format!("invalid native rest coordinates: {error}"))?;
-        mesh["positions"] = json!(flat_arrangement(pattern, &rest));
+        let positions = if state["avatar"].is_null() {
+            flat_arrangement(pattern, &rest)
+        } else if let Some(positions) = arrangement::place(pattern, &rest, &state["avatar"]) {
+            positions
+        } else {
+            state["simulation"] = Value::Null;
+            return Ok(json!({"ok": true}));
+        };
+        mesh["positions"] = json!(positions);
         if mesh["velocities"].is_array() {
             mesh["velocities"] = json!(vec![[0.0; 3]; rest.len()]);
         }

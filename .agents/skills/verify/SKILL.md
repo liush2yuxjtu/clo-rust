@@ -1267,6 +1267,26 @@ fabric assignments and color. Check for Mia in ZPRJ, and verify restoring
 preserves the latest session spec. The 3D position comparison is a separate
 case. Inspect `baPosition3D` by panel in each typed PAC to compare world bounds.
 
+Run `--verify-native-avatar-placement` with the installed Mia AVT, the poplin
+library and the two Mia caches described above. Set `CLO_PLACEMENT_REFERENCE`
+to the official 16-panel Mia ZPRJ and `CLO_PLACEMENT_RESET_REFERENCE` to the
+ZPAC that official CLO saves after `simulation_reset` on that project. Keep
+`CLO_FRESH_DRAFT_PROJECT` set to the official six-panel top. The verifier
+uses those saved official results as its numerical references.
+
+To recreate the 16-panel case, load Mia in an empty scene. Create 100 × 160 mm
+and 280 × 160 mm rectangles at each of `Body_Front_Center_1`,
+`Body_Back_Center_1`, `Arm_Outside_2_L`, `Arm_Outside_2_R`,
+`Body_Front_Waist` and `Body_Back_Waist`. At the first four points also
+create a trapezoid with local corners `(0,0), (270,0), (190,210), (45,210)`.
+Space the patterns apart in 2D and save before and after the reset. The
+Rust verifier checks exact reset topology and rest coordinates, a maximum
+0.6 mm distance per reset vertex, and both bounds and corresponding 3D
+vertices for the independently authored top. The fresh draft may have a
+different triangulation, so compare coincident rest coordinates at 0.001 mm
+resolution and require at least four per panel. Use 1 mm for their 3D
+distance and 2.5 mm for the world bounds delta.
+
 Run `--compare-live-garment-to-project` with the native bridge up.
 Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
 and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave

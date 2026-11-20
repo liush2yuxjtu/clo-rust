@@ -4,7 +4,7 @@ mod seams;
 
 use super::mesh::triangulate;
 use super::native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
-use crate::compat_fit::{archive_pose_mesh, placement, ArchivePoseMesh};
+use crate::compat_fit::{archive_pose_mesh, place_archive_mesh, ArchivePoseMesh};
 use crate::compat_scene::{array, patterns};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -158,13 +158,11 @@ fn panel(
     };
     let entry = element(name, next())?;
     let [dx, dy] = patterns::offset(value);
-    let mut geometry = match saved {
+    let geometry = match saved {
         Some(prior) => archive_pose_mesh(value, prior, state)?,
+        None if arrangement.is_some() => place_archive_mesh(flat_mesh(value)?, value, &state["avatar"])?,
         None => flat_mesh(value)?,
     };
-    if saved.is_none() && arrangement.is_some() {
-        geometry.positions = placement(value, &geometry.rest, &state["avatar"]);
-    }
     if geometry.sides.len() != edges.len() || geometry.rest.len() > 130_000 {
         return Err("native pose boundary does not match the panel outline".into());
     }

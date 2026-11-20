@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 pub(crate) type InnerSeamPaths = Vec<Vec<Vec<usize>>>;
 pub(crate) type InnerSeamRest = Vec<Vec<Vec<[f64; 2]>>>;
-pub(crate) use patterns::{bridge_pattern_index, internal_strokes, layout_outline};
+pub(crate) use patterns::{bridge_pattern_index, internal_strokes, layout_outline, pattern_rest_bounds};
 pub(crate) use patterns::sampled_perimeter;
 pub(crate) use annotations::seam_group_names;
 pub(crate) use formats::write as write_artifact;

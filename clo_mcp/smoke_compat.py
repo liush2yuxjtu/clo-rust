@@ -4390,6 +4390,75 @@ async def compare_live_garment_workflow():
                       "new_session_history_empty": True, "result": "pass"}))
 
 
+async def verify_native_avatar_placement():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    original = Path(os.environ["CLO_PLACEMENT_REFERENCE"])
+    reset_reference = Path(os.environ["CLO_PLACEMENT_RESET_REFERENCE"])
+    fresh_reference = Path(os.environ["CLO_FRESH_DRAFT_PROJECT"])
+    avatar = "Mara_09_eye_Joint"
+    assert all(path.is_file() for path in (original, reset_reference, fresh_reference))
+    for folder in ("measurements", "calibration"):
+        assert (root / folder / f"{avatar}.json").is_file()
+
+    async def read_pose(session, path, label):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        await json_result(session, "scene_open", {"path": str(path)})
+        meshes, _ = await snapshot_composed_archive(session, root / f"{label}.clorust")
+        panels = (await json_result(session, "scene_info"))["patterns"]
+        return [mesh | {"name": panel["name"]} for mesh, panel in zip(meshes, panels, strict=True)]
+
+    async with open_backend("rust") as rust, open_backend("rust") as reader:
+        expected = await read_pose(reader, reset_reference, "placement-reset-reference")
+        assert len(expected) == 16
+        opened = await json_result(rust, "scene_open", {"path": str(original)})
+        assert opened["avatars"] == [avatar] and opened["pattern_count"] == len(expected)
+        before = await json_result(rust, "scene_info")
+        assert await json_result(rust, "simulation_reset") == {"ok": True}
+        assert await json_result(rust, "scene_info") == before
+        output = root / "placement-reset.zprj"
+        await json_result(rust, "scene_save", {"path": str(output), "thumbnail": False})
+        reset = await read_pose(reader, output, "placement-reset-candidate")
+        assert (await json_result(reader, "scene_info"))["avatars"] == [avatar]
+        reset_errors = []
+        for ref, candidate in zip(expected, reset, strict=True):
+            for key in ("name", "triangles", "texcoords"):
+                assert ref[key] == candidate[key], (ref["name"], key)
+            reset_errors.extend(math.dist(a, b) for a, b in zip(ref["positions"], candidate["positions"], strict=True))
+        assert len(reset_errors) > 2700 and max(reset_errors) <= 0.6, max(reset_errors)
+
+        expected = await read_pose(reader, fresh_reference, "placement-draft-reference")
+        assert len(expected) == 6
+        await json_result(rust, "scene_clear", {"keep_avatar": False})
+        built = await json_result(rust, "garment_build", {
+            "spec": {"garment": "top", "silhouette": "regular", "neckline": "crew",
+                     "sleeve": "short", "fabric": "cotton", "color": "navy", "particle_distance": 45},
+            "simulate_steps": 0, "snapshots": False,
+        })
+        assert built["avatar"] == avatar and built["checkpoint_before_build"] is None
+        output = root / "placement-draft.zprj"
+        await json_result(rust, "scene_save", {"path": str(output), "thumbnail": False})
+        fresh = await read_pose(reader, output, "placement-draft-candidate")
+        assert (await json_result(reader, "scene_info"))["seam_groups"] == 14
+        comparisons = []
+        for ref, candidate in zip(expected, fresh, strict=True):
+            assert ref["name"] == candidate["name"]
+            key = lambda uv: tuple(round(value, 3) for value in uv)
+            reference = {key(uv): p for uv, p in zip(ref["texcoords"], ref["positions"], strict=True)}
+            sample = [math.dist(p, reference[key(uv)])
+                      for uv, p in zip(candidate["texcoords"], candidate["positions"], strict=True)
+                      if key(uv) in reference]
+            assert len(sample) >= 4 and max(sample) <= 1.0, (ref["name"], sample)
+            bounds = max(abs(extreme(a) - extreme(b))
+                         for a, b in zip(zip(*ref["positions"]), zip(*candidate["positions"]), strict=True)
+                         for extreme in (min, max))
+            assert bounds <= 2.5, (ref["name"], bounds)
+            comparisons.append({"panel": ref["name"], "common_rest_vertices": len(sample),
+                                "max_point_error_mm": max(sample), "bounds_max_delta_mm": bounds})
+    print(json.dumps({"result": "pass", "reset_panels": len(reset), "reset_vertices": len(reset_errors),
+                      "reset_max_point_error_mm": max(reset_errors), "reset_topology_exact": True,
+                      "fresh_top": comparisons}))
+
+
 async def compare_live_fresh_draft_archives():
     root = Path(os.environ["CLO_MCP_STATE"])
     fixture = Path(os.environ["CLO_FRESH_DRAFT_PROJECT"])
@@ -8593,6 +8662,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
                              const=compare_live_avatar_measurements,
                              help="compare live avatar mesh measurements and shared measurement cache behavior")
+    comparisons.add_argument("--verify-native-avatar-placement", action="store_const", dest="comparison",
+                             const=verify_native_avatar_placement,
+                             help="compare Rust initial and reset poses against saved native AVT projects")
     comparisons.add_argument("--compare-live-fresh-draft-archives", action="store_const", dest="comparison",
                              const=compare_live_fresh_draft_archives,
                              help="cross-open a newly drafted top and restore its native rebuild checkpoint")
