@@ -659,11 +659,14 @@ fn archive_members<'a>(members: impl IntoIterator<Item = (&'a str, &'a [u8])>) -
 }
 
 fn authored_garment(state: &Value) -> Result<Vec<u8>, String> {
-    let body = native_author::encode(state)?;
-    let zip = archive_members([
-        ("garment.pac", body.as_slice()),
-        ("clofiles.json", br#"{"garment.pac":"garment.pac"}"#),
-    ])?;
+    let native_author::Garment { body, images } = native_author::encode(state)?;
+    let manifest = serde_json::to_vec(&std::iter::once("garment.pac")
+        .chain(images.keys().map(String::as_str)).map(|name| (name, name))
+        .collect::<std::collections::BTreeMap<_, _>>()).map_err(|error| error.to_string())?;
+    let members = [("garment.pac", body.as_slice()), ("clofiles.json", manifest.as_slice())];
+    let zip = archive_members(members.into_iter().chain(
+        images.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
+    ))?;
     let mut header = ZPAC.to_vec();
     header.extend(12u32.to_le_bytes());
     header.resize(40, 0);

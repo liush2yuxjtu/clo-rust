@@ -3,8 +3,11 @@
 use super::clo_native::{bounded_file, member, open_archive};
 use super::native_materials::{face_records, face_type, read_face_colors};
 use super::native_pose::{map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
-use super::native_textures::fabric_maps;
+use super::native_textures::{
+    archive_texture_labels, fabric_maps, front_desaturated, image_bytes, remap_archive_textures,
+};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 const FAB: &[u8; 16] = b" FAB        CLO ";
@@ -116,4 +119,59 @@ pub(crate) fn read(path: &Path) -> Result<Value, String> {
             "stiffness": stiffness, "warnings": warnings,
         },
     }))
+}
+
+pub(super) fn author(
+    fabric: &Value,
+    id: u32,
+    images: &mut BTreeMap<String, Vec<u8>>,
+    image_total: &mut u64,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let path = fabric["info"]["path"].as_str().ok_or("native fabric source is missing")?;
+    let mut archive = open_archive(bounded_file(Path::new(path))?, FAB)?;
+    let payload = member(&mut archive, "fab")?;
+    let record = Fields::read(&payload)?;
+    let material = active_material(&record)?;
+    let original_color = read_face_colors(&material)?.into_iter()
+        .find(|(kind, _)| *kind == 0).ok_or("native fabric front face is missing")?.1;
+    let rgba: [f32; 4] = serde_json::from_value(fabric["rgba"].clone())
+        .map_err(|_| "invalid native fabric color")?;
+    let desaturated = fabric["base_texture_desaturated"] == true;
+    let recolored = original_color.map(|value| value as f32) != rgba
+        || desaturated != front_desaturated(&material)?;
+    let (mut baseline, warnings) = fabric_maps(&material, &mut archive)?;
+    if recolored && !crate::compat_fit::preserves_opacity_on_recolor(fabric) {
+        baseline.as_object_mut().expect("native texture map").remove("opacity");
+    }
+    if !warnings.is_empty() || baseline != fabric["texture_maps"] {
+        return Err("native fabric authoring requires the source texture bindings".into());
+    }
+    let physical = record.get(b"mapPhysical", MAP_TYPE)?.to_vec();
+    let edited = if recolored {
+        super::native_recolor::recolor_fabric_record(&record, fabric)?
+    } else {
+        payload
+    };
+    let mut edited = Fields::read(&edited)?.replace(b"uiID", 5, &id.to_le_bytes())?;
+    let name = fabric["name"].as_str().ok_or("missing native fabric name")?;
+    for key in [b"qsName".as_slice(), b"qsNameUTF8", b"qsFabricName", b"qsFabricNameUTF8"] {
+        edited = Fields::read(&edited)?.set(key, BYTE_TYPE, name.as_bytes())?;
+    }
+    let names = archive.file_names().map(|name| {
+        let name = name.map_err(|error| error.to_string())?.into_owned();
+        Ok((name.to_ascii_lowercase(), name))
+    }).collect::<Result<HashMap<_, _>, String>>()?;
+    let mut renamed = HashMap::new();
+    for key in archive_texture_labels(&edited)?.into_keys() {
+        let name = names.get(&key).ok_or("native fabric references a missing texture")?;
+        let bytes = image_bytes(&mut archive, name)?;
+        *image_total += bytes.len() as u64;
+        if *image_total > 256 * 1024 * 1024 {
+            return Err("authored fabric textures exceed 256 MiB".into());
+        }
+        let target = format!("fabric_{id}_{name}");
+        renamed.insert(key, target.clone());
+        images.insert(target, bytes);
+    }
+    Ok((remap_archive_textures(&edited, &renamed)?.unwrap_or(edited), physical))
 }

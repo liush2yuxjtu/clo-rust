@@ -201,6 +201,10 @@ fn scene_color(fabric: &Value, index: usize, keep_replacement: bool) -> Result<C
     if fabric["index"].as_u64() != Some(index as u64) {
         return Err("native fabric order no longer matches the loaded scene".into());
     }
+    fabric_color(fabric, keep_replacement)
+}
+
+fn fabric_color(fabric: &Value, keep_replacement: bool) -> Result<Color, String> {
     let rgba: [f32; 4] = serde_json::from_value(fabric["rgba"].clone())
         .map_err(|error| format!("invalid native fabric color: {error}"))?;
     if rgba.iter().any(|channel| !(0.0..=1.0).contains(channel)) {
@@ -211,6 +215,18 @@ fn scene_color(fabric: &Value, index: usize, keep_replacement: bool) -> Result<C
         rgba,
         name: format!("{r:02X}{g:02X}{b:02X}"),
         keep_opacity: keep_replacement || crate::compat_fit::preserves_opacity_on_recolor(fabric),
+    })
+}
+
+pub(super) fn recolor_fabric_record(record: &Fields<'_>, fabric: &Value) -> Result<Vec<u8>, String> {
+    let color = fabric_color(fabric, false)?;
+    let updated = update_fabric(record, &color, update_face)?;
+    let updated = Fields::read(&updated)?;
+    if updated.get(b"listStyleChip", LIST_TYPE).is_err() {
+        return Ok(updated.encoded().to_vec());
+    }
+    update_list(&updated, b"listStyleChip", 4096, |_, chip| {
+        Ok(Some(material_list(chip, &color, update_face)?))
     })
 }
 

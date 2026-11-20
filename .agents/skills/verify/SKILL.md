@@ -1242,6 +1242,17 @@ the material assignment and color, and nonempty exported mesh geometry. For
 the moved project check that 3D bounds stay at the original placement within
 0.001 mm. Check the recolored GLB base-color factors within 0.000001.
 
+Run `--compare-live-authored-library-material` with the native bridge up,
+`CLO_AUTHORED_FABRIC_FIXTURE` set to the installed `V2_Woven_Poplin_1.zfab`,
+and a fresh shared `CLO_MCP_STATE`. Unset `CLO_RUST_CHECKPOINT_DIR`.
+Create one panel from scratch and assign the installed fabric by name
+with `#16375c`. Both writers save ZPAC, ZPRJ and a named checkpoint.
+Compare each of the five embedded texture payload hashes against the source
+ZFAB. Cross-open each output with both backends. Verify the only saved
+material is the assigned poplin, at index 0, with the base texture label
+and the exact RGBA returned by the MCP fabric API. This exposes native
+colorway conversions that can restore the default swatch after opening.
+
 Run `--compare-live-garment-to-project` with the native bridge up.
 Set `CLO_SCENE_OPEN_GARMENT` to the verified `multi-colorway-simulated.zpac`,
 and `CLO_MCP_STATE` to a fresh directory writable by both backends. Leave

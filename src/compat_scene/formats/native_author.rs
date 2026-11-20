@@ -8,6 +8,7 @@ use crate::compat_fit::{archive_pose_mesh, ArchivePoseMesh};
 use crate::compat_scene::{array, patterns};
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 const BOOL: u8 = 1;
 const INT: u8 = 4;
@@ -102,7 +103,7 @@ fn panel(
     value: &Value,
     slot: u32,
     next_id: &mut u32,
-    materials: &[Vec<u8>],
+    fabric: (usize, &[u8]),
     state: &Value,
     saved: Option<&Value>,
 ) -> Result<Panel, String> {
@@ -117,11 +118,7 @@ fn panel(
         return Err("native authoring requires editable outline points".into());
     }
     let edges = patterns::split_edges(&points);
-    let fabric_index = value["fabric_index"]
-        .as_u64()
-        .and_then(|index| usize::try_from(index).ok())
-        .filter(|&index| index < materials.len())
-        .ok_or("invalid native panel fabric assignment")?;
+    let (fabric_index, physical) = fabric;
     if ["half_symmetry", "hide", "freeze", "strengthen"]
         .into_iter()
         .any(|field| value[field] == true)
@@ -347,7 +344,7 @@ fn panel(
         (
             b"mapOriginPatternPhysicalProperty",
             MAP_TYPE,
-            &materials[fabric_index],
+            physical,
         ),
         (b"uiPatternType", UINT, &ZERO),
         (b"bPatternVisible3D", BOOL, TRUE),
@@ -499,7 +496,12 @@ fn material(fabric: &Value, id: u32, physical: &[u8]) -> Result<Vec<u8>, String>
     ])
 }
 
-pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
+pub(super) struct Garment {
+    pub body: Vec<u8>,
+    pub images: BTreeMap<String, Vec<u8>>,
+}
+
+pub(super) fn encode(state: &Value) -> Result<Garment, String> {
     let panels = array(state, "patterns");
     let fabrics = array(state, "fabrics");
     let colorways = array(state, "colorways");
@@ -521,16 +523,30 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
         .as_str()
         .ok_or("invalid native colorway name")?
         .as_bytes();
-    let properties = fabrics
+    let panel_materials = panels.iter().map(|panel| {
+        panel["fabric_index"].as_u64().and_then(|index| usize::try_from(index).ok())
+            .filter(|&index| index < fabrics.len()).ok_or("invalid native panel fabric assignment")
+    }).collect::<Result<Vec<_>, _>>()?;
+    let assigned = panel_materials.iter().copied().collect::<BTreeSet<_>>();
+    let uses_library_fabric = assigned.iter().any(|&index| fabrics[index]["info"]["source"] == "native_zfab");
+    let mut indices = vec![0; fabrics.len()];
+    let mut images = BTreeMap::new();
+    let mut image_total = 0;
+    let (fabrics, properties): (Vec<_>, Vec<_>) = fabrics
         .iter()
-        .map(physical)
-        .collect::<Result<Vec<_>, _>>()?;
-    let fabrics = fabrics
-        .iter()
-        .zip(&properties)
         .enumerate()
-        .map(|(index, (fabric, phys))| material(fabric, index as u32 + 1, phys))
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter(|(index, _)| !uses_library_fabric || assigned.contains(index))
+        .enumerate()
+        .map(|(slot, (index, fabric))| {
+            indices[index] = slot;
+            let id = slot as u32 + 1;
+            if fabric["info"]["source"] == "native_zfab" && !fabric["native_colorway_materials"].is_object() {
+                return super::native_fabric::author(fabric, id, &mut images, &mut image_total);
+            }
+            let physical = physical(fabric)?;
+            Ok((material(fabric, id, &physical)?, physical))
+        })
+        .collect::<Result<Vec<_>, String>>()?.into_iter().unzip();
     let mut next_id = fabrics.len() as u32 + 1;
     let meshes = array(&state["simulation"], "meshes");
     if meshes
@@ -548,7 +564,7 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
                 panel_value,
                 index as u32,
                 &mut next_id,
-                &properties,
+                (indices[panel_materials[index]], &properties[indices[panel_materials[index]]]),
                 state,
                 saved,
             )
@@ -594,7 +610,7 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
         (b"uiCurrentCoordinationIndex", UINT, &ZERO),
         (b"bIsTheNewColorway", BOOL, FALSE),
     ])?;
-    encode_map(&[
+    let body = encode_map(&[
         (b"qsClothIDListUTF8", BYTE_TYPE, b"Default"),
         (b"uiVersion", UINT, &1001u32.to_le_bytes()),
         (b"uiSaveType", UINT, &ZERO),
@@ -602,5 +618,6 @@ pub(super) fn encode(state: &Value) -> Result<Vec<u8>, String> {
         (b"mapColorWay", MAP_TYPE, &colorways),
         (b"mapPatternEditor", MAP_TYPE, &editor),
         (b"listFabric", LIST_TYPE, &records(&fabrics)?),
-    ])
+    ])?;
+    Ok(Garment { body, images })
 }

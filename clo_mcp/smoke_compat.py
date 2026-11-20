@@ -7068,6 +7068,84 @@ async def compare_live_authored_projects():
     print(json.dumps({"cases": reports, "result": "pass"}))
 
 
+async def compare_live_authored_library_material():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    fabric = Path(os.environ["CLO_AUTHORED_FABRIC_FIXTURE"])
+    assert root.is_dir() and fabric.is_file() and not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    maps = ("BASE_rgb_medium", "NRM", "DISP", "ROUGH", "MTL")
+
+    def image_hashes(archive):
+        return {channel: hashlib.sha256(archive.read(member)).hexdigest()
+                for channel in maps for member in archive.namelist()
+                if f"Woven_Poplin_1_{channel}" in member and member.endswith(".png")}
+
+    with zipfile.ZipFile(fabric) as source:
+        expected_images = image_hashes(source)
+        fixture_hash = hashlib.sha256(fabric.read_bytes()).hexdigest()
+    assert set(expected_images) == set(maps)
+    outputs = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for writer, session in backends:
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                assert await json_result(session, "pattern_create", {
+                    "name": "Poplin", "points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                }) == {"index": 0, "name": "Poplin"}
+                result = await json_result(session, "fabric_apply", {
+                    "fabric": fabric.stem, "color": "#16375c", "patterns": ["Poplin"],
+                })
+                assert result["fabric"]["name"] == "V2_Woven_Poplin_1", result
+                for format_name in ("zpac", "zprj", "checkpoint"):
+                    name = f"authored-poplin-{writer}-{format_name}"
+                    if format_name == "checkpoint":
+                        record = await json_result(session, "checkpoint_save", {"name": name})
+                        path = Path(record["path"])
+                        assert path.suffix == ".zprj" and record["name"] == name
+                    else:
+                        path = root / f"{name}.{format_name}"
+                        assert await json_result(session, "scene_save", {
+                            "path": str(path), "thumbnail": False,
+                        }) == {"path": str(path)}
+                    if path.suffix == ".zpac":
+                        with zipfile.ZipFile(path) as garment:
+                            assert image_hashes(garment) == expected_images, name
+                    else:
+                        with zipfile.ZipFile(path) as project:
+                            member, = [entry for entry in project.namelist() if entry.endswith(".zpac")]
+                            with zipfile.ZipFile(BytesIO(project.read(member))) as garment:
+                                assert image_hashes(garment) == expected_images, name
+                    outputs.append((writer, format_name, name, path))
+            reads = []
+            expected_color = struct.pack("<4f", 0x16 / 255, 0x37 / 255, 0x5c / 255, 1.0).hex()
+            for writer, kind, name, path in outputs:
+                for reader, session in backends:
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    if kind == "checkpoint":
+                        await json_result(session, "checkpoint_restore", {"name": name})
+                    else:
+                        await json_result(session, "scene_open", {"path": str(path)})
+                    result = await read_composed_archive(session)
+                    assert result["materials"] == 1 and result["catalog_names"] == ["V2_Woven_Poplin_1"]
+                    assert [(p["name"], p["fabric_index"]) for p in result["patterns"]] == [("Poplin", 0)]
+                    assert result["fabric_rgba_f32"] == [[expected_color]], (writer, kind, reader, result)
+                    detail, = result["fabrics"]["fabrics"]
+                    assert detail["info"]["Texture"] == "Woven_Poplin_1_BASE_rgb_medium", detail
+                    reads.append({"writer": writer, "reader": reader, "format": kind})
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"result": "pass", "fixture_sha256": fixture_hash, "images": expected_images,
+                      "outputs": len(outputs), "reads": reads}))
+
+
 async def compare_live_authored_curves():
     root = Path(os.environ["CLO_MCP_STATE"])
     assert root.is_dir()
@@ -8499,6 +8577,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-authored-projects", action="store_const", dest="comparison",
                              const=compare_live_authored_projects,
                              help="write and cross-open native projects created from editable MCP panels")
+    comparisons.add_argument("--compare-live-authored-library-material", action="store_const", dest="comparison",
+                             const=compare_live_authored_library_material,
+                             help="cross-open new native archives with a recolored library fabric")
     comparisons.add_argument("--compare-live-authored-curves", action="store_const", dest="comparison",
                              const=compare_live_authored_curves,
                              help="cross-open ZPRJ and ZPAC containing newly authored editable curves")

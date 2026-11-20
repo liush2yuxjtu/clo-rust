@@ -239,7 +239,9 @@ fn cache_image(bytes: &[u8]) -> Result<PathBuf, String> {
     }
 }
 
-fn load_image<R: Read + Seek>(archive: &mut ZipArchive<R>, name: &str) -> Result<PathBuf, String> {
+pub(super) fn image_bytes<R: Read + Seek>(
+    archive: &mut ZipArchive<R>, name: &str,
+) -> Result<Vec<u8>, String> {
     let mut file = archive.by_name(name).map_err(|e| e.to_string())?;
     if file.is_dir() || file.size() > MAX_IMAGE {
         return Err("native texture image exceeds supported size".into());
@@ -255,7 +257,11 @@ fn load_image<R: Read + Seek>(archive: &mut ZipArchive<R>, name: &str) -> Result
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") && !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         return Err("native texture is not PNG or JPEG".into());
     }
-    cache_image(&bytes)
+    Ok(bytes)
+}
+
+fn load_image<R: Read + Seek>(archive: &mut ZipArchive<R>, name: &str) -> Result<PathBuf, String> {
+    cache_image(&image_bytes(archive, name)?)
 }
 
 fn front_texture_refs<'a>(
