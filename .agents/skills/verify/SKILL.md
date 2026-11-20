@@ -185,6 +185,11 @@ empty `garment_last_spec`; a rebuild before its first build returns an error.
 Set `CLO_MCP_OFFICIAL_COMMAND` to also check empty history and the no-build
 error on the official MCP server without requiring its live bridge.
 
+Run `--verify-appended-build-report` to append a top beside existing
+same-name panels. Compare the build's `a`, `b`, and `ok` sewing rows to the
+plan, then reopen the project to verify the distinct panel IDs, actual
+fabric and seam assignments, and the particle distance set by a zero-step build.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

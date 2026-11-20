@@ -1332,13 +1332,14 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         .iter()
         .filter_map(|p| p["id"].as_u64())
         .max()
-        .map_or(0, |n| n + 1);
+        .map_or(Some(0), |n| n.checked_add(1))
+        .ok_or("pattern ID space exhausted")?;
     let mut ids = Map::new();
     let mut summary = Map::new();
     let mut names = Vec::new();
     for (position, panel) in rendered_panels.iter().enumerate() {
         let name = panel["name"].as_str().unwrap().to_owned();
-        let id = next_id + position as u64;
+        let id = next_id.checked_add(position as u64).ok_or("pattern ID space exhausted")?;
         ids.insert(name.clone(), json!(id));
         names.push(json!(name));
         let mut inserted = panel.clone();
@@ -1355,6 +1356,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             .collect();
         summary.insert(name,json!({"index":array(&next["patterns"]).len()-1,"arrangement":panel["arrangement"],"lines":lines}));
     }
+    let mut sewing_report = Vec::new();
     for (i, seam) in array(&draft["seams"]).iter().enumerate() {
         let a = seam["piece_a"].as_str().unwrap();
         let b = seam["piece_b"].as_str().unwrap();
@@ -1362,12 +1364,20 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         let seam_id = state_seams.len();
         state_seams.push(json!({"id":seam_id,"name":format!("{a}/{b}/{}",i+1),"pattern_a":ids[a],"pattern_b":ids[b],
             "line_a":seam["line_a"],"line_b":seam["line_b"],"dir_a":seam["dir_a"],"dir_b":seam["dir_b"],"gather":seam["gather"]}));
+        sewing_report.push(json!({"a":format!("{a}:{}", seam["line_a"]),
+            "b":format!("{b}:{}", seam["line_b"]),"ok":true}));
     }
     let fabric = assets::apply_material(
         &json!({"color":draft["fabric"]["color"],"patterns":ids.values().cloned().collect::<Vec<_>>()}),
         &mut next,
         material,
     )?;
+    let distance = number(&draft["simulation"], "particle_distance", 20.0);
+    if distance > 0.0 {
+        for pattern in array_mut(&mut next, "patterns") {
+            pattern["particle_distance"] = json!(distance);
+        }
+    }
     next["simulation"] = Value::Null;
     let steps = args["simulate_steps"]
         .as_i64()
@@ -1427,7 +1437,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         json!([])
     };
     Ok(json!({"spec":draft["spec"],"avatar":state["avatar"]["name"],"measurements":source,
-        "pieces":summary,"seams":draft["seams"],"fabric":{"file":fabric["file"],"matched":fabric["matched"],"color":draft["fabric"]["color"]},
+        "pieces":summary,"seams":sewing_report,"fabric":{"file":fabric["file"],"matched":fabric["matched"],"color":draft["fabric"]["color"]},
         "arrangement":[],"warnings":draft["warnings"],"notes":draft["notes"],"simulation":sim,"checkpoint_before_build":checkpoint,
         "images":images}))
 }

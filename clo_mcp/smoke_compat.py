@@ -1355,6 +1355,65 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_appended_build_report():
+    with TemporaryDirectory(prefix="clo-appended-build-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+                       "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints")}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            for name in ("Front", "Back"):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[0, 0], [100, 0], [40, 70]],
+                })
+            await json_result(rust, "fabric_apply", {"fabric": "cotton", "color": "red"})
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
+                                           "pattern_b": "Back", "line_b": 0})
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            _, before = await save("before")
+            spec = {"garment": "top", "length": "cropped", "fabric": "linen",
+                    "color": "navy", "particle_distance": 76}
+            plan = await json_result(rust, "garment_plan_preview", {"spec": spec})
+            request = {"spec": spec, "replace_existing": False, "simulate_steps": 0, "snapshots": False}
+            response = await json_result(rust, "garment_build", request)
+            assert response["simulation"] is None and response["checkpoint_before_build"] is None
+            expected_report = [
+                {"a": f"{seam['piece_a']}:{seam['line_a']}",
+                 "b": f"{seam['piece_b']}:{seam['line_b']}", "ok": True}
+                for seam in plan["seams"]
+            ]
+            assert response["seams"] == expected_report
+            assert [response["pieces"][name]["index"] for name in ("Front", "Back")] == [2, 3]
+            path, after = await save("after")
+            old, new = after["patterns"][:2], after["patterns"][2:]
+            assert [panel["name"] for panel in old] == [panel["name"] for panel in new] == ["Front", "Back"]
+            assert [p["fabric_index"] for p in old] == [p["fabric_index"] for p in before["patterns"]]
+            assert after["fabrics"][:-1] == before["fabrics"]
+            assert all(p["fabric_index"] == after["fabrics"][-1]["index"] for p in new)
+            assert after["fabrics"][-1]["color"] == [0.1, 0.16, 0.42]
+            assert after["seams"][0] == before["seams"][0]
+            ids = {panel["name"]: panel["id"] for panel in new}
+            assert len({panel["id"] for panel in after["patterns"]}) == 4
+            for stored, drafted in zip(after["seams"][1:], plan["seams"], strict=True):
+                for end in ("a", "b"):
+                    assert stored[f"pattern_{end}"] == ids[drafted[f"piece_{end}"]]
+                    assert stored[f"line_{end}"] == drafted[f"line_{end}"]
+                    assert stored[f"dir_{end}"] == drafted[f"dir_{end}"]
+            await json_result(rust, "scene_open", {"path": str(path)})
+            for index in range(4):
+                panel = await json_result(rust, "pattern_info", {"pattern": str(index)})
+                assert panel["particle_distance"] == 76
+    print(json.dumps({"tools": ["garment_build", "pattern_info", "scene_save"],
+                      "case": "append beside same-name patterns",
+                      "piece_indices": [2, 3], "sewing": response["seams"],
+                      "fabric_and_existing_ids": "pass", "zero_step_particle_distance": 76}))
+
+
 async def verify_build_checkpoints():
     with TemporaryDirectory(prefix="clo-build-checkpoint-") as directory:
         root = Path(directory)
@@ -1678,6 +1737,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-build-checkpoints", action="store_const", dest="comparison",
                              const=verify_build_checkpoints,
                              help="verify automatic pre-build checkpoints and replacement cleanup")
+    comparisons.add_argument("--verify-appended-build-report", action="store_const", dest="comparison",
+                             const=verify_appended_build_report,
+                             help="verify public build sewing rows and append beside same-name pieces")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1691,7 +1753,8 @@ if __name__ == "__main__":
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
-                                verify_garment_session_history, verify_build_checkpoints)
+                                verify_garment_session_history, verify_build_checkpoints,
+                                verify_appended_build_report)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
