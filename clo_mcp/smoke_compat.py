@@ -757,6 +757,76 @@ async def compare_neckline_and_sleeve_preview():
                       "comparisons": report, "last_spec_unchanged": True, "invalid_spec_error": "pass"}))
 
 
+async def compare_draft_material_preview():
+    cases = [
+        ("cotton", "#ABc"),
+        ("lightweight denim", "rose gold"),
+        ("double gauze cotton", "hot pink"),
+        ("matte jersey", "red sky blue"),
+        ("silk organza", "navy gold"),
+        ("linen", [12, 64, 155]),
+        ("precise weave", [0.25, "0.5", 0.75, 1.0]),
+        ("V2_Woven_Denim_1", "mauve"),
+        ("not-present.zfab", "#not-a-hex-color"),
+        ("  Future/Swatch.ZFAB  ", [0.25, 0.5]),
+        (None, None),
+    ]
+    invalid_cases = [
+        {"fabric": ["cotton"]},
+        {"color": "#xyz"},
+        {"color": ["not a number", 0, 1]},
+    ]
+    base = {"garment": "top", "length": "waist"}
+    report = []
+    with TemporaryDirectory(prefix="clo-preview-material-") as directory:
+        root = Path(directory)
+        (root / "V2_Woven_Poplin_1.zfab").write_text("Invalid test asset")
+        environment = {"CLO_RUST_FABRIC_DIR": directory, "CLO_RUST_AVATAR_DIR": ""}
+        async with open_backend("official") as official, open_backend("rust", environment) as rust:
+            for session in (official, rust):
+                await inspect_contract(session)
+            for fabric, color in cases:
+                request = {"spec": base | {"fabric": fabric, "color": color}}
+                expected = await json_result(official, "garment_plan_preview", request)
+                observed = await json_result(rust, "garment_plan_preview", request)
+                assert expected.keys() == observed.keys(), request
+                for key in expected:
+                    assert expected[key] == observed[key], (request, key, expected[key], observed[key])
+                report.append(observed["fabric"])
+            for session in (official, rust):
+                for spec in invalid_cases:
+                    assert (await session.call_tool("garment_plan_preview", {"spec": base | spec})).isError, spec
+                assert await json_result(session, "garment_last_spec") == {"spec": None, "pieces": []}
+        build_environment = {
+            "CLO_RUST_FABRIC_DIR": "",
+            "CLO_RUST_AVATAR_DIR": "",
+            "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints"),
+        }
+        async with open_backend("rust", build_environment) as rust:
+            request = {"spec": base | {"fabric": "cotton", "color": "rose gold"},
+                       "simulate_steps": 0, "snapshots": False}
+            built = await json_result(rust, "garment_build", request)
+            expected_color = [0.83, 0.68, 0.22]
+            assert built["fabric"]["color"] == expected_color, built["fabric"]
+            assert (await json_result(rust, "garment_last_spec"))["spec"] == built["spec"]
+            saved_path = root / "gold-top.json"
+            await json_result(rust, "scene_save", {"path": str(saved_path), "thumbnail": False})
+            state = json.loads(saved_path.read_text())["scene"]
+            assert state["fabrics"][-1]["color"] == expected_color, state["fabrics"]
+            assert all(panel["fabric_index"] == state["fabrics"][-1]["index"]
+                       for panel in state["patterns"])
+            before = await json_result(rust, "checkpoint_list")
+            bad = await rust.call_tool("garment_rebuild", {"changes": {"fabric": str(root / "missing.zfab")}})
+            assert bad.isError
+            assert await json_result(rust, "checkpoint_list") == before
+            assert (await json_result(rust, "garment_last_spec"))["spec"] == built["spec"]
+    print(json.dumps({
+        "tool": "garment_plan_preview", "case": "fabric and color",
+        "materials": report, "invalid_cases": len(invalid_cases),
+        "last_spec_unchanged": True, "rust_build_color_and_invalid_rebuild": "pass",
+    }))
+
+
 async def compare_gathered_draft_preview():
     cases = (
         {"garment": "skirt", "silhouette": "tiered", "tiers": 4, "gather_ratio": 1.25, "length": "midi"},
@@ -1163,6 +1233,9 @@ if __name__ == "__main__":
                              action="store_const", dest="comparison",
                              const=compare_neckline_and_sleeve_preview,
                              help="compare neckline fallbacks and sleeve seam warnings")
+    comparisons.add_argument("--compare-draft-material-preview", action="store_const", dest="comparison",
+                             const=compare_draft_material_preview,
+                             help="compare garment fabric aliases, color and preview validation")
     comparisons.add_argument("--compare-gathered-draft-preview", action="store_const", dest="comparison",
                              const=compare_gathered_draft_preview,
                              help="compare offline gathered and tiered garment draft previews")

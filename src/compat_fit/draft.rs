@@ -1243,10 +1243,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             edge.as_object_mut().unwrap().remove("raw_length");
         }
     }
-    let mut material = assets::selected_material(string(&spec, "fabric", ""))?;
-    material["color"] = json!(assets::parse_color(&spec["color"])?);
-    material["color_text"] = spec["color"].clone();
-    material.as_object_mut().unwrap().remove("path");
+    let material = assets::planned_material(&spec["fabric"], &spec["color"])?;
     let steps =
         spec["simulate_steps"]
             .as_u64()
@@ -1315,6 +1312,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     }
     let (body, source) = assets::body_measurements(&next["avatar"], false);
     let draft = plan(&spec, &body, &source)?;
+    let material = assets::load_material(string(&draft["spec"], "fabric", ""))?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
         crate::compat_scene::dispatch("checkpoint_save", &json!({}), &mut next)
@@ -1365,10 +1363,10 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         state_seams.push(json!({"id":seam_id,"name":format!("{a}/{b}/{}",i+1),"pattern_a":ids[a],"pattern_b":ids[b],
             "line_a":seam["line_a"],"line_b":seam["line_b"],"dir_a":seam["dir_a"],"dir_b":seam["dir_b"],"gather":seam["gather"]}));
     }
-    let fabric = assets::fabric_apply(
-        &json!({"fabric":string(&draft["spec"],"fabric",""),"color":draft["fabric"]["color"],
-        "patterns":ids.values().cloned().collect::<Vec<_>>()}),
+    let fabric = assets::apply_material(
+        &json!({"color":draft["fabric"]["color"],"patterns":ids.values().cloned().collect::<Vec<_>>()}),
         &mut next,
+        material,
     )?;
     next["simulation"] = Value::Null;
     let steps = args["simulate_steps"]

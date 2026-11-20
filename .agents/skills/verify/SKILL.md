@@ -129,6 +129,14 @@ It includes seam warning text, order, and counts and checks that invalid input
 is rejected and `garment_last_spec` remains empty. This comparison uses both
 MCP backends without needing the CLO bridge.
 
+Use `--compare-draft-material-preview` to compare fabric stems, matching
+keywords, RGB and unmodified color input in the full standard-measurement
+preview. The cases cover missing and unreadable fabric assets, named and
+hex colors, RGB arrays, defaults and rejected arguments. This comparison runs
+without a live CLO bridge. The same recipe builds one Rust garment with a
+named color and verifies that rebuilding with a missing fabric leaves the
+last spec and checkpoint list unchanged.
+
 Use `--compare-gathered-draft-preview` for standalone gathered skirts,
 tiered skirts and dresses, empire, babydoll, drop-waist, smock, dirndl and wrap
 presets. Compare complete preview results, including tier layers, intentional

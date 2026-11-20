@@ -865,7 +865,7 @@ fn native_fabric_path(reference: &str) -> Result<Option<(PathBuf, &'static str)>
     })
 }
 
-fn material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String> {
+pub(super) fn load_material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String> {
     let reference = reference.trim();
     let path = Path::new(reference);
     if let Some((path, matched)) = native_fabric_path(reference)? {
@@ -917,26 +917,25 @@ fn material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String>
     ))
 }
 
-pub fn selected_material(reference: &str) -> Result<Value, String> {
-    if let Some((path, matched)) = native_fabric_path(reference.trim())? {
-        let path = path.canonicalize().map_err(|e| e.to_string())?;
-        let (stem, _) = library_keyword(reference);
-        let library_stem = if matched == "path" {
-            reference.trim()
-        } else {
-            stem
-        };
-        return Ok(json!({"library_stem":library_stem,"matched":matched,"path":path}));
-    }
-    let (material, matched, file) = material(reference)?;
-    let library_stem = match matched.as_str() {
-        "default (crepe)" | "crepe" | "crepe de chine" | "cdc" => "V2_Woven_Crepe_CDC_1",
-        "cotton" | "poplin" | "muslin" | "broadcloth" => "V2_Woven_Cotton_Poplin_1",
-        "satin" | "silk" | "charmeuse" | "duchess" => "V2_Woven_Satin_1",
-        "denim" | "jean" => "V2_Woven_Denim_Jean_1",
-        _ => material["name"].as_str().unwrap_or("Native Fabric"),
+pub(super) fn planned_material(reference: &Value, color: &Value) -> Result<Value, String> {
+    let reference = match reference {
+        Value::String(reference) => reference,
+        Value::Null | Value::Bool(false) => "",
+        Value::Number(value) if value.as_f64() == Some(0.0) => "",
+        Value::Array(value) if value.is_empty() => "",
+        Value::Object(value) if value.is_empty() => "",
+        _ => return Err("garment fabric must be a string".into()),
     };
-    Ok(json!({"library_stem":library_stem,"matched":matched,"path":file}))
+    let (stem, matched) = if reference.trim().to_ascii_lowercase().ends_with(".zfab") {
+        (reference, "path")
+    } else {
+        library_keyword(reference)
+    };
+    let rgb = match color.as_array().filter(|channels| channels.len() >= 3) {
+        Some(channels) => normalized_rgb(channels)?,
+        None => parse_color_text(color.as_str().unwrap_or_default())?,
+    };
+    Ok(json!({"library_stem":stem,"matched":matched,"color":rgb,"color_text":color}))
 }
 
 pub fn fabric_library(args: &Value) -> Value {
@@ -1036,33 +1035,45 @@ fn update_material_texture(fabric: &mut Value, kind: &str, path: &Path) {
     }
 }
 
+fn normalized_rgb(channels: &[Value]) -> Result<[f64; 3], String> {
+    let mut rgb = [0.0; 3];
+    for (channel, value) in rgb.iter_mut().zip(channels) {
+        *channel = value.as_f64()
+            .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+            .or_else(|| value.as_bool().map(|value| f64::from(u8::from(value))))
+            .filter(|value| value.is_finite())
+            .ok_or("RGB channels must be finite numbers")?;
+    }
+    let scale = if rgb.iter().any(|channel| *channel > 1.0) { 255.0 } else { 1.0 };
+    Ok(rgb.map(|channel| channel / scale))
+}
+
 pub fn parse_color(input: &Value) -> Result<[f64; 3], String> {
-    if let Some(list) = input.as_array() {
-        if list.len() < 3 {
-            return Err("RGB requires three channels".into());
-        }
-        let nums = [list[0].as_f64(), list[1].as_f64(), list[2].as_f64()];
-        if let [Some(r), Some(g), Some(b)] = nums {
-            let scale = if r.max(g).max(b) > 1.0 { 255.0 } else { 1.0 };
-            if [r, g, b].iter().all(|v| (0.0..=scale).contains(v)) {
-                return Ok([r / scale, g / scale, b / scale]);
-            }
-        }
+    let Some(channels) = input.as_array() else {
+        return parse_color_text(input.as_str().unwrap_or_default());
+    };
+    if channels.len() < 3 {
+        return Err("RGB requires three channels".into());
+    }
+    let rgb = normalized_rgb(channels)?;
+    if rgb.iter().any(|v| !(0.0..=1.0).contains(v)) {
         return Err("RGB channels are out of range".into());
     }
-    let value = input.as_str().unwrap_or("").trim().to_ascii_lowercase();
-    if let Some(hex) = value.strip_prefix('#') {
+    Ok(rgb)
+}
+
+fn parse_color_text(input: &str) -> Result<[f64; 3], String> {
+    let value = input.trim().to_ascii_lowercase();
+    if let Some(hex) = value.strip_prefix('#').filter(|hex| matches!(hex.len(), 3 | 6)) {
         if !hex.bytes().all(|v| v.is_ascii_hexdigit()) {
             return Err(format!("invalid RGB color {value:?}"));
         }
-        if hex.len() == 3 || hex.len() == 6 {
-            let stride = hex.len() / 3;
-            return Ok(std::array::from_fn(|i| {
-                let code = &hex[stride * i..stride * (i + 1)];
-                f64::from(u8::from_str_radix(code, 16).expect("ASCII hex"))
-                    / if stride == 1 { 15.0 } else { 255.0 }
-            }));
-        }
+        let stride = hex.len() / 3;
+        return Ok(std::array::from_fn(|i| {
+            let code = &hex[stride * i..stride * (i + 1)];
+            f64::from(u8::from_str_radix(code, 16).expect("ASCII hex"))
+                / if stride == 1 { 15.0 } else { 255.0 }
+        }));
     }
     let colors = [
         ("black", [0.05, 0.05, 0.05]),
@@ -1072,28 +1083,55 @@ pub fn parse_color(input: &Value) -> Result<[f64; 3], String> {
         ("red", [0.78, 0.08, 0.12]),
         ("crimson", [0.7, 0.05, 0.15]),
         ("burgundy", [0.45, 0.06, 0.14]),
+        ("wine", [0.4, 0.08, 0.16]),
         ("pink", [0.95, 0.6, 0.72]),
+        ("blush", [0.93, 0.76, 0.75]),
         ("hot pink", [0.92, 0.2, 0.55]),
+        ("fuchsia", [0.85, 0.1, 0.5]),
+        ("coral", [0.98, 0.5, 0.45]),
         ("orange", [0.95, 0.5, 0.12]),
+        ("peach", [0.98, 0.8, 0.65]),
         ("yellow", [0.98, 0.85, 0.2]),
+        ("mustard", [0.85, 0.65, 0.13]),
+        ("gold", [0.83, 0.68, 0.22]),
         ("green", [0.15, 0.5, 0.25]),
+        ("emerald", [0.02, 0.55, 0.35]),
+        ("sage", [0.6, 0.7, 0.55]),
         ("olive", [0.45, 0.48, 0.2]),
+        ("mint", [0.6, 0.9, 0.75]),
+        ("forest", [0.05, 0.3, 0.15]),
         ("teal", [0.05, 0.45, 0.5]),
+        ("turquoise", [0.2, 0.75, 0.75]),
         ("blue", [0.15, 0.3, 0.75]),
         ("navy", [0.1, 0.16, 0.42]),
         ("royal blue", [0.15, 0.25, 0.8]),
         ("sky blue", [0.55, 0.75, 0.95]),
+        ("baby blue", [0.65, 0.8, 0.95]),
+        ("cobalt", [0.0, 0.28, 0.67]),
         ("purple", [0.45, 0.2, 0.6]),
         ("lavender", [0.75, 0.68, 0.9]),
+        ("lilac", [0.78, 0.65, 0.85]),
+        ("violet", [0.5, 0.25, 0.75]),
+        ("plum", [0.5, 0.15, 0.35]),
         ("brown", [0.4, 0.25, 0.15]),
+        ("chocolate", [0.3, 0.17, 0.1]),
+        ("tan", [0.8, 0.65, 0.45]),
         ("beige", [0.85, 0.78, 0.65]),
+        ("camel", [0.76, 0.6, 0.42]),
+        ("khaki", [0.7, 0.65, 0.45]),
         ("grey", [0.5, 0.5, 0.5]),
         ("gray", [0.5, 0.5, 0.5]),
         ("charcoal", [0.2, 0.2, 0.22]),
         ("silver", [0.75, 0.75, 0.78]),
+        ("nude", [0.87, 0.72, 0.6]),
+        ("champagne", [0.95, 0.87, 0.72]),
+        ("rose", [0.85, 0.45, 0.55]),
+        ("magenta", [0.8, 0.1, 0.6]),
+        ("cyan", [0.1, 0.7, 0.8]),
     ];
     Ok(colors
         .iter()
+        .rev()
         .filter(|(name, _)| value.contains(name))
         .max_by_key(|(name, _)| name.len())
         .map_or([0.85; 3], |(_, rgb)| *rgb))
@@ -1138,7 +1176,14 @@ fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
 }
 
 pub fn fabric_apply(args: &Value, state: &mut Value) -> Result<Value, String> {
-    let (mut material, matched, file) = material(string(args, "fabric", ""))?;
+    apply_material(args, state, load_material(string(args, "fabric", ""))?)
+}
+
+pub(super) fn apply_material(
+    args: &Value,
+    state: &mut Value,
+    (mut material, matched, file): (Value, String, Option<PathBuf>),
+) -> Result<Value, String> {
     let patterns = array(&state["patterns"]);
     let pattern_refs = array(&args["patterns"]);
     let selected: Vec<_> = if pattern_refs.is_empty() {
