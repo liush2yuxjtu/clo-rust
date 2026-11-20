@@ -198,6 +198,13 @@ avatar cache is ignored, the saved placement is available after reopening
 without the cache, and a manually changed arrangement takes precedence.
 The standard-measurement preview stays independent of calibration.
 
+Run `--verify-outline-edit-remaps` to exercise repeated relative moves and
+line/point deletion and unfolding in a portable scene. Reopen each edited
+scene and verify that unaffected sewing uses the new line index, the
+elastic and shirring settings follow the surviving lines, and a seam
+spanning a removed line is discarded. Check that an invalid edit leaves
+the surviving sewing unchanged.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

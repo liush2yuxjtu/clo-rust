@@ -79,6 +79,47 @@ pub(super) fn remove_metadata_for(state: &mut Value, invalid: &[Value]) {
     }
 }
 
+pub(super) fn remap_outline(state: &mut Value, id: &Value, lines: &[Option<usize>]) {
+    let mut removed = HashSet::new();
+    vec_mut(state, "native_seam_groups").retain_mut(|group| {
+        let intact = group["segments"].as_array_mut().unwrap().iter_mut()
+            .flat_map(|pair| pair.as_array_mut().into_iter().flatten())
+            .all(|endpoint| {
+                if endpoint["pattern_id"] != *id || endpoint["shape_depth"] != 1 {
+                    return true;
+                }
+                remap_span(endpoint, lines).is_some()
+            });
+        if !intact {
+            removed.insert(group["id"].clone());
+        }
+        intact
+    });
+    vec_mut(state, "seams").retain(|seam| !removed.contains(&seam["native_group"]));
+}
+
+fn remap_span(endpoint: &mut Value, lines: &[Option<usize>]) -> Option<()> {
+    let start = usize::try_from(endpoint["start_line"].as_u64()?).ok()?;
+    let end = usize::try_from(endpoint["end_line"].as_u64()?).ok()?;
+    let forward = endpoint["direction"].as_bool()?;
+    let start_new = lines.get(start).copied().flatten()?;
+    let end_new = lines.get(end).copied().flatten()?;
+    // A spanning seam also uses every intermediate edge, including across
+    // the original outline's last-to-first junction.
+    let mut line = start;
+    while line != end {
+        line = if forward {
+            (line + 1) % lines.len()
+        } else {
+            line.checked_sub(1).unwrap_or(lines.len() - 1)
+        };
+        lines[line]?;
+    }
+    endpoint["start_line"] = json!(start_new);
+    endpoint["end_line"] = json!(end_new);
+    Some(())
+}
+
 pub(super) fn validate(content: &Value, patterns: &[Value], seams: &[Value]) -> Result<(), String> {
     let Some(native) = content.get("native_seam_groups") else {
         if seams.iter().any(|seam| seam.get("native_group").is_some()) {

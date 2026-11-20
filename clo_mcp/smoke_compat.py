@@ -1355,6 +1355,80 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_outline_edit_remaps():
+    with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
+        root = Path(directory)
+        async with open_backend("rust") as rust:
+            await inspect_contract(rust)
+            await json_result(rust, "pattern_create", {
+                "name": "Front", "points": [[0, 0], [100, 0], [120, 50], [100, 100], [0, 100]],
+            })
+            await json_result(rust, "pattern_create", {
+                "name": "Back", "points": [[200, 0], [300, 0], [300, 100], [200, 100]],
+            })
+            moved = await json_result(rust, "pattern_edit_points", {
+                "pattern": "Back", "moves": [{"point": 0, "dx": 3}, {"point": 0, "dx": 8}],
+            })
+            assert [point["x"] for point in moved["moved"]] == [203, 208]
+            await json_result(rust, "pattern_ops", {"pattern": "Front", "op": "elastic",
+                                                   "args": {"line": -1, "strength": 0.5}})
+            await json_result(rust, "pattern_ops", {"pattern": "Front", "op": "elastic",
+                                                   "args": {"line": 3, "total_length": 50}})
+            await json_result(rust, "pattern_ops", {"pattern": "Front", "op": "shirring",
+                                                   "args": {"line": 4}})
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 3,
+                                            "pattern_b": "Back", "line_b": 0})
+
+            fixture = root / "before.clorust"
+            await json_result(rust, "scene_save", {"path": str(fixture), "thumbnail": False})
+            document = json.loads(fixture.read_text())
+            original = document["scene"]
+            a, b = (panel["id"] for panel in original["patterns"])
+
+            def edge(panel, start, end):
+                return {"pattern_id": panel, "shape_depth": 1, "start_line": start, "end_line": end,
+                        "start_ratio": 0.0, "end_ratio": 1.0, "direction": True}
+
+            original["seams"][0]["native_group"] = 1
+            original["native_seam_groups"] = [
+                {"id": 1, "name": "Keep", "segments": [[edge(a, 3, 3), edge(b, 0, 0)]],
+                 "active": True, "restored": True},
+                {"id": 2, "name": "Affected", "segments": [[edge(a, 4, 2), edge(b, 1, 1)]],
+                 "active": True, "restored": False},
+            ]
+            fixture.write_text(json.dumps(document))
+            report = []
+            for op, args, line, shirring in (
+                ("delete_point", {"point": 1}, 2, 3),
+                ("delete_line", {"line": 1}, 2, 3),
+                ("unfold", {"line": 4, "half_symmetry": False}, 3, None),
+            ):
+                await json_result(rust, "scene_open", {"path": str(fixture)})
+                await json_result(rust, "pattern_ops", {"pattern": "Front", "op": op, "args": args})
+                path = root / f"{op}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                await json_result(rust, "scene_open", {"path": str(path)})
+                groups = await json_result(rust, "seams_list")
+                group, = groups["groups"]
+                assert group["name"] == "Keep"
+                endpoint = group["native_segments"][0][0]
+                assert endpoint["start_line"] == endpoint["end_line"] == line
+                edited = json.loads(path.read_text())["scene"]
+                seam, = edited["seams"]
+                assert seam["line_a"] == line and seam["native_group"] == 1
+                properties = edited["patterns"][0]["line_properties"]
+                assert properties[str(line)]["elastic"]["total_length"] == 50
+                assert properties["-1"]["elastic"]["strength"] == 0.5
+                shirred = [int(n) for n, p in properties.items() if p.get("shirring", {}).get("on")]
+                assert shirred == ([] if shirring is None else [shirring])
+                invalid = await rust.call_tool("pattern_ops", {"pattern": "Front", "op": "delete_point",
+                                                               "args": {"point": 99}})
+                assert invalid.isError and await json_result(rust, "seams_list") == groups
+                report.append({"operation": op, "retained_line": line, "native_groups": groups["count"]})
+    print(json.dumps({"tools": ["pattern_edit_points", "pattern_ops", "seams_list", "scene_open"],
+                      "case": "outline-edit seam remap", "edits": report, "repeated_relative_move": "pass"}))
+
+
 async def verify_calibrated_build_arrangement():
     with TemporaryDirectory(prefix="clo-build-arrangement-") as directory:
         root = Path(directory)
@@ -1806,6 +1880,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-calibrated-build-arrangement", action="store_const", dest="comparison",
                              const=verify_calibrated_build_arrangement,
                              help="verify build placement using saved avatar arrangement calibration")
+    comparisons.add_argument("--verify-outline-edit-remaps", action="store_const", dest="comparison",
+                             const=verify_outline_edit_remaps,
+                             help="verify boundary edits preserve unaffected sewing and edge properties")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1820,7 +1897,8 @@ if __name__ == "__main__":
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,
-                                verify_appended_build_report, verify_calibrated_build_arrangement)
+                                verify_appended_build_report, verify_calibrated_build_arrangement,
+                                verify_outline_edit_remaps)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -498,13 +498,14 @@ pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
 pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &args["pattern"])?;
     let mut points = points(&state["patterns"][i])?;
+    let original = points.clone();
     let corners = corner_offsets(&points);
     let [dx, dy] = offset(&state["patterns"][i]);
     let mut moved = Vec::new();
     for change in args["moves"].as_array().ok_or("moves must be an array")? {
         let cursor = index(change, "point")?;
         let position = *corners.get(cursor).ok_or("point index is out of range")?;
-        let p = points[position];
+        let p = original[position];
         let (x, y) = if change.get("x").is_some() || change.get("y").is_some() {
             (number(change, "x")?, number(change, "y")?)
         } else {
@@ -691,7 +692,10 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value) -> Result<(), St
     Ok(())
 }
 
-fn remap_seams(state: &mut Value, id: &Value, remap: impl Fn(usize) -> Option<usize>) {
+fn remap_outline(state: &mut Value, pattern: &mut Value, lines: &[Option<usize>]) {
+    let id = &pattern["id"];
+    let remap = |line: usize| lines.get(line).copied().flatten();
+    super::annotations::remap_outline(state, id, lines);
     vec_mut(state, "seams").retain_mut(|seam| {
         for (piece, line) in [("pattern_a", "line_a"), ("pattern_b", "line_b")] {
             if &seam[piece] != id {
@@ -708,6 +712,17 @@ fn remap_seams(state: &mut Value, id: &Value, remap: impl Fn(usize) -> Option<us
         }
         true
     });
+    if let Some(properties) = pattern["line_properties"].as_object() {
+        let migrated = properties.iter().filter_map(|(line, settings)| {
+            let key = if line == "-1" {
+                line.clone()
+            } else {
+                remap(line.parse().ok()?)?.to_string()
+            };
+            Some((key, settings.clone()))
+        }).collect::<serde_json::Map<_, _>>();
+        pattern["line_properties"] = json!(migrated);
+    }
 }
 
 fn remove_point(pattern: &mut Value, corner: usize) -> Result<(), String> {
@@ -733,7 +748,6 @@ fn remove_point(pattern: &mut Value, corner: usize) -> Result<(), String> {
             .filter_map(|(i, p)| (!remove.contains(&i)).then_some(p))
             .collect(),
     );
-    pattern["line_properties"] = Value::Null;
     Ok(())
 }
 
@@ -786,16 +800,14 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             });
         }
         "unfold" => {
-            let id = pattern["id"].clone();
             let fold = index(args, "line")?;
             let count = corner_offsets(&points(&pattern)?).len();
             expand(&mut pattern, fold, flag(args, "half_symmetry", true))?;
-            pattern["line_properties"] = Value::Null;
-            super::annotations::remove_metadata_for(state, &[id.clone()]);
             let first = (fold + 1) % count;
-            remap_seams(state, &id, |line| {
+            let mapping: Vec<_> = (0..count).map(|line| {
                 (line != fold).then(|| (line + count - first) % count)
-            });
+            }).collect();
+            remap_outline(state, &mut pattern, &mapping);
             result = json!({"ok": true});
         }
         "layer" => {
@@ -814,11 +826,11 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             let corner = index(args, if op == "delete_line" { "line" } else { "point" })?;
             let count = corner_offsets(&points(&pattern)?).len();
             remove_point(&mut pattern, corner)?;
-            super::annotations::remove_metadata_for(state, &[pattern["id"].clone()]);
             let before = (corner + count - 1) % count;
-            remap_seams(state, &pattern["id"], |line| {
+            let mapping: Vec<_> = (0..count).map(|line| {
                 (line != corner && line != before).then(|| line - usize::from(line > corner))
-            });
+            }).collect();
+            remap_outline(state, &mut pattern, &mapping);
         }
         _ => return Err(format!("unknown op {op:?}")),
     }
