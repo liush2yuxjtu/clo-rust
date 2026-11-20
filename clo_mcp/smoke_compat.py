@@ -721,6 +721,43 @@ async def compare_strapped_draft_preview():
                       "last_spec_unchanged": True, "invalid_spec_error": "pass"}))
 
 
+async def compare_gathered_draft_preview():
+    cases = (
+        {"garment": "skirt", "silhouette": "tiered", "tiers": 4, "gather_ratio": 1.25, "length": "midi"},
+        {"garment": "skirt", "silhouette": "gathered", "waist": "high", "length": "knee"},
+        {"silhouette": "empire", "length": "mini"},
+        {"silhouette": "babydoll", "length": "knee", "sleeve": "short"},
+        {"silhouette": "drop-waist", "gather_ratio": "1.55"},
+        {"silhouette": "smock", "length": "midi"},
+        {"silhouette": "dirndl", "length": "mini"},
+        {"silhouette": "tiered", "length": "ankle", "tiers": 2, "gather_ratio": 1.5},
+        {"silhouette": "wrap", "length": "knee"},
+    )
+    results = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        for session in (clo, rust):
+            await inspect_contract(session)
+        for spec in cases:
+            request = {"spec": spec, "use_scene_measurements": False}
+            official = await json_result(clo, "garment_plan_preview", request)
+            observed = await json_result(rust, "garment_plan_preview", request)
+            assert official.keys() == observed.keys(), spec
+            for key in official:
+                assert official[key] == observed[key], (spec, key, official[key], observed[key])
+            results.append({
+                "style": spec["silhouette"], "pieces": len(observed["pieces"]),
+                "gathered_seams": sum(seam["gather"] for seam in observed["seams"]),
+            })
+        for session in (clo, rust):
+            invalid = await session.call_tool("garment_plan_preview", {
+                "spec": {"garment": "skirt", "skirt": "tiered", "tiers": 0},
+            })
+            assert invalid.isError
+            assert await json_result(session, "garment_last_spec") == {"spec": None, "pieces": []}
+    print(json.dumps({"tool": "garment_plan_preview", "case": "gathered and tiered skirts",
+                      "comparisons": results, "last_spec_unchanged": True, "zero_tiers_error": "pass"}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -766,6 +803,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-strapped-draft-preview", action="store_const", dest="comparison",
                              const=compare_strapped_draft_preview,
                              help="compare offline strapless and strap garment draft previews")
+    comparisons.add_argument("--compare-gathered-draft-preview", action="store_const", dest="comparison",
+                             const=compare_gathered_draft_preview,
+                             help="compare offline gathered and tiered garment draft previews")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

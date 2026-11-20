@@ -66,7 +66,7 @@ fn edge_length(edge: &Edge, end: [f64; 2]) -> f64 {
 }
 
 fn rounded_mm(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
+    (value * 10.0).round_ties_even() / 10.0
 }
 
 fn rounded(value: f64) -> f64 {
@@ -116,18 +116,18 @@ fn normalize(spec: &Value) -> Result<Value, String> {
             (false, "fitted", 0.0, "full-circle", "natural")
         }
         ("dress", "mermaid") => (false, "fitted", 0.0, "mermaid", "natural"),
-        (
-            "dress",
-            "empire" | "babydoll" | "gathered" | "dirndl" | "tiered" | "drop-waist" | "wrap" | "smock",
-        ) => {
-            return Err(format!(
-                "Rust drafting for silhouette {silhouette:?} is not implemented"
-            ))
-        }
+        ("dress", "empire") => (false, "fitted", 0.0, "gathered", "empire"),
+        ("dress", "babydoll") => (false, "regular", 0.0, "gathered", "empire"),
+        ("dress", "gathered" | "dirndl") => (false, "fitted", 0.0, "gathered", "natural"),
+        ("dress", "tiered") => (false, "regular", 0.0, "tiered", "natural"),
+        ("dress", "drop-waist") => (false, "regular", 0.0, "gathered", "drop"),
+        ("dress", "smock") => (false, "loose", 0.0, "gathered", "empire"),
+        ("dress", "wrap") => (false, "fitted", 0.0, "a-line", "natural"),
         ("dress", _) => (true, "regular", 0.30, "", "natural"),
         (
             "skirt",
-            "straight" | "a-line" | "pencil" | "flare" | "half-circle" | "full-circle" | "mermaid",
+            "straight" | "a-line" | "pencil" | "flare" | "half-circle" | "full-circle" | "mermaid"
+            | "gathered" | "tiered",
         ) => (false, "regular", 0.0, silhouette.as_str(), "natural"),
         ("skirt", _) => (false, "regular", 0.0, "a-line", "natural"),
         _ => (true, "regular", 0.05, "", "natural"),
@@ -196,14 +196,7 @@ struct Measurements {
 }
 
 fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
-    let (bust, waist, hip) = match string(spec, "fit", "regular") {
-        "bodycon" => (0.0, -10.0, 0.0),
-        "fitted" => (40.0, 30.0, 40.0),
-        "regular" => (80.0, 70.0, 80.0),
-        "loose" => (150.0, 140.0, 140.0),
-        "oversized" => (260.0, 260.0, 240.0),
-        other => return Err(format!("unknown ease profile {other:?}")),
-    };
+    let (bust, waist, hip) = fit_ease(spec)?;
     let width = |key, ease| (number(body, key, 800.0) + number(&spec["ease"], key, ease)) / 4.0;
     let standard_waist = number(body, "h_waist", 1141.0);
     let underbust = number(body, "h_underbust", 1235.0);
@@ -228,6 +221,17 @@ fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
         underbust_y: underbust,
         standard_waist_y: standard_waist,
         hip_y: number(body, "h_hip", 879.0),
+    })
+}
+
+fn fit_ease(spec: &Value) -> Result<(f64, f64, f64), String> {
+    Ok(match string(spec, "fit", "regular") {
+        "bodycon" => (0.0, -10.0, 0.0),
+        "fitted" => (40.0, 30.0, 40.0),
+        "regular" => (80.0, 70.0, 80.0),
+        "loose" => (150.0, 140.0, 140.0),
+        "oversized" => (260.0, 260.0, 240.0),
+        other => return Err(format!("unknown ease profile {other:?}")),
     })
 }
 
@@ -643,6 +647,97 @@ fn skirt_panel(
     })
 }
 
+fn drafted_number(spec: &Value, key: &str, default: f64) -> Result<f64, String> {
+    match spec.get(key) {
+        None => Ok(default),
+        Some(value) => value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("{key} must be a finite number")),
+    }
+}
+
+fn gathered_skirt(
+    body: &Value,
+    spec: &Value,
+    m: &Measurements,
+    hem: f64,
+    waist_half_width: Option<f64>,
+    tiered: bool,
+) -> Result<(Vec<Value>, Vec<Value>), String> {
+    if hem >= m.waist_y {
+        return Err("skirt hem must fall below the waist".into());
+    }
+    let ratio = drafted_number(spec, "gather_ratio", if tiered { 1.35 } else { 1.8 })?;
+    if ratio <= 0.0 {
+        return Err("gather_ratio must be positive".into());
+    }
+    let tiers = if tiered {
+        let count = drafted_number(spec, "tiers", 3.0)?.trunc();
+        if !(1.0..=2048.0).contains(&count) {
+            return Err("tiers must fit within 4096 skirt panels".into());
+        }
+        count as usize
+    } else {
+        1
+    };
+    let (_, ease, _) = fit_ease(spec)?;
+    let (girth, ease) = if m.waist_y < m.standard_waist_y - 40.0 {
+        (number(body, "high_hip", 805.0), ease.max(20.0))
+    } else if m.waist_y > m.underbust_y - 30.0 {
+        (number(body, "underbust", 662.0), ease.max(30.0))
+    } else {
+        (number(body, "waist", 608.0), ease.max(20.0))
+    };
+    let mut width = waist_half_width.unwrap_or((girth + ease) / 4.0);
+    let step = (m.waist_y - hem) / tiers as f64;
+    let mut pieces = Vec::with_capacity(tiers * 2);
+    let mut seams = Vec::new();
+    for tier in 0..tiers {
+        width *= ratio;
+        if !width.is_finite() {
+            return Err("gathered skirt width overflow".into());
+        }
+        let top = m.waist_y - tier as f64 * step;
+        let bottom = m.waist_y - (tier + 1) as f64 * step;
+        for front in [true, false] {
+            let (name, role, arrange, a, b, offset, side) = if front {
+                ("Skirt_Front", "skirt_front", "Leg_Skirt_Front", "side_L", "side_R", -520.0, "Front")
+            } else {
+                ("Skirt_Back", "skirt_back", "Leg_Skirt_Back", "side_R", "side_L", 520.0, "Back")
+            };
+            let mut piece = Panel {
+                name,
+                role,
+                arrange,
+                elastic: vec![],
+                edges: vec![
+                    edge("waist", -width, top), edge(a, width, top),
+                    edge("hem", width, bottom), edge(b, -width, bottom),
+                ],
+            }.json(offset);
+            if tiered {
+                piece["name"] = json!(format!("Tier{}_{side}", tier + 1));
+                piece["layer"] = json!(tier);
+            }
+            pieces.push(piece);
+        }
+        let front = tier * 2;
+        for side in ["side_L", "side_R"] {
+            seams.push(seam(&pieces, front, side, front + 1, side, true)?);
+        }
+        if tier > 0 {
+            for piece in [front, front + 1] {
+                let mut join = seam(&pieces, piece - 2, "hem", piece, "waist", true)?;
+                join["gather"] = json!(true);
+                seams.push(join);
+            }
+        }
+    }
+    Ok((pieces, seams))
+}
+
 fn sleeve_cap(a: [f64; 2], b: [f64; 2], low: f64, high: f64) -> Vec<[f64; 3]> {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -932,23 +1027,40 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             seams.extend([front, back]);
         }
     }
+    let style = string(&spec, "skirt", "a-line").to_lowercase().replace('_', "-");
+    let tiered = has_skirt && style == "tiered";
+    let gathered = matches!(style.as_str(), "gathered" | "dirndl" | "full" | "pleated" | "tiered");
     if has_skirt {
         let i = pieces.len();
         let w = has_bodice.then(|| hem_half_width(&pieces[0]));
-        let style = string(&spec, "skirt", "a-line");
-        pieces.extend([
-            skirt_panel(&m, style, hem, true, w, None)?.json(-520.0),
-            skirt_panel(&m, style, hem, false, w, None)?.json(520.0),
-        ]);
-        for edge in ["side_L", "side_R"] {
-            seams.push(seam(&pieces, i, edge, i + 1, edge, true)?);
+        if gathered {
+            let (skirts, joins) = gathered_skirt(body, &spec, &m, hem, w, tiered)?;
+            pieces.extend(skirts);
+            seams.extend(joins);
+        } else {
+            pieces.extend([
+                skirt_panel(&m, &style, hem, true, w, None)?.json(-520.0),
+                skirt_panel(&m, &style, hem, false, w, None)?.json(520.0),
+            ]);
+            for edge in ["side_L", "side_R"] {
+                seams.push(seam(&pieces, i, edge, i + 1, edge, true)?);
+            }
         }
         if has_bodice {
-            seams.push(seam(&pieces, 0, "hem", i, "waist", true)?);
-            seams.push(seam(&pieces, 1, "hem", i + 1, "waist", true)?);
+            for bodice in 0..2 {
+                let mut join = seam(&pieces, bodice, "hem", i + bodice, "waist", !tiered)?;
+                join["gather"] = json!(gathered);
+                seams.push(join);
+            }
+        } else {
+            let elastic = (number(body, "waist", 608.0) - 25.0) / 2.0;
+            for piece in &mut pieces[i..i + 2] {
+                piece["elastic"] = json!([{"line": 0, "total_length": elastic}]);
+            }
+            notes.push(json!("standalone skirt: the waist edge is held by elastic so it stays on the body"));
         }
     }
-    let warnings: Vec<_> = seams
+    let mut warnings: Vec<_> = seams
         .iter()
         .filter_map(|s| {
             let a = number(s, "len_a", 0.0);
@@ -965,6 +1077,14 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
             )
         })
         .collect();
+    if tiered && has_bodice {
+        let joins = [
+            "seam Front.hem <-> Tier1_Front.waist: landmark tokens do not match (waist_L->waist_R vs t0_R->t0_L); assuming same direction",
+            "seam Back.hem <-> Tier1_Back.waist: landmark tokens do not match (waist_R->waist_L vs t0_L->t0_R); assuming same direction",
+        ];
+        // The reference planner reports these joins at plan creation and again at readback.
+        warnings.extend(joins.into_iter().chain(joins).map(str::to_owned));
+    }
     let mut material = assets::selected_material(string(&spec, "fabric", ""))?;
     material["color"] = json!(assets::parse_color(&spec["color"])?);
     material["color_text"] = spec["color"].clone();
@@ -972,7 +1092,9 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     let steps =
         spec["simulate_steps"]
             .as_u64()
-            .unwrap_or(if hem < number(body, "h_knee", 483.0) - 100.0 {
+            .unwrap_or(if tiered {
+                260
+            } else if hem < number(body, "h_knee", 483.0) - 100.0 {
                 160
             } else {
                 120
@@ -1083,7 +1205,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         let state_seams = array_mut(&mut next, "seams");
         let seam_id = state_seams.len();
         state_seams.push(json!({"id":seam_id,"name":format!("{a}/{b}/{}",i+1),"pattern_a":ids[a],"pattern_b":ids[b],
-            "line_a":seam["line_a"],"line_b":seam["line_b"],"dir_a":seam["dir_a"],"dir_b":seam["dir_b"]}));
+            "line_a":seam["line_a"],"line_b":seam["line_b"],"dir_a":seam["dir_a"],"dir_b":seam["dir_b"],"gather":seam["gather"]}));
     }
     let fabric = assets::fabric_apply(
         &json!({"fabric":string(&draft["spec"],"fabric",""),"color":draft["fabric"]["color"],

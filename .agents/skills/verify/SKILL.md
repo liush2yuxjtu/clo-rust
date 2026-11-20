@@ -106,6 +106,13 @@ readback. The split-dress notes record a known post-simulation join difference.
 For the Rust build path, build a strapless top, check elastic constraints in
 `simulate`, and repeat with straps to verify that the top-edge elastic is absent.
 
+Use `--compare-gathered-draft-preview` for standalone gathered skirts,
+tiered skirts and dresses, empire, babydoll, drop-waist, smock, dirndl and wrap
+presets. Compare complete preview results, including tier layers, intentional
+length mismatches, seam directions, waist elastic, warnings and simulation defaults.
+Build the tiered skirt in a disposable Rust scene and read back its layers,
+seam flags and first-tier elastic before checking one simulation step.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains
