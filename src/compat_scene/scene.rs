@@ -774,7 +774,14 @@ fn local_calendar(seconds: u64) -> Option<[u64; 6]> {
 }
 
 pub(super) fn checkpoint_save(args: &Value, state: &mut Value) -> Reply {
-    save_checkpoint(state, args["name"].as_str().filter(|name| !name.is_empty()), "cp")
+    let result = save_checkpoint(state, args["name"].as_str().filter(|name| !name.is_empty()), "cp")?;
+    let path = Path::new(string(&result, "path")?);
+    if extension(path) == "zprj" {
+        formats::native_save::remember(state, path, true);
+        state["runtime"]["gltf_export_active_only"] = json!(true);
+    }
+    set_project(state, path);
+    Ok(result)
 }
 
 pub(crate) fn checkpoint_before_build(state: &Value) -> Reply {
@@ -788,7 +795,7 @@ fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
         && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none();
     // Portable snapshots cover scenes that cannot be written as a native project.
     let native = if shared
-        && named.as_ref().is_none_or(|path| !path.exists() && !path.with_extension("zprj").exists())
+        && named.as_ref().is_none_or(|path| !path.exists())
     {
         formats::native_save::encode(state, true, false).ok()
     } else {
@@ -796,9 +803,8 @@ fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
     };
     if let (Some(name), Some(portable), Some(bytes)) = (name, named.as_ref(), native.as_ref()) {
         let path = portable.with_extension("zprj");
-        if formats::write_new(&path, bytes)? {
-            return Ok(json!({"name": name, "path": path}));
-        }
+        formats::write(&path, bytes)?;
+        return Ok(json!({"name": name, "path": path}));
     }
     let (bytes, extension) = if let (None, Some(bytes)) = (name, native) {
         (bytes, "zprj")
@@ -837,7 +843,8 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     if !path.is_file() {
         let native = path.with_extension("zprj");
         if native.is_file() {
-            return open(&json!({"path": native, "mode": "replace"}), state);
+            open(&json!({"path": native, "mode": "replace"}), state)?;
+            return Ok(open_reply(state, &native));
         }
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
@@ -847,6 +854,7 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     if let Some(source) = source {
         restored[formats::native_save::SOURCE] = source;
     }
+    set_project(&mut restored, &path);
     replace_scene(state, restored);
     crate::compat_runtime::clear_scene_ui(state, true);
     Ok(open_reply(state, &path))

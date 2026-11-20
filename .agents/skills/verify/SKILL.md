@@ -843,12 +843,26 @@ native `CLO_CHECKPOINT_FIXTURE` containing saved drape. Unset
 same disposable `CLO_MCP_STATE/checkpoints`. Rust restores it by name and checks
 the archived geometry, fabrics, seams, and pose. It then saves a new named
 native `.zprj` checkpoint and verifies both adapters list it, the active
-project stays selected, and Rust restores its saved state. Omit the name and
+project becomes that checkpoint, and Rust restores its saved state. Omit the name and
 then pass an empty name with existing timestamp files in the directory. Check
 that both calls use distinct suffixed names and produce native projects
 visible to both adapters. Check that
 same-name `.clorust` writes preserve the existing native archive and failed
 restores preserve the scene. A live CLO restore requires the bridge.
+
+Run `--compare-live-checkpoint-roundtrip` with a live bridge, the same
+`multi-colorway-colored.zprj` on both backends, and an empty shared
+`CLO_MCP_STATE/checkpoints` directory. Unset `CLO_RUST_CHECKPOINT_DIR`.
+On Boat the Rust and official MCP processes can run on Linux and share the
+Wine drive through a relative `C:` mapping. Save a Unicode name from CLO,
+restore in Rust, change the front panel's name and save the same name.
+Check the native file changes, the portable shadow is absent, and CLO
+can restore the Rust revision. Repeat the overwrite in reverse, then
+cross-restore two automatically named checkpoints. Compare the full list,
+the active project path, materials, colors and seam groups, and vertex,
+triangle and UV readback from each archive. A missing name leaves the scene
+in place. Record malformed native files separately since CLO 2026.1.382
+can clear the scene and report success on an invalid ZPRJ.
 
 Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an

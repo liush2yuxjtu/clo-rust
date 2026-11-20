@@ -2107,9 +2107,9 @@ async def verify_garment_session_history():
             assert recent == {"spec": second["spec"], "pieces": ["Front", "Back"]}
             failed = await rust.call_tool("garment_rebuild", {
                 "changes": {"sleeve": "long", "color": "navy", "particle_distance": 25},
-                "simulate_steps": 3001, "snapshots": False,
+                "simulate_steps": 2**32, "snapshots": False,
             })
-            assert failed.isError and "0..3000 steps" in failed.content[0].text
+            assert failed.isError and "steps must be a nonnegative 32-bit integer" in failed.content[0].text
             live = await json_result(rust, "scene_info")
             assert live["pattern_count"] == len(first_pieces)
             assert live["seam_groups"] == len(first["seams"])
@@ -2119,7 +2119,8 @@ async def verify_garment_session_history():
             assert [piece["name"] for piece in partial["patterns"]] == first_pieces
             assert all(piece["particle_distance"] == 25 for piece in partial["patterns"])
             assert partial["fabrics"][-1]["color"] == [0.1, 0.16, 0.42]
-            assert partial["simulation"] is None
+            assert partial["simulation"]["steps"] == 0
+            assert len(partial["simulation"]["meshes"]) == len(first_pieces)
             assert await json_result(rust, "garment_last_spec") == recent
 
             reopened = await json_result(rust, "scene_open", {"path": str(project), "mode": "replace"})
@@ -2731,9 +2732,13 @@ async def verify_checkpoint_workflow():
             await json_result(session, "pattern_create", {"name": "before", "points": points})
             original = await json_result(session, "scene_info")
             first = await json_result(session, "checkpoint_save")
+            original |= {"project": first["name"], "project_path": first["path"]}
+            assert await json_result(session, "scene_info") == original
             await json_result(session, "pattern_create", {"name": "after", "points": points})
             changed = await json_result(session, "scene_info")
             second = await json_result(session, "checkpoint_save")
+            changed |= {"project": second["name"], "project_path": second["path"]}
+            assert await json_result(session, "scene_info") == changed
             assert first["name"] != second["name"]
             listing = (await json_result(session, "checkpoint_list"))["checkpoints"]
             assert [row["name"] for row in listing] == [second["name"], first["name"]]
@@ -4641,6 +4646,109 @@ async def compare_checkpoint_listing():
                       "shared_tie_order": tie_order, "linked_checkpoint_listed": linked}, ensure_ascii=False))
 
 
+async def compare_live_checkpoint_roundtrip():
+    fixture = Path(os.environ["CLO_CHECKPOINT_FIXTURE"])
+    directory = Path(os.environ["CLO_MCP_STATE"]) / "checkpoints"
+    assert "CLO_RUST_CHECKPOINT_DIR" not in os.environ
+    assert fixture.is_file() and fixture.suffix == ".zprj", fixture
+    name = "检查点 É"
+    state_keys = ("project", "project_path", "pattern_count", "patterns", "seam_groups",
+                  "avatars", "fabric_count", "fabrics", "colorways", "current_colorway")
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    source_hash = digest(fixture)
+
+    async def scene(session):
+        state = await json_result(session, "scene_info")
+        return {key: state[key] for key in state_keys}
+
+    async def listing(session):
+        return (await json_result(session, "checkpoint_list"))["checkpoints"]
+
+    async def restore(session, checkpoint, expected):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        result = await json_result(session, "checkpoint_restore", {"name": checkpoint["name"]})
+        assert result == {"ok": True, "path": checkpoint["path"],
+                          "pattern_count": expected["pattern_count"], "avatars": expected["avatars"]}
+        assert await scene(session) == expected
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await scene(clo)
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+            assert await listing(clo) == await listing(rust) == []
+            await json_result(clo, "scene_open", {"path": str(fixture)})
+            baseline = await scene(clo)
+            assert baseline["pattern_count"] == 2 and baseline["seam_groups"] == 1
+            saved = await json_result(clo, "checkpoint_save", {"name": name})
+            target = directory / f"{name}.zprj"
+            assert saved == {"name": name, "path": str(target)}
+            initial = baseline | {"project": name, "project_path": str(target)}
+            assert await scene(clo) == initial
+            before = digest(target)
+            await restore(rust, saved, initial)
+
+            await json_result(rust, "pattern_ops", {
+                "pattern": "Front", "op": "rename", "args": {"name": "Rust Revision"},
+            })
+            expected_rust = await scene(rust)
+            assert await json_result(rust, "checkpoint_save", {"name": name}) == saved
+            assert await scene(rust) == expected_rust
+            assert not target.with_suffix(".clorust").exists()
+            assert digest(target) != before
+            await restore(clo, saved, expected_rust)
+            assert expected_rust["patterns"][0]["name"] == "Rust Revision"
+
+            await json_result(clo, "pattern_ops", {
+                "pattern": "Rust Revision", "op": "rename", "args": {"name": "CLO Revision"},
+            })
+            assert await json_result(clo, "checkpoint_save", {"name": name}) == saved
+            expected_clo = await scene(clo)
+            await restore(rust, saved, expected_clo)
+            assert expected_clo["patterns"][0]["name"] == "CLO Revision"
+            native_auto = await json_result(clo, "checkpoint_save")
+            rust_auto = await json_result(rust, "checkpoint_save", {"name": ""})
+            assert len({saved["path"], native_auto["path"], rust_auto["path"]}) == 3
+            for item in (native_auto, rust_auto):
+                assert re.fullmatch(r"cp_\d{8}_\d{6}(?:_\d+)?", item["name"])
+                assert Path(item["path"]) == directory / (item["name"] + ".zprj")
+            expected_auto = lambda item: expected_clo | {"project": item["name"], "project_path": item["path"]}
+            assert await scene(clo) == expected_auto(native_auto)
+            assert await scene(rust) == expected_auto(rust_auto)
+            await restore(rust, native_auto, expected_auto(native_auto))
+            await restore(clo, rust_auto, expected_auto(rust_auto))
+
+            official_rows, rust_rows = await listing(clo), await listing(rust)
+            assert official_rows == rust_rows and len(rust_rows) == 3
+            assert [row["path"] for row in rust_rows] == [rust_auto["path"], native_auto["path"], saved["path"]]
+            for session in (clo, rust):
+                before_error = await scene(session)
+                missing = await session.call_tool("checkpoint_restore", {"name": "not-present"})
+                assert missing.isError and await scene(session) == before_error
+            assert digest(fixture) == source_hash
+        finally:
+            if original["project_path"] != "NULL":
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+    with TemporaryDirectory(prefix="clo-checkpoint-readback-") as temporary:
+        portable = Path(temporary) / "geometry.clorust"
+        async with open_backend("rust") as reader:
+            async def archived_meshes(path):
+                await json_result(reader, "scene_open", {"path": str(path)})
+                await json_result(reader, "scene_save", {"path": str(portable), "thumbnail": False})
+                state = json.loads(portable.read_text())["scene"]
+                return [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
+                        for mesh in state["simulation"]["meshes"]]
+            geometry = await archived_meshes(fixture)
+            assert len(geometry) == 2
+            for row in rust_rows:
+                assert await archived_meshes(row["path"]) == geometry, row
+    print(json.dumps({"fixture": fixture.name, "checkpoints": rust_rows, "cross_backend_restores": 5,
+                      "same_file_overwrites": 2, "original_sha256": source_hash,
+                      "scene_identity_follows_checkpoint": True, "missing_keeps_scene": True,
+                      "mesh_vertices_preserved": sum(len(mesh["positions"]) for mesh in geometry)},
+                     ensure_ascii=False))
+
+
 async def compare_shared_checkpoint_folder():
     fixture = os.environ.get("CLO_CHECKPOINT_FIXTURE")
     assert fixture, "set CLO_CHECKPOINT_FIXTURE to a saved native CLO project"
@@ -4676,7 +4784,7 @@ async def compare_shared_checkpoint_folder():
             assert baseline["simulation"]["meshes"]
             await json_result(rust, "scene_clear", {"keep_avatar": False})
             restored = await json_result(rust, "checkpoint_restore", {"name": "native-drape"})
-            assert restored == direct
+            assert restored == {key: direct[key] for key in ("ok", "path", "pattern_count", "avatars")}
             info = await json_result(rust, "scene_info")
             unequal = sorted(key for key in scene.keys() | info.keys() if scene.get(key) != info.get(key))
             assert not unequal, [(key, str(scene.get(key))[:200], str(info.get(key))[:200]) for key in unequal]
@@ -4688,7 +4796,9 @@ async def compare_shared_checkpoint_folder():
             published = await json_result(rust, "checkpoint_save", {"name": "复用检查点"})
             checkpoint = directory / "复用检查点.zprj"
             assert published == {"name": "复用检查点", "path": str(checkpoint)}
-            assert await json_result(rust, "scene_info") == before_publish
+            assert await json_result(rust, "scene_info") == before_publish | {
+                "project": published["name"], "project_path": published["path"],
+            }
             shared_rows = await listing(clo)
             assert await listing(rust) == shared_rows
             assert any(row["path"] == str(checkpoint) for row in shared_rows)
@@ -5847,6 +5957,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
+    comparisons.add_argument("--compare-live-checkpoint-roundtrip", action="store_const", dest="comparison",
+                             const=compare_live_checkpoint_roundtrip,
+                             help="save, overwrite, list and restore native checkpoints across both live backends")
     comparisons.add_argument("--compare-shared-checkpoint-folder", action="store_const", dest="comparison",
                              const=compare_shared_checkpoint_folder,
                              help="compare a shared checkpoint listing and restore the native archive in Rust")
