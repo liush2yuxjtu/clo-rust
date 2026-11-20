@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -1354,6 +1355,92 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_build_checkpoints():
+    with TemporaryDirectory(prefix="clo-build-checkpoint-") as directory:
+        root = Path(directory)
+        checkpoint_dir = root / "checkpoints"
+        environment = {
+            "CLO_RUST_FABRIC_DIR": "", "CLO_RUST_AVATAR_DIR": "",
+            "CLO_RUST_CHECKPOINT_DIR": str(checkpoint_dir),
+        }
+        options = {"simulate_steps": 0, "snapshots": False}
+        request = options | {"spec": {"garment": "top", "length": "waist"}}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return json.loads(path.read_text())["scene"]
+
+            async def check_checkpoint(result, before):
+                path = Path(result["checkpoint_before_build"])
+                assert path.parent == checkpoint_dir
+                assert re.fullmatch(r"auto_before_build_\d{8}_\d{6}(?:_\d+)?\.clorust", path.name)
+                saved = json.loads(path.read_text())["scene"]
+                for field in ("patterns", "seams", "native_seam_groups", "avatar", "fabrics", "simulation"):
+                    assert saved.get(field) == before.get(field), field
+                listed = (await json_result(rust, "checkpoint_list"))["checkpoints"]
+                assert any(row["name"] == path.stem and row["path"] == str(path) for row in listed)
+                return path
+
+            empty = await json_result(rust, "garment_build", request)
+            assert empty["checkpoint_before_build"] is None
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            await json_result(rust, "pattern_create", {
+                "name": "Existing", "points": [[0, 0], [100, 0], [40, 70]],
+            })
+            appended = await json_result(rust, "garment_build", request | {"replace_existing": False})
+            assert appended["checkpoint_before_build"] is None
+            assert (await json_result(rust, "scene_info"))["pattern_count"] == 3
+            assert (await json_result(rust, "checkpoint_list"))["checkpoints"] == []
+            await json_result(rust, "simulate", {"steps": 1, "particle_distance": 100})
+            before = await save("before-replace")
+            replaced = await json_result(rust, "garment_build", request)
+            original = await check_checkpoint(replaced, before)
+            before_rebuild = await save("before-rebuild")
+            rebuilt = await json_result(rust, "garment_rebuild", options | {"changes": {"length": "cropped"}})
+            newer = await check_checkpoint(rebuilt, before_rebuild)
+            assert newer != original
+            restored = await json_result(rust, "checkpoint_restore", {"name": original.stem})
+            assert restored["pattern_count"] == 3
+            restored_scene = await save("restored")
+            assert restored_scene["simulation"] == before["simulation"]
+            assert (await json_result(rust, "garment_last_spec"))["spec"] == rebuilt["spec"]
+
+            native_count = None
+            if fixture := os.environ.get("CLO_CHECKPOINT_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                native = await save("before-native-replace")
+                native_count = len(native["native_seam_groups"])
+                assert native_count > 0 and native["simulation"]["meshes"]
+                result = await json_result(rust, "garment_build", request)
+                path = await check_checkpoint(result, native)
+                replaced_native = await save("replaced-native")
+                assert replaced_native["native_seam_groups"] == []
+                assert len(replaced_native["patterns"]) == len(result["pieces"])
+                await json_result(rust, "checkpoint_restore", {"name": path.stem})
+                restored = await save("restored-native")
+                assert restored["native_seam_groups"] == native["native_seam_groups"]
+                assert restored["simulation"] == native["simulation"]
+                copy = root / "restored-native.zprj"
+                await json_result(rust, "scene_save", {"path": str(copy), "thumbnail": False})
+                opened = await json_result(rust, "scene_open", {"path": str(copy)})
+                assert opened["pattern_count"] == len(native["patterns"])
+
+            checkpoint_dir.rename(root / "previous-checkpoints")
+            checkpoint_dir.write_text("Block creation of the checkpoint directory")
+            result = await json_result(rust, "garment_build", request)
+            assert result["checkpoint_before_build"] is None
+            assert (await json_result(rust, "scene_info"))["pattern_count"] == len(result["pieces"])
+
+    print(json.dumps({"tools": ["garment_build", "garment_rebuild", "checkpoint_list",
+                                "checkpoint_restore"],
+                      "case": "automatic checkpoints before build", "empty_and_append": "pass",
+                      "replace_and_rebuild": "pass", "write_failure_best_effort": "pass",
+                      "restored_native_seam_groups": native_count}))
+
+
 async def compare_checkpoint_listing():
     with TemporaryDirectory() as scratch:
         root = Path(scratch)
@@ -1588,6 +1675,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-checkpoint-workflow", action="store_const", dest="comparison",
                              const=verify_checkpoint_workflow,
                              help="verify Rust checkpoint ordering, restore, errors and optional native re-export")
+    comparisons.add_argument("--verify-build-checkpoints", action="store_const", dest="comparison",
+                             const=verify_build_checkpoints,
+                             help="verify automatic pre-build checkpoints and replacement cleanup")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -1601,7 +1691,7 @@ if __name__ == "__main__":
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
-                                verify_garment_session_history)
+                                verify_garment_session_history, verify_build_checkpoints)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

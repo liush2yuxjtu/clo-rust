@@ -50,14 +50,19 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
     }))
 }
 
-fn clear_garment(state: &mut Value) {
-    for field in ["patterns", "seams", "native_seam_groups", "imported_meshes"] {
+pub(crate) fn clear_patterns(state: &mut Value) {
+    for field in ["patterns", "seams", "native_seam_groups"] {
         state[field] = json!([]);
     }
     state["garment_spec"] = Value::Null;
     state["garment_piece_names"] = json!([]);
     state.as_object_mut().expect("scene object").remove(formats::native_save::SOURCE);
     invalidate_geometry(state);
+}
+
+fn clear_garment(state: &mut Value) {
+    clear_patterns(state);
+    state["imported_meshes"] = json!([]);
 }
 
 pub(super) fn clear(args: &Value, state: &mut Value) -> Reply {
@@ -602,19 +607,27 @@ fn local_calendar(seconds: u64) -> Option<[u64; 6]> {
 }
 
 pub(super) fn checkpoint_save(args: &Value, state: &mut Value) -> Reply {
+    save_checkpoint(state, args["name"].as_str().filter(|name| !name.is_empty()), "cp")
+}
+
+pub(crate) fn checkpoint_before_build(state: &Value) -> Reply {
+    save_checkpoint(state, None, "auto_before_build")
+}
+
+fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
     let mut document = scene_document(state)?;
     if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
         // Keep the original fingerprint and edit lists so undo doesn't
         // remove the ability to re-export a still-compatible native scene.
         document[formats::native_save::SOURCE] = source.clone();
     }
-    if let Some(name) = args["name"].as_str().filter(|s| !s.is_empty()) {
+    if let Some(name) = name {
         let path = checkpoint_path(name)?;
         formats::write_json(&path, &document)?;
         return Ok(json!({"name": name, "path": path}));
     }
     let [year, month, day, hour, min, sec] = calendar(SystemTime::now());
-    let base = format!("cp_{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}");
+    let base = format!("{prefix}_{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}");
     let bytes = serde_json::to_vec_pretty(&document).map_err(|err| err.to_string())?;
     for suffix in 0u64.. {
         let name = if suffix == 0 { base.clone() } else { format!("{base}_{suffix}") };

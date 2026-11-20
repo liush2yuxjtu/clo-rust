@@ -199,6 +199,13 @@ ordering with local timestamps, state restore and malformed, missing or invalid 
 also preserves native re-export. Reopen the exported project and confirm the
 patterns and avatars. Check that changing or removing the source archive
 still allows checkpoint restore and stops native re-export.
+Run `--verify-build-checkpoints` for the `auto_before_build_` path in build
+and rebuild responses. Empty or appended scenes skip automatic checkpoints.
+Read back the pre-replacement geometry, materials, and saved simulation.
+Set `CLO_CHECKPOINT_FIXTURE` to a native project with sewing and saved drape
+to check that replacement removes its seam groups and a checkpoint restore
+recovers them and enables a new native save. Also check that an unavailable
+checkpoint directory leaves a successful build with a null checkpoint path.
 With the official stdio command configured, run `--compare-checkpoint-listing`
 to compare order and local timestamps using disposable directories without
 starting CLO.

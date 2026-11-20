@@ -25,11 +25,16 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<bool, String> {
-    match publish(path, bytes, |temp| fs::hard_link(temp, path)) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
+    let mut collision = false;
+    publish(path, bytes, |temp| match fs::hard_link(temp, path) {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            collision = true;
+            Ok(())
+        }
+        result => result,
+    })
+    .map(|()| !collision)
+    .map_err(|err| format!("{}: {err}", path.display()))
 }
 
 fn publish(

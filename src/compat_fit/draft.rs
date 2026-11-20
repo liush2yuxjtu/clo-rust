@@ -1317,16 +1317,14 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     let material = assets::load_material(string(&draft["spec"], "fabric", ""))?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
-        crate::compat_scene::dispatch("checkpoint_save", &json!({}), &mut next)
-            .and_then(Result::ok)
+        crate::compat_scene::checkpoint_before_build(&next)
             .map(|value| value["path"].clone())
             .unwrap_or(Value::Null)
     } else {
         Value::Null
     };
     if replace {
-        next["patterns"] = json!([]);
-        next["seams"] = json!([]);
+        crate::compat_scene::clear_patterns(&mut next);
     }
     let rendered_panels = array(&draft["pieces"]);
     let indices = array(&next["patterns"]);
