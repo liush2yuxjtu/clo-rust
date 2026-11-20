@@ -30,8 +30,8 @@ pub(crate) fn mark_native_fabric_color(state: &mut Value, index: u64) {
     formats::native_save::mark_color(state, index);
 }
 
-pub(crate) fn mark_native_fabric_texture(state: &mut Value, index: u64, map: &str) {
-    formats::native_save::mark_texture(state, index, map);
+pub(crate) fn mark_native_fabric_texture(state: &mut Value, index: u64, map: &str, clear: bool) {
+    formats::native_save::mark_texture(state, index, map, clear);
 }
 
 type Reply = Result<Value, String>;

@@ -1136,7 +1136,7 @@ fn parse_color_text(input: &str) -> Result<[f64; 3], String> {
         .map_or([0.85; 3], |(_, rgb)| *rgb))
 }
 
-fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
+fn validate_texture_map(kind: &str) -> Result<(), String> {
     if ![
         "base",
         "normal",
@@ -1149,6 +1149,11 @@ fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("unknown map type {kind:?}"));
     }
+    Ok(())
+}
+
+fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
+    validate_texture_map(kind)?;
     let path = Path::new(path)
         .canonicalize()
         .map_err(|e| format!("cannot open fabric texture {path}: {e}"))?;
@@ -1268,9 +1273,23 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
         .as_u64()
         .ok_or("fabric_index must be a nonnegative integer")?;
     let kind = string(args, "map", "base");
-    let path = texture(string(args, "image_path", ""), kind)?;
-    update_material_texture(find_fabric_mut(state, index)?, kind, &path);
-    crate::compat_scene::mark_native_fabric_texture(state, index, kind);
+    let input = string(args, "image_path", "");
+    if input.is_empty() {
+        validate_texture_map(kind)?;
+        let fabric = find_fabric_mut(state, index)?;
+        if let Some(maps) = fabric["texture_maps"].as_object_mut() {
+            maps.remove(kind);
+        }
+        if kind == "base" {
+            if let Some(catalog) = fabric["info"]["catalog"].as_object_mut() {
+                catalog.remove("Texture");
+            }
+        }
+    } else {
+        let path = texture(input, kind)?;
+        update_material_texture(find_fabric_mut(state, index)?, kind, &path);
+    }
+    crate::compat_scene::mark_native_fabric_texture(state, index, kind, input.is_empty());
     state["current_fabric"] = json!(index);
     Ok(json!({"ok":true}))
 }

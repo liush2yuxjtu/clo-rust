@@ -36,7 +36,7 @@
 | `fabric_list` | 历史 4 套材料及 40 项字段对照 | 当前版本赋材、选中项和编辑后读回 |
 | `fabric_apply` | Rust 实调和导出读回 | 双端库别名、选片和找不到材料 |
 | `fabric_set_color` | Rust 实调和原生文件保存回读 | 双端颜色值、正反面与无效索引 |
-| `fabric_set_texture` | Rust 实调和纹理导出 | 双端纹理持久化、无效文件及材料索引 |
+| `fabric_set_texture` | Rust 单通道清除、工程重开、GLB 及错误后状态 | 双端纹理持久化及原生 CLO 回开 |
 | `simulate` | 本轮 Rust 重划网格、速度和续算 | 双端步数、粒距、缝合与接触量测 |
 | `simulation_reset` | Rust 恢复排布、保留设置 | 同一变形场景的双端重置和读回 |
 | `checkpoint_save` | 本轮 Rust 同名保存验证原生源文件 SHA-256 | 双端保存时机、命名和失败路径 |

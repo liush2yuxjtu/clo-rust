@@ -107,13 +107,11 @@ pub(in crate::compat_scene) fn mark_color(state: &mut Value, index: u64) {
     }
 }
 
-pub(in crate::compat_scene) fn mark_texture(state: &mut Value, index: u64, map: &str) {
+pub(in crate::compat_scene) fn mark_texture(state: &mut Value, index: u64, map: &str, clear: bool) {
     if let Some(source) = state.get_mut(SOURCE).filter(|source| source.is_object()) {
         let edits = super::super::vec_mut(source, "retextured");
-        let edit = json!({"fabric": index, "map": map});
-        if !edits.contains(&edit) {
-            edits.push(edit);
-        }
+        edits.retain(|edit| edit["fabric"] != index || edit["map"] != map);
+        edits.push(json!({"fabric": index, "map": map, "clear": clear}));
     }
 }
 

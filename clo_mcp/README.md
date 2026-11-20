@@ -58,6 +58,8 @@ Rust 保存的检查点使用 `.clorust`，两个文件同名时 Rust 端优先�
 `CLO_RUST_FABRIC_DIR` 指向包含 `.zfab` 的 `Fabric` 目录，或通过
 `CLO_MCP_ASSETS` 指定其上一级。也可以直接向 `fabric_apply` 传入
 `.zfab` 文件路径。Rust 读取文件中的面料名称、正面颜色、贴图和物理参数。
+`fabric_set_texture` 的 `image_path` 设为空字符串可清除指定贴图通道。
+原生 `.zprj` 和 `.zpac` 的贴图替换目前要求归档中已有对应通道。
 CPU 仿真按裁片局部 X/Y 轴和斜向分别使用拉伸、剪切和弯曲参数。
 `.zprj` 和 `.zpac` 中保存的面料物理参数也用于求解。有原生面料密度时，
 CPU 根据裁片的静止网格面积和密度分配顶点质量，缺少密度的裁片按 300 g/m² 计算。

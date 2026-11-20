@@ -194,6 +194,72 @@ async def check_material_export(session, directory, png):
                 assert read_gltf_export(readback)[0] == appended
 
 
+async def verify_fabric_texture_clear():
+    with TemporaryDirectory(prefix="clo-clear-texture-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+            await json_result(rust, "pattern_create", {"name": "Panel", "points": [[0, 0], [100, 0], [0, 100]]})
+            fabric = await json_result(rust, "fabric_apply", {"fabric": "cotton"})
+            index = fabric["fabric"]["index"]
+            capture = await successful(rust, "snapshot_2d")
+            png, = [block for block in capture.content if block.type == "image"]
+            image = root.resolve() / "swatch.png"
+            image.write_bytes(base64.b64decode(png.data, validate=True))
+
+            async def maps(index):
+                materials = (await json_result(rust, "fabric_list"))["fabrics"]
+                return next(fabric for fabric in materials if fabric["index"] == index)["info"]["texture_maps"]
+
+            async def texture(index, map, path=""):
+                result = await json_result(rust, "fabric_set_texture", {
+                    "fabric_index": index, "map": map, "image_path": str(path),
+                })
+                assert result == {"ok": True}
+
+            await texture(index, "base", image)
+            await texture(index, "normal", image)
+            for _ in range(2):
+                await texture(index, "base")
+                assert await maps(index) == {"normal": str(image)}
+            for patch in ({"map": "unknown"}, {"fabric_index": 9001}):
+                assert (await rust.call_tool("fabric_set_texture", {
+                    "fabric_index": index, "image_path": "", "map": "normal", **patch,
+                })).isError
+            assert await maps(index) == {"normal": str(image)}
+            portable = root / "cleared.clorust"
+            await json_result(rust, "scene_save", {"path": str(portable)})
+            await json_result(rust, "scene_open", {"path": str(portable)})
+            assert await maps(index) == {"normal": str(image)}
+            glb = root / "cleared.glb"
+            await json_result(rust, "scene_export", {"path": str(glb)})
+            project, _ = read_gltf_export(glb)
+            primitive = project["meshes"][0]["primitives"][0]
+            assert "baseColorTexture" not in project["materials"][primitive["material"]]["pbrMetallicRoughness"]
+            await successful(rust, "clo_api_call", {
+                "name": "fabric_api.SetNormalMapImageGivenFilePath", "args": [""],
+            })
+            assert await maps(index) == {}
+
+            native = None
+            if fixture := os.environ.get("CLO_TEXTURE_CLEAR_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                materials = (await json_result(rust, "fabric_list"))["fabrics"]
+                target = next(fabric for fabric in materials if {"base", "normal"} <= fabric["info"]["texture_maps"].keys())
+                index = target["index"]
+                before = await maps(index)
+                await texture(index, "base")
+                path = root / ("native-cleared" + Path(fixture).suffix)
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                await json_result(rust, "scene_open", {"path": str(path)})
+                remaining = await maps(index)
+                assert remaining == {key: path for key, path in before.items() if key != "base"}
+                native = {"suffix": path.suffix, "unchanged_maps": sorted(remaining)}
+    print(json.dumps({"tool": "fabric_set_texture", "case": "clear only the selected map",
+                      "portable_reopen": True, "glb_without_base_texture": True,
+                      "native_reopen": native, "api_clear": True, "invalid_clear_preserves_maps": True}))
+
+
 async def smoke_rust():
     async with open_backend("rust") as session:
         await inspect_contract(session)
@@ -2924,6 +2990,9 @@ async def verify_mixed_native_append():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--verify-fabric-texture-clear", action="store_const", dest="comparison",
+                             const=verify_fabric_texture_clear,
+                             help="clear one fabric map and verify saved scenes and export")
     comparisons.add_argument("--compare-desktop-observation", action="store_const", dest="comparison",
                              const=compare_desktop_observation,
                              help="compare desktop state bounds, stale actions and screenshot payloads")
@@ -3070,7 +3139,7 @@ if __name__ == "__main__":
                              const=verify_mixed_native_append,
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
+    if (args.comparison not in (None, verify_fabric_texture_clear, verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,

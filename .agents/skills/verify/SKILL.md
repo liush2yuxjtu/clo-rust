@@ -25,6 +25,13 @@ Run `cargo test --locked` and `cargo build --release --locked` for Rust changes.
 
 For MCP changes, install `clo_mcp/requirements.txt` in a Python 3.11+ virtual environment. Start `python -m clo_mcp.server` from the repository root using an MCP stdio client. For local runtime checks, set `CLO_RUST_BINARY` to the absolute path of the freshly built native binary. Initialize the session, list tools, and call the changed tool with a representative input and a nearby error case. Keep the structured result.
 
+Run `--verify-fabric-texture-clear` to clear a single map with an empty image
+path. Check that the other maps persist through a portable save, the cleared base
+is absent in GLB, and invalid fabric and map identifiers leave the scene intact.
+Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
+base and normal maps to also check native archive reopen and preservation of the
+other maps. A live CLO reopen is a separate comparison.
+
 For release-download, checksum, or cache changes, use an existing release with the required assets and run `CLO_RUST_RELEASE=<tag> python -m clo_mcp.smoke_release` with GitHub CLI access. The smoke test exercises the actual published download, checksum verification, cache hit, seam audit, and replay through stdio. For new releases, build and test on each target platform, run the binary's `--version`, compute its SHA-256 checksum, and confirm the published tag and assets. Run the release-download smoke test against the published tag.
 
 ### Verify the 48 public CLO MCP tools

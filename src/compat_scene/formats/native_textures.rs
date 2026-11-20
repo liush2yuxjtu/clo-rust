@@ -209,7 +209,7 @@ pub(super) fn hydrate<R: Read + Seek>(
 
 struct Edit {
     kind: i32,
-    image: Vec<u8>,
+    image: Option<Vec<u8>>,
     matches: RefCell<Vec<String>>,
 }
 
@@ -220,10 +220,16 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     let list = textures(face)?;
     let mut reset = false;
     let mut converted = HashMap::new();
+    let mut removed = Vec::new();
     for edit in edits {
         let mut found = None;
         for (index, texture) in list.iter().enumerate() {
             if integer(texture, b"enType")? != edit.kind {
+                continue;
+            }
+            if edit.image.is_none() {
+                removed.push(index);
+                reset |= edit.kind == 0;
                 continue;
             }
             let name = filename(texture)?;
@@ -245,11 +251,13 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
                 );
             }
         }
-        let name = found.ok_or("native save requires an existing texture slot on the fabric")?;
-        edit.matches.borrow_mut().push(name.to_owned());
-        reset |= edit.kind == 0;
+        if edit.image.is_some() {
+            let name = found.ok_or("native save requires an existing texture slot on the fabric")?;
+            edit.matches.borrow_mut().push(name.to_owned());
+            reset |= edit.kind == 0;
+        }
     }
-    if !reset && converted.is_empty() {
+    if !reset && converted.is_empty() && removed.is_empty() {
         return Ok(None);
     }
     let mut updated = if reset {
@@ -257,10 +265,11 @@ fn update_face(face: &Fields<'_>, edits: &Vec<Edit>) -> Result<Option<Vec<u8>>, 
     } else {
         face.encoded().to_vec()
     };
-    if !converted.is_empty() {
+    if !converted.is_empty() || !removed.is_empty() {
         let textures: Vec<_> = list
             .iter()
             .enumerate()
+            .filter(|(index, _)| !removed.contains(index))
             .map(|(index, texture)| {
                 converted
                     .remove(&index)
@@ -303,23 +312,26 @@ pub(super) fn replacements(
             let current = &fabric["texture_maps"][key];
             let explicit = retextured
                 .iter()
-                .any(|edit| edit["fabric"].as_u64() == Some(index as u64) && edit["map"] == key);
-            if current == &baseline[index][key] && !explicit {
+                .find(|edit| edit["fabric"].as_u64() == Some(index as u64) && edit["map"] == key);
+            if current == &baseline[index][key] && explicit.is_none() {
                 continue;
             }
             // A recolor keeps the source base image and selects desaturation in the archive.
             if key == "base"
                 && current.is_null()
                 && recolored.iter().any(|id| id.as_u64() == Some(index as u64))
+                && !explicit.is_some_and(|edit| edit["clear"] == true)
             {
                 continue;
             }
-            let path = current
-                .as_str()
-                .filter(|path| !path.is_empty())
-                .ok_or("native texture removal is not supported")?;
-            let image = crate::compat_fit::png_for_export(Path::new(path))?;
-            image_bytes += image.len();
+            let image = if current.is_null() && explicit.is_some_and(|edit| edit["clear"] == true) {
+                None
+            } else {
+                let path = current.as_str().filter(|path| !path.is_empty())
+                    .ok_or("native texture removal requires an explicit texture edit")?;
+                Some(crate::compat_fit::png_for_export(Path::new(path))?)
+            };
+            image_bytes += image.as_ref().map_or(0, Vec::len);
             if image_bytes > 256 * 1024 * 1024 {
                 return Err("replacement texture assets exceed 256 MiB".into());
             }
@@ -333,6 +345,7 @@ pub(super) fn replacements(
     let updated = edit_materials(pac, &edits, update_face)?;
     let mut images = HashMap::new();
     for edit in edits.into_values().flatten() {
+        let Some(image) = edit.image else { continue };
         let matches = edit.matches.into_inner();
         let name = matches
             .first()
@@ -346,7 +359,7 @@ pub(super) fn replacements(
                 "native texture asset is shared or its references could not be verified".into(),
             );
         }
-        images.insert(name.clone(), edit.image);
+        images.insert(name.clone(), image);
     }
     Ok((updated, images))
 }
