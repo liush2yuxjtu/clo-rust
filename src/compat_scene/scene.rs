@@ -633,12 +633,6 @@ pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
 pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     let ext = extension(path);
-    if flag(args, "colorways", false)
-        && matches!(ext.as_str(), "obj" | "fbx" | "glb" | "gltf")
-        && array(state, "colorways").len() > 1
-    {
-        return Err("Rust mesh export supports only one colorway".into());
-    }
     match ext.as_str() {
         "clorust" => return save(args, state),
         "zprj" | "zpac" => return save(&json!({"path": path, "thumbnail": false}), state),
@@ -651,7 +645,9 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
         }
         "dxf" => formats::write_dxf(path, array(state, "patterns"))?,
         "obj" | "fbx" | "glb" | "gltf" => {
-            let result = formats::write_mesh(path, &ext, state, flag(args, "include_avatar", false))?;
+            let result = formats::write_mesh(
+                path, &ext, state, flag(args, "include_avatar", false), flag(args, "colorways", false),
+            )?;
             return Ok(json!({"path": path, "result": result}));
         }
         _ => return Err(format!("unsupported export extension {ext:?}")),

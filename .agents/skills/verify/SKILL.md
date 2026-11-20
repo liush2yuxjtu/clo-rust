@@ -413,8 +413,8 @@ seam reference leaves the receiving scene intact. In a two-colorway scene,
 export DXF and pattern JSON with both `colorways` and `include_avatar` set.
 Compare the files to exports without those flags. Check the return values,
 nested Unicode destinations, and unchanged project identity. Check that a
-blocked save, unsupported extension, and unsupported multi-colorway mesh
-export preserve existing files and the scene.
+blocked save, unsupported extension, and mesh export with missing archived
+colorway materials preserve existing files and the scene.
 
 For a live multi-colorway export comparison, use a disposable two-panel
 project. In official CLO, call `utility_api.CopyColorway(0, 1)`, name the
@@ -438,6 +438,17 @@ indices, rest UVs, and posed vertices exactly. Read both front RGBA values
 through the three-argument fabric API, then repeat the query from Python
 after reopening. Verify the two-argument call reads the active colorway
 and an invalid colorway index leaves the scene intact.
+
+Run `--verify-native-colorway-exports` with `CLO_REORDERED_ZPRJ` set to
+the two-colorway Boat project. Compare exact filename order for OBJ, FBX,
+GLB, and glTF with the official `scene_export` response. Reopen OBJ and FBX
+and inspect the material, read both glTF containers and their buffers, and
+check that the two colors differ. With the official files in the
+`native-obj`, `native-fbx`, `native-glb` and `native-gltf` subdirectories of
+`CLO_NATIVE_COLORWAY_EXPORTS`, compare triangle counts and RGB values to
+within 1e-6. Check CLO's linear glTF color factors for native materials.
+Repeat an export, then block the second GLB path with a directory and
+verify the earlier file and original scene are preserved.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

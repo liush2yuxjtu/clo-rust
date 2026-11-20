@@ -10,9 +10,11 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Serialize, Deserialize)]
 struct Mesh {
@@ -441,7 +443,13 @@ fn gltf_export(meshes: &[Mesh], fabrics: &[Value]) -> Result<(Value, Vec<u8>), S
             let material_index = if let Some(index) = material_indices.get(&key) {
                 *index
             } else {
-                let color = fabric_base_color(fabric);
+                let mut color = fabric_base_color(fabric);
+                if fabric["info"]["source"] == "native_saved_material" {
+                    // CLO stores colorway RGB as gamma-encoded values and exports linear glTF factors.
+                    for channel in &mut color[..3] {
+                        *channel = channel.powf(2.2);
+                    }
+                }
                 let mut pbr = json!({"baseColorFactor": color, "metallicFactor": 0.0});
                 let mut material = json!({"name": fabric["name"].as_str().unwrap_or("Fabric"), "doubleSided": true});
                 if color[3] < 1.0 || texture_path.is_some() {
@@ -529,7 +537,17 @@ pub(in crate::compat_scene) fn write_mesh(
     format: &str,
     state: &Value,
     include_avatar: bool,
+    colorways: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    let (meshes, garment_count) = export_geometry(state, include_avatar)?;
+    let names = array(state, "colorways");
+    if colorways && names.len() > 1 {
+        return write_colorway_bundle(path, format, state, names, &meshes, garment_count);
+    }
+    write_mesh_files(path, format, &meshes, garment_count, array(state, "fabrics"), false)
+}
+
+fn export_geometry(state: &Value, include_avatar: bool) -> Result<(Vec<Mesh>, usize), String> {
     let mut meshes = Vec::new();
     let simulated = array(&state["simulation"], "meshes");
     if simulated.is_empty() {
@@ -607,23 +625,138 @@ pub(in crate::compat_scene) fn write_mesh(
     for mesh in &meshes {
         mesh.validate()?;
     }
-    if format == "fbx" {
-        fbx_export::export(path, meshes, garment_mesh_count, array(state, "fabrics"))?;
-        return Ok(vec![path.to_owned()]);
+    Ok((meshes, garment_mesh_count))
+}
+
+fn write_mesh_files(
+    path: &Path,
+    format: &str,
+    meshes: &[Mesh],
+    garment_count: usize,
+    fabrics: &[Value],
+    named_sidecars: bool,
+) -> Result<Vec<PathBuf>, String> {
+    let mut files = vec![path.to_owned()];
+    match format {
+        "fbx" => fbx_export::export(path, meshes, garment_count, fabrics)?,
+        "obj" => files.push(obj_export::export(path, meshes, fabrics, named_sidecars)?),
+        _ => {
+            let (mut root, bin) = gltf_export(meshes, fabrics)?;
+            if format == "glb" {
+                write(path, &glb_encode(&root, bin)?)?;
+            } else {
+                let uri = if named_sidecars {
+                    let buffer = path.with_extension("bin");
+                    let name = buffer.file_name().and_then(|name| name.to_str())
+                        .ok_or("glTF buffer filename must be valid UTF-8")?.to_owned();
+                    write(&buffer, &bin)?;
+                    files.push(buffer);
+                    name
+                } else {
+                    format!("data:application/octet-stream;base64,{}", to_base64(&bin))
+                };
+                root["buffers"][0]["uri"] = json!(uri);
+                super::write_json(path, &root)?;
+            }
+        }
     }
-    if format == "obj" {
-        let mtl = obj_export::export(path, &meshes, array(state, "fabrics"))?;
-        return Ok(vec![path.to_owned(), mtl]);
+    Ok(files)
+}
+
+struct StagedExport(PathBuf);
+
+impl StagedExport {
+    fn new(parent: &Path) -> Result<Self, String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        loop {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let folder = parent.join(format!(".clo-colorways-{}-{id}", std::process::id()));
+            match fs::create_dir(&folder) {
+                Ok(()) => return Ok(Self(folder)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("{}: {error}", folder.display())),
+            }
+        }
     }
-    let (mut root, bin) = gltf_export(&meshes, array(state, "fabrics"))?;
-    if format == "glb" {
-        write(path, &glb_encode(&root, bin)?)?;
-    } else {
-        root["buffers"][0]["uri"] = json!(format!(
-            "data:application/octet-stream;base64,{}",
-            to_base64(&bin)
-        ));
-        super::write_json(path, &root)?;
+}
+
+impl Drop for StagedExport {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
-    Ok(vec![path.to_owned()])
+}
+
+fn write_colorway_bundle(
+    path: &Path,
+    format: &str,
+    state: &Value,
+    names: &[Value],
+    meshes: &[Mesh],
+    garment_count: usize,
+) -> Result<Vec<PathBuf>, String> {
+    let stem = path.file_stem().ok_or("export path has no filename")?;
+    let mut used = HashSet::new();
+    let destinations: Vec<_> = names.iter().map(|name| {
+        let name = name.as_str()
+            .filter(|name| !name.is_empty() && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '#'])
+                && !name.chars().any(char::is_control))
+            .ok_or("invalid colorway name for export")?;
+        if !used.insert(name.to_lowercase()) {
+            return Err("colorway export names must be distinct");
+        }
+        let mut filename = OsString::from(stem);
+        filename.push(format!("_{name}.{format}"));
+        Ok(filename)
+    }).collect::<Result<_, _>>()?;
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let stage = StagedExport::new(parent)?;
+    let mut companions = Vec::new();
+    for (index, filename) in destinations.iter().enumerate() {
+        let fabrics = array(state, "fabrics").iter()
+            .map(|fabric| crate::compat_scene::fabric_for_colorway(state, fabric, index).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let files = write_mesh_files(&stage.0.join(filename), format, meshes, garment_count, &fabrics, true)?;
+        companions.extend(files.iter().skip(1).map(|file| path.with_file_name(file.file_name().unwrap())));
+    }
+    publish_colorway_files(&stage.0, parent, &destinations)?;
+    let mut result: Vec<_> = destinations.iter().map(|name| path.with_file_name(name)).collect();
+    result.extend(companions);
+    Ok(result)
+}
+
+fn publish_colorway_files(stage: &Path, parent: &Path, primary: &[OsString]) -> Result<(), String> {
+    let mut files = fs::read_dir(stage)
+        .and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name())).collect::<Result<Vec<_>, _>>())
+        .map_err(|error| error.to_string())?;
+    // Publish buffers, material files, and textures before the meshes that reference them.
+    files.sort_by_key(|name| primary.contains(name));
+    let backups = stage.join("previous");
+    fs::create_dir(&backups).map_err(|error| error.to_string())?;
+    for name in &files {
+        let target = parent.join(name);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if meta.is_file() => fs::hard_link(&target, backups.join(name))
+                .map_err(|error| format!("{}: {error}", target.display()))?,
+            Ok(_) => return Err(format!("{} is not a regular export file", target.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("{}: {error}", target.display())),
+        }
+    }
+    for (index, name) in files.iter().enumerate() {
+        let target = parent.join(name);
+        if let Err(error) = fs::rename(stage.join(name), &target) {
+            for published in files[..index].iter().rev() {
+                let target = parent.join(published);
+                let old = backups.join(published);
+                if old.is_file() {
+                    let _ = fs::rename(old, target);
+                } else {
+                    let _ = fs::remove_file(target);
+                }
+            }
+            return Err(format!("{}: {error}", target.display()));
+        }
+    }
+    Ok(())
 }

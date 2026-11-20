@@ -69,7 +69,10 @@ def read_gltf_export(path):
         assert raw[binary_header + 4:binary_header + 8] == b"BIN\0"
         return json.loads(raw[20:binary_header]), raw[binary_header + 8:]
     model = json.loads(path.read_text())
-    return model, base64.b64decode(model["buffers"][0]["uri"].split(",", 1)[1])
+    uri = model["buffers"][0]["uri"]
+    if uri.startswith("data:"):
+        return model, base64.b64decode(uri.split(",", 1)[1])
+    return model, (path.parent / uri).read_bytes()
 
 
 async def check_material_export(session, directory, png):
@@ -2180,6 +2183,7 @@ async def verify_interchange_append_keeps_drape():
             for path in fixtures + mesh_fixtures:
                 await json_result(rust, "scene_export", {"path": str(path)})
 
+            await json_result(rust, "fabric_apply", {"fabric": "cotton", "patterns": ["Front", "Back"]})
             project_path, _ = await save("multi-colorway")
             document = json.loads(project_path.read_text())
             document["scene"]["colorways"] = ["Original", "Alternate"]
@@ -2203,7 +2207,7 @@ async def verify_interchange_append_keeps_drape():
             rejected = await rust.call_tool("scene_export", {
                 "path": str(mesh_fixtures[0]), "colorways": True,
             })
-            assert rejected.isError and "one colorway" in rejected.content[0].text
+            assert rejected.isError and "no archived material" in rejected.content[0].text
             assert mesh_fixtures[0].read_bytes() == existing_mesh
             unknown = root / "unsupported.bin"
             rejected = await rust.call_tool("scene_export", {"path": str(unknown), "colorways": True})
@@ -3803,6 +3807,77 @@ async def verify_reordered_native_archives():
     print(json.dumps({"case": "reordered native PAC fields", "fixtures": checked}, ensure_ascii=False))
 
 
+async def verify_native_colorway_exports():
+    fixture = Path(os.environ["CLO_REORDERED_ZPRJ"]).resolve(strict=True)
+    expected_names = ("Original", "Alternate")
+    reference = os.environ.get("CLO_NATIVE_COLORWAY_EXPORTS")
+    with TemporaryDirectory(prefix="clo-colorway-export-") as directory:
+        root = Path(directory)
+        async with open_backend("rust") as session:
+            await inspect_contract(session)
+            await json_result(session, "scene_open", {"path": str(fixture)})
+            before = await json_result(session, "scene_info")
+            name = "fabric_api.GetFabricPBRMaterialBaseColor"
+            expected = [(await json_result(session, "clo_api_call", {"name": name, "args": [i, 0, 0]}))["value"]
+                        for i in range(len(expected_names))]
+            assert expected[0] != expected[1]
+            async def read_export(path):
+                if path.suffix in (".glb", ".gltf"):
+                    model, buf = read_gltf_export(path)
+                    primitives = [p for mesh in model["meshes"] for p in mesh["primitives"]]
+                    color = model["materials"][primitives[0]["material"]]["pbrMetallicRoughness"]["baseColorFactor"][:3]
+                    triangles = sum(model["accessors"][p["indices"]]["count"] // 3 for p in primitives)
+                    assert len(buf) >= model["buffers"][0]["byteLength"]
+                    return color, triangles
+                async with open_backend("rust") as imported:
+                    await json_result(imported, "scene_open", {"path": str(path)})
+                    save = root / "readback.clorust"
+                    await json_result(imported, "scene_save", {"path": str(save), "thumbnail": False})
+                    readback = json.loads(save.read_text())["scene"]
+                    return readback["fabrics"][0]["color"], sum(len(mesh["triangles"]) for mesh in readback["imported_meshes"])
+
+            report = {}
+            for ext in ("obj", "fbx", "glb", "gltf"):
+                base = root / ext / f"colored.{ext}"
+                outputs = [base.with_stem(f"colored_{name}") for name in expected_names]
+                companion_ext = {"obj": "mtl", "gltf": "bin"}.get(ext)
+                companions = [p.with_suffix(f".{companion_ext}") for p in outputs] if companion_ext else []
+                args = {"path": str(base), "colorways": True}
+                result = await json_result(session, "scene_export", args)
+                assert result == {"path": str(base), "result": [str(p) for p in outputs + companions]}
+                assert not base.exists() and all(p.stat().st_size > 0 for p in outputs + companions)
+                report[ext] = [p.name for p in outputs + companions]
+                for i, output in enumerate(outputs):
+                    color, triangles = await read_export(output)
+                    expected_rgb = [v ** 2.2 for v in expected[i][:3]] if ext in ("glb", "gltf") else expected[i][:3]
+                    assert all(abs(a - b) < 1e-6 for a, b in zip(color, expected_rgb, strict=True))
+                    assert triangles == 68
+                    if ext == "gltf":
+                        assert json.loads(output.read_text())["buffers"][0]["uri"] == companions[i].name
+                    if reference:
+                        native = Path(reference) / f"native-{ext}" / output.name
+                        native_color, native_triangles = await read_export(native)
+                        assert native_triangles == triangles
+                        assert all(abs(a - b) < 1e-6 for a, b in zip(color, native_color, strict=True))
+
+                if ext == "glb":
+                    assert await json_result(session, "scene_export", args) == result
+                    prior = outputs[0].read_bytes()
+                    outputs[1].unlink()
+                    outputs[1].mkdir()
+                    blocked = await session.call_tool("scene_export", args)
+                    assert blocked.isError and outputs[0].read_bytes() == prior and outputs[1].is_dir()
+                    assert set(base.parent.iterdir()) == set(outputs)
+            active = root / "active.glb"
+            await json_result(session, "scene_export", {"path": str(active)})
+            active_color, _ = await read_export(active)
+            assert all(abs(a - b ** 2.2) < 1e-6 for a, b in zip(active_color, expected[1][:3], strict=True))
+            assert await json_result(session, "scene_info") == before
+    print(json.dumps({"case": "multi-colorway mesh export", "outputs": report, "rgba": expected,
+                      "failed_bundle_preserves_existing_files": True, "scene_unchanged": True,
+                      "official_mesh_files_compared": bool(reference), "triangles_per_file": 68}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -4152,6 +4227,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-reordered-native-archives", action="store_const", dest="comparison",
                              const=verify_reordered_native_archives,
                              help="verify the two native Boat colorway archives and saved poses")
+    comparisons.add_argument("--verify-native-colorway-exports", action="store_const", dest="comparison",
+                             const=verify_native_colorway_exports,
+                             help="reopen all mesh formats exported from a native two-colorway archive")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
@@ -4162,6 +4240,7 @@ if __name__ == "__main__":
     if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_recolor_opacity, verify_fabric_texture_clear,
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
+                                verify_native_colorway_exports,
                                 verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,

@@ -407,9 +407,9 @@ fn encode(objects: Vec<Node>, connections: Vec<Node>) -> Result<Vec<u8>, String>
     Ok(out)
 }
 
-fn write_scene(
+fn write_scene<'a>(
     path: &Path,
-    groups: impl IntoIterator<Item = Vec<Mesh>>,
+    groups: impl IntoIterator<Item = &'a [Mesh]>,
     fabrics: &[Value],
     files: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
@@ -430,7 +430,7 @@ fn write_scene(
         let model_id = id();
         let mut slots = HashMap::new();
         let mut face_materials = Vec::new();
-        for mesh in &meshes {
+        for mesh in meshes {
             let fabric = mesh
                 .fabric_index
                 .as_u64()
@@ -476,7 +476,7 @@ fn write_scene(
         } else {
             "Garment"
         };
-        objects.push(geometry(geometry_id, name, &meshes, face_materials)?);
+        objects.push(geometry(geometry_id, name, meshes, face_materials)?);
         objects.push(Node::new(
             "Model",
             vec![Id(model_id), object_name(name, "Model"), "Mesh".into()],
@@ -490,7 +490,7 @@ fn write_scene(
 
 pub(super) fn export(
     path: &Path,
-    mut meshes: Vec<Mesh>,
+    meshes: &[Mesh],
     garment_mesh_count: usize,
     fabrics: &[Value],
 ) -> Result<(), String> {
@@ -500,14 +500,11 @@ pub(super) fn export(
     {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
-    let avatars = meshes
-        .split_off(garment_mesh_count)
-        .into_iter()
-        .map(|mesh| vec![mesh]);
-    let groups = Some(meshes)
+    let (garment, avatars) = meshes.split_at(garment_mesh_count);
+    let groups = Some(garment)
         .filter(|parts| !parts.is_empty())
         .into_iter()
-        .chain(avatars);
+        .chain(avatars.chunks_exact(1));
     let mut files = Vec::new();
     if let Err(error) = write_scene(path, groups, fabrics, &mut files) {
         for file in files {

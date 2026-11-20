@@ -31,7 +31,7 @@ fn write_bundle(
     let stem = mtl_path
         .file_stem()
         .and_then(|name| name.to_str())
-        .expect("generated ASCII stem");
+        .ok_or("OBJ material filename must be valid UTF-8")?;
     let mut obj = format!("# CLO Rust, millimetres, Y up\nmtllib {stem}.mtl\n");
     let mut mtl = String::new();
     let fabric_by_index: HashMap<_, _> = fabrics
@@ -113,13 +113,25 @@ fn write_bundle(
     write(path, obj.as_bytes())
 }
 
-pub(super) fn export(path: &Path, meshes: &[Mesh], fabrics: &[Value]) -> Result<PathBuf, String> {
+pub(super) fn export(
+    path: &Path,
+    meshes: &[Mesh],
+    fabrics: &[Value],
+    named_sidecar: bool,
+) -> Result<PathBuf, String> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    let (mtl_path, file) = sidecar(parent)?;
+    let (mtl_path, file) = if named_sidecar {
+        let mtl_path = path.with_extension("mtl");
+        let file = File::create_new(&mtl_path)
+            .map_err(|error| format!("{}: {error}", mtl_path.display()))?;
+        (mtl_path, file)
+    } else {
+        sidecar(parent)?
+    };
     // Keep a relative request relative, including the returned companion path.
     let mtl_path = path.with_file_name(mtl_path.file_name().expect("generated MTL basename"));
     let mut created = vec![mtl_path.clone()];
