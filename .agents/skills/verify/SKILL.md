@@ -101,6 +101,29 @@ The sweep exits nonzero for missing, unexpected, or failed calls. Its success cr
 is `expected_count = called_count = ok_count = 48` with empty `missing`,
 `unexpected`, and `errors` arrays. Use `tools.<name>` to inspect each result.
 
+#### What to verify for each tool
+
+Use the pinned list as the row index. Record the Rust revision, reference MCP
+and CLO 3D versions, exact MCP arguments, fixture checksum, and both runs'
+results. For mutations, give each backend an independent copy of the same
+starting scene. Capture the initial state so the expected change can be checked
+explicitly. Run error cases on a fresh copy or capture the state just before
+the rejected call.
+
+| Verify | How to check |
+| --- | --- |
+| Input contract | Compare the `tools/list` entry, then exercise required arguments, defaults, and relevant boundary or invalid values through `tools/call`. |
+| Return values | Compare structured fields, types, order and units. Treat volatile fields such as elapsed time or temporary paths according to what the tool promises. For numeric comparisons, record the tolerance and its units before running the case. |
+| Scene or file changes | Read the affected objects back through a separate MCP call. For saved or exported output, reopen or parse it and check the properties relevant to the tool. |
+| Error behavior | Use the same bad input in both backends. Compare the error outcome and read back the scene to check which operations took effect before the error. Some multi-stage tools keep completed changes. |
+
+Record the verdict for each case as **PASS**, **FAIL**, **BLOCKED** (for example
+when the required native bridge is down), or **NOT RUN**. Label saved CLO
+captures and SDK callback tests with their evidence type. A dual-backend scene
+case requires a live native run. Aggregate a tool as matched only after all
+its applicable cases pass. Keep the 48-tool contract and Rust smoke totals
+separate from the behavioral count.
+
 #### Read the evidence and reproduce a matched case
 
 The contract command reads `tools/list` directly from the reference MCP and
@@ -137,9 +160,9 @@ recording a live comparison. Keep results at case granularity. A tool-level
 behavior PASS requires all applicable cases in the checklist below. For example,
 compare `scene_info` with the same saved project and inspect ordered panels,
 avatars, fabrics, and seam groups. For a mutation, also read back the affected
-state and check that a rejected request leaves it intact. For a file or image,
-reopen or parse it and verify the properties the case requires. Report the
-three results separately and link the case evidence behind the behavioral tally.
+state after successful and rejected requests and compare with the expected changes.
+For a file or image, reopen or parse it and check the relevant properties. Report
+the three results separately and link the case evidence behind the behavioral tally.
 
 Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
 to include the official backend smoke. Run it with the CLO 3D bridge connected.
