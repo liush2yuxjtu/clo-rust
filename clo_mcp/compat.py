@@ -98,6 +98,8 @@ async def backend_lifespan(_server):
 def image_blocks(name, result):
     blocks = []
     summary = {key: value for key, value in result.items() if key != "images"}
+    if name == "snapshot_2d":
+        summary.pop("path", None)
     if summary and name != "clo_ui_screenshot":
         blocks.append(types.TextContent(type="text", text=json.dumps(summary, ensure_ascii=False)))
     for image in result.get("images", []):

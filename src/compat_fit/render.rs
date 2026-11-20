@@ -26,6 +26,7 @@ struct Drawing {
     color: Rgb,
     texcoords: Vec<[f64; 2]>,
     texture: Option<Rc<BaseTexture>>,
+    strokes: Vec<Vec<Point>>,
 }
 
 impl Drawing {
@@ -38,6 +39,7 @@ impl Drawing {
                 .map_err(|e| format!("invalid snapshot mesh faces: {e}"))?,
             texcoords: serde_json::from_value(mesh["texcoords"].clone()).unwrap_or_default(),
             texture: None,
+            strokes: Vec::new(),
         })
     }
 }
@@ -99,7 +101,7 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
         } else {
             solver::initial_meshes(state)?
         };
-        return Ok(meshes
+        return meshes
             .into_iter()
             .enumerate()
             .filter(|(_, mesh)| flat || !hidden(state, &mesh.id))
@@ -110,11 +112,17 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
                     color: [0; 3],
                     texcoords: mesh.texcoords,
                     texture: None,
+                    strokes: Vec::new(),
                 };
+                if flat {
+                    if let Some(pattern) = array(&state["patterns"]).get(index) {
+                        drawing.strokes = crate::compat_scene::internal_strokes(pattern)?;
+                    }
+                }
                 textures.apply(state, &mesh.fabric_index, index, &mut drawing);
-                drawing
+                Ok(drawing)
             })
-            .collect());
+            .collect();
     }
     cached
         .iter()
@@ -287,18 +295,15 @@ impl Canvas {
         flat: bool,
     ) -> Result<(), String> {
         let [w, h] = SIZE;
-        let points: Vec<_> = drawing
-            .points
-            .iter()
-            .map(|&p| {
-                let [x, y, z] = project(p, camera);
-                [
-                    w as f64 / 2.0 + (x - center[0]) * scale,
-                    h as f64 / 2.0 - (y - center[1]) * scale,
-                    z * scale,
-                ]
-            })
-            .collect();
+        let screen = |p| {
+            let [x, y, z] = project(p, camera);
+            [
+                w as f64 / 2.0 + (x - center[0]) * scale,
+                h as f64 / 2.0 - (y - center[1]) * scale,
+                z * scale,
+            ]
+        };
+        let points: Vec<_> = drawing.points.iter().copied().map(screen).collect();
         let mut edge_incidence = std::collections::BTreeMap::<(usize, usize), usize>::new();
         for &[a, b, c] in &drawing.faces {
             if [a, b, c].iter().any(|&i| i >= points.len()) {
@@ -331,6 +336,12 @@ impl Canvas {
         for ((start, end), count) in edge_incidence {
             if count == 1 {
                 self.segment(points[start], points[end], [45, 53, 68]);
+            }
+        }
+        for stroke in &drawing.strokes {
+            let projected: Vec<_> = stroke.iter().copied().map(screen).collect();
+            for segment in projected.windows(2) {
+                self.segment(segment[0], segment[1], [180, 53, 72]);
             }
         }
         Ok(())
@@ -392,7 +403,7 @@ fn render_canvas(drawings: &[Drawing], view: &str, flat: bool) -> Result<Canvas,
     let camera = camera(view)?;
     let mut low = [f64::INFINITY; 2];
     let mut high = [f64::NEG_INFINITY; 2];
-    for point in drawings.iter().flat_map(|d| d.points.iter()) {
+    for point in drawings.iter().flat_map(|d| d.points.iter().chain(d.strokes.iter().flatten())) {
         let p = project(*point, &camera);
         for i in 0..2 {
             low[i] = low[i].min(p[i]);
@@ -467,6 +478,7 @@ fn scene_drawings(
                         color: [190, 183, 177],
                         texcoords: Vec::new(),
                         texture: None,
+                        strokes: Vec::new(),
                     }),
             );
         }
@@ -563,4 +575,32 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
         result["path"] = result["images"][0]["path"].clone();
     }
     Ok(result)
+}
+
+#[cfg(test)]
+#[test]
+fn flat_snapshot_renders_visible_inner_paths_only() {
+    let state = json!({
+        "patterns": [{
+            "id": 0, "name": "Panel",
+            "points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "native_children": [
+                {"type": "InnerShape", "lines": [{"points": [[20, 50], [50, 65, 2], [80, 50]]}]},
+                {"type": "InnerShape", "visible": false, "lines": [{"points": [[20, 30], [80, 30]]}]},
+                {"type": "Base Line", "lines": [{"points": [[20, 25], [80, 25]]}]},
+            ]
+        }],
+    });
+    let drawings = scene_drawings(&state, true, &mut TextureCache::default()).unwrap();
+    assert_eq!(drawings[0].strokes.len(), 1);
+    let canvas = render_canvas(&drawings, "2d", true).unwrap();
+    let pixel = |x, y| {
+        let offset = (y * SIZE[0] + x) * 3;
+        &canvas.pixels[offset..offset + 3]
+    };
+    let interior = &[180, 53, 72];
+    assert_eq!(pixel(400, 260), interior);
+    assert_ne!(pixel(400, 350), interior);
+    assert_ne!(pixel(400, 470), interior);
+    assert_ne!(pixel(400, 500), interior);
 }

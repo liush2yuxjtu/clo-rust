@@ -372,6 +372,20 @@ fn input_children(pattern: &Value) -> Result<Vec<Value>, String> {
     Ok(records)
 }
 
+pub(crate) fn internal_strokes(pattern: &Value) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    let [dx, dy] = offset(pattern);
+    array(pattern, "native_children")
+        .iter()
+        .filter(|child| child["type"] == "InnerShape" && child["visible"].as_bool() != Some(false))
+        .flat_map(|child| array(child, "lines"))
+        .filter_map(|line| line["points"].as_array())
+        .map(|points| {
+            let points = points.iter().map(Point::from_json).collect::<Result<Vec<_>, _>>()?;
+            Ok(curve(&points, false).into_iter().map(|p| [p.x + dx, p.y + dy, 0.0]).collect())
+        })
+        .collect()
+}
+
 pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &args["pattern"])?;
     let pattern = &state["patterns"][i];
@@ -562,12 +576,23 @@ fn flip(pattern: &mut Value, horizontal: bool) -> Result<(), String> {
         mirror(p);
     }
     if let Some(children) = pattern["native_children"].as_array_mut() {
-        for child in children {
-            if let Some(points) = child["points"].as_array_mut() {
+        let mirror_points = |points: &mut Value| -> Result<(), String> {
+            if let Some(points) = points.as_array_mut() {
                 for point in points {
                     let mut p = Point::from_json(point)?;
                     mirror(&mut p);
                     *point = p.record();
+                }
+            }
+            Ok(())
+        };
+        for child in children {
+            mirror_points(&mut child["points"])?;
+            if let Some(lines) = child["lines"].as_array_mut() {
+                for line in lines {
+                    if let Some(points) = line.get_mut("points") {
+                        mirror_points(points)?;
+                    }
                 }
             }
         }

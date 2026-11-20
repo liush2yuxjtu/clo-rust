@@ -92,6 +92,13 @@ descriptors. Check child line lengths to within 0.1 mm. Use a disposable Rust
 scene to check save/reopen and a translated or reflected pattern. Verify
 internal sewing via the separate solver cases.
 
+For `snapshot_2d`, run `cargo test --locked flat_snapshot_renders_visible_inner_paths_only`.
+Check an actual saved project with curved and straight internal lines.
+Compare caption and PNG blocks and read the scene before and after capture
+with `--compare-saved-snapshot-2d`. Inspect both images for relative layout,
+outline completeness and visible internal paths. Renderer dimensions may differ.
+Save and reopen the Rust project, render again and verify lines persist.
+
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group
 indices in `pattern_list(detail=True)`. Test with a saved project that contains

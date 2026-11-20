@@ -425,10 +425,19 @@ fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Va
     let mut metrics = Vec::with_capacity(lines.len());
     for line in &lines {
         let (mut edge, straight) = line_shape(line, &vertices)?;
+        let controls = edge
+            .iter()
+            .map(|&p| {
+                let p = parent.position(transform.position(p));
+                (p.x.is_finite() && p.y.is_finite()).then(|| p.record())
+            })
+            .collect::<Option<Vec<_>>>()?;
         for point in &mut edge {
             *point = parent.vector(transform.vector(*point));
         }
-        metrics.push(line_metrics(&edge, straight)?);
+        let mut line = line_metrics(&edge, straight)?;
+        line["points"] = json!(controls);
+        metrics.push(line);
     }
     let points: Vec<_> = vertices
         .into_iter()
@@ -437,7 +446,8 @@ fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Va
             (point.x.is_finite() && point.y.is_finite()).then(|| point.record())
         })
         .collect::<Option<_>>()?;
-    Some(json!({"type": kind, "points": points, "lines": metrics}))
+    let visible = shape.get(b"bVisible", 1).ok() != Some(&[0]);
+    Some(json!({"type": kind, "points": points, "lines": metrics, "visible": visible}))
 }
 
 fn child_shapes(record: &Fields<'_>) -> Option<Vec<Value>> {

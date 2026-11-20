@@ -656,6 +656,38 @@ async def compare_saved_avatar_cache():
     }, ensure_ascii=False))
 
 
+async def compare_saved_snapshot_2d():
+    async def capture(session):
+        scene = await json_result(session, "scene_info")
+        async with asyncio.timeout(60):
+            result = await successful(session, "snapshot_2d")
+        assert [block.type for block in result.content] == ["text", "image"], result.content
+        caption, image = result.content
+        assert caption.text.startswith("2D snapshot: ") and image.mimeType == "image/png"
+        png = base64.b64decode(image.data, validate=True)
+        assert png.startswith(b"\x89PNG\r\n\x1a\n") and png[12:16] == b"IHDR"
+        dimensions = struct.unpack_from(">II", png, 16)
+        assert len(png) > 1000 and all(dimensions)
+        assert await json_result(session, "scene_info") == scene
+        return scene, dimensions
+
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene, official = await capture(session)
+    assert scene["pattern_count"] > 0
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust_scene, rust = await capture(session)
+    assert scene["patterns"] == rust_scene["patterns"]
+    print(json.dumps({
+        "tool": "snapshot_2d", "pattern_count": scene["pattern_count"],
+        "dimensions": {"official": official, "rust": rust}, "scene_readback": "pass",
+    }))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -695,6 +727,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-avatar-cache", action="store_const", dest="comparison",
                              const=compare_saved_avatar_cache,
                              help="compare the same saved avatar measurement cache across backends")
+    comparisons.add_argument("--compare-saved-snapshot-2d", action="store_const", dest="comparison",
+                             const=compare_saved_snapshot_2d,
+                             help="capture both backends' 2D layout and verify the PNG response")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
