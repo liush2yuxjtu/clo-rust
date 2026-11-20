@@ -5405,6 +5405,114 @@ async def compare_live_checkpoint_roundtrip():
                      ensure_ascii=False))
 
 
+async def compare_live_damaged_projects():
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    avatar_project = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert root.is_dir() and project.is_file() and avatar_project.is_file()
+    assert "CLO_RUST_CHECKPOINT_DIR" not in os.environ
+    directory = root / "checkpoints"
+    directory.mkdir(exist_ok=True)
+    original_bytes = project.read_bytes()
+    header = original_bytes[:16]
+    assert header == b" ZPRJ       CLO "
+
+    def project_envelope(member, data):
+        output = BytesIO(header)
+        with zipfile.ZipFile(output, "a") as archive:
+            archive.writestr(member, data)
+        return output.getvalue()
+
+    cases = {
+        "unsigned": b"not a CLO project",
+        "wrong-header": b" ZPRJ garbage data",
+        "header-only": header,
+        "no-zip-footer": original_bytes[:-22],
+        "no-garment": project_envelope("notes.txt", "no garment"),
+        "truncated-garment": project_envelope("garment.zpac", b" ZPAC       CLO "),
+    }
+    avatar_cases = {"avatar-no-garment": False, "avatar-truncated-garment": True}
+    with zipfile.ZipFile(avatar_project) as original:
+        for name, keep_garment in avatar_cases.items():
+            output = BytesIO(header)
+            with zipfile.ZipFile(output, "a") as archive:
+                for member in original.namelist():
+                    if not member.lower().endswith(".zpac"):
+                        archive.writestr(member, original.read(member))
+                    elif keep_garment:
+                        archive.writestr(member, b" ZPAC       CLO ")
+            cases[name] = output.getvalue()
+    for name, data in cases.items():
+        with (directory / f"{name}.zprj").open("xb") as handle:
+            handle.write(data)
+
+    keys = ("project", "project_path", "pattern_count", "patterns", "seam_groups",
+            "avatars", "fabric_count", "fabrics", "colorways", "current_colorway")
+
+    async def readback(session):
+        info = await json_result(session, "scene_info")
+        panels = await json_result(session, "pattern_list", {"detail": True})
+        seams = await json_result(session, "seams_list")
+        return {key: info[key] for key in keys}, panels, seams
+
+    results = {}
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        try:
+            for backend, session in (("official", clo), ("rust", rust)):
+                avatars = (await json_result(session, "scene_open", {"path": str(avatar_project)}))["avatars"]
+                assert avatars
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                empty, empty_panels, empty_seams = await readback(session)
+                rows = []
+                for name in (*cases, "missing"):
+                    path = str(directory / f"{name}.zprj")
+                    for operation in ("append", "replace", "checkpoint"):
+                        await json_result(session, "scene_open", {"path": str(project)})
+                        before = await readback(session)
+                        assert before[0]["pattern_count"] == 2 and before[0]["seam_groups"] == 1
+                        assert before[0]["avatars"] == []
+                        tool = "checkpoint_restore" if operation == "checkpoint" else "scene_open"
+                        args = {"name": name} if operation == "checkpoint" else {"path": path, "mode": operation}
+                        response = await session.call_tool(tool, args)
+                        after = await readback(session)
+                        result = None
+                        if name == "missing":
+                            assert response.isError and after == before, (backend, name, operation, after)
+                        else:
+                            assert not response.isError, (backend, name, operation, response.content)
+                            result = response.structuredContent or json.loads(response.content[0].text)
+                            loaded_avatars = avatars if name in avatar_cases else []
+                            if operation == "append":
+                                expected = before[0] | {"avatars": loaded_avatars}, before[1], before[2]
+                            else:
+                                expected = (empty | {"project": name, "project_path": path, "avatars": loaded_avatars},
+                                            empty_panels, empty_seams)
+                            assert after == expected, (backend, name, operation, after)
+                            assert result == {"ok": True, "path": path, "pattern_count": after[0]["pattern_count"],
+                                              "avatars": after[0]["avatars"]}, (backend, result)
+                        rows.append({"case": name, "operation": operation, "response": result,
+                                     "error": response.isError, "scene": after})
+                results[backend] = rows
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert results["official"] == results["rust"]
+    assert project.read_bytes() == original_bytes
+    assert all((directory / f"{name}.zprj").read_bytes() == data for name, data in cases.items())
+    print(json.dumps({"result": "pass", "comparisons": len(results["rust"]),
+                      "damaged_fixtures": list(cases), "append_preserved": True,
+                      "replace_and_restore_cleared_garment": True, "missing_preserved": True,
+                      "embedded_avatars_recovered": True,
+                      "fixture_sha256": hashlib.sha256(original_bytes).hexdigest()}))
+
+
 async def compare_shared_checkpoint_folder():
     fixture = os.environ.get("CLO_CHECKPOINT_FIXTURE")
     assert fixture, "set CLO_CHECKPOINT_FIXTURE to a saved native CLO project"
@@ -5494,11 +5602,14 @@ async def compare_shared_checkpoint_folder():
             auto_readback = await json_result(rust, "checkpoint_restore", {"name": second_auto["name"]})
             assert auto_readback["pattern_count"] == direct["pattern_count"]
 
-            (directory / "corrupt.zprj").write_text("not a CLO project")
+            corrupt = directory / "corrupt.zprj"
+            corrupt.write_text("not a CLO project")
             before_error = await json_result(rust, "scene_info")
-            for name in ("missing", "corrupt"):
-                assert (await rust.call_tool("checkpoint_restore", {"name": name})).isError
-                assert await json_result(rust, "scene_info") == before_error
+            assert (await rust.call_tool("checkpoint_restore", {"name": "missing"})).isError
+            assert await json_result(rust, "scene_info") == before_error
+            restored = await json_result(rust, "checkpoint_restore", {"name": "corrupt"})
+            assert restored == {"ok": True, "path": str(corrupt), "pattern_count": 0, "avatars": []}
+            assert (await json_result(rust, "scene_info"))["project_path"] == str(corrupt)
 
             await json_result(rust, "scene_clear", {"keep_avatar": False})
             auto_portable = await json_result(rust, "checkpoint_save")
@@ -5517,7 +5628,8 @@ async def compare_shared_checkpoint_folder():
                       "case": "shared native checkpoint folder", "same_native_listing": True,
                       "restored_patterns": direct["pattern_count"],
                       "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
-                      "corrupt_and_missing_preserve_scene": True, "portable_name_precedence": True,
+                      "missing_preserves_scene": True, "corrupt_native_clears_scene": True,
+                      "portable_name_precedence": True,
                       "rust_native_checkpoint_listed_by_reference": True,
                       "auto_native_checkpoints_listed_by_reference": 2,
                       "auto_collision_preserves_existing": True}))
@@ -7798,6 +7910,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-checkpoint-roundtrip", action="store_const", dest="comparison",
                              const=compare_live_checkpoint_roundtrip,
                              help="save, overwrite, list and restore native checkpoints across both live backends")
+    comparisons.add_argument("--compare-live-damaged-projects", action="store_const", dest="comparison",
+                             const=compare_live_damaged_projects,
+                             help="compare damaged ZPRJ append, replace and checkpoint restore")
     comparisons.add_argument("--compare-shared-checkpoint-folder", action="store_const", dest="comparison",
                              const=compare_shared_checkpoint_folder,
                              help="compare a shared checkpoint listing and restore the native archive in Rust")

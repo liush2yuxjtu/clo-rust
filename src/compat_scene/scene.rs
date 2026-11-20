@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -517,16 +516,6 @@ fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, Strin
     Ok(true)
 }
 
-fn has_project_signature(path: &Path) -> Result<bool, String> {
-    let mut prefix = [0; 5];
-    let mut file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    match file.read_exact(&mut prefix) {
-        Ok(()) => Ok(&prefix == b" ZPRJ"),
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(error) => Err(format!("{}: {error}", path.display())),
-    }
-}
-
 fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mut Value) -> Reply {
     match ext {
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
@@ -550,22 +539,28 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
         }
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
-            if is_project && load_avatar && !has_project_signature(path)? {
-                // CLO accepts a missing project signature. Replacement still
-                // clears the scene and adopts the requested project name.
+            let loaded = if is_project && load_avatar {
+                formats::clo_native::read_scene_project(path)?
+            } else {
+                Some(formats::clo_native::read(path, is_project)?)
+            };
+            let Some(mut loaded) = loaded else {
+                // CLO can still import independently stored avatars when the
+                // garment envelope is missing or unreadable.
+                let avatars = crate::compat_fit::project_avatar(path).unwrap_or_default();
                 if !append {
                     replace_scene(state, empty_project());
                     set_project(state, path);
                 }
+                import_project_avatar(state, avatars, append);
                 return Ok(open_reply(state, path));
-            }
+            };
             let prior_count = array(state, "patterns").len();
             let composition = if append && prior_count != 0 {
                 formats::native_save::append_sources(state, path, is_project)
             } else {
                 None
             };
-            let mut loaded = formats::clo_native::read(path, is_project)?;
             let composition = composition.filter(|_| !array(state, "colorways").is_empty()
                 && !array(&loaded, "colorways").is_empty());
             let empty_receiver = append

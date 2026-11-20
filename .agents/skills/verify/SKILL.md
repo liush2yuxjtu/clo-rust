@@ -988,8 +988,9 @@ project becomes that checkpoint, and Rust restores its saved state. Omit the nam
 then pass an empty name with existing timestamp files in the directory. Check
 that both calls use distinct suffixed names and produce native projects
 visible to both adapters. Check that
-same-name `.clorust` writes preserve the existing native archive and failed
-restores preserve the scene. A live CLO restore requires the bridge.
+same-name `.clorust` writes preserve the native archive. A missing checkpoint
+preserves the scene. Restoring an unsigned file as a native checkpoint
+replaces the scene with an empty project. A live CLO restore requires the bridge.
 
 Run `--compare-live-checkpoint-roundtrip` with a live bridge, the same
 `multi-colorway-colored.zprj` on both backends, and an empty shared
@@ -1002,8 +1003,20 @@ can restore the Rust revision. Repeat the overwrite in reverse, then
 cross-restore two automatically named checkpoints. Compare the full list,
 the active project path, materials, colors and seam groups, and vertex,
 triangle and UV readback from each archive. A missing name leaves the scene
-in place. Run the malformed-signature scene cases below in a disposable project.
-Replacement with such a file can clear the scene and still return success.
+in place.
+
+Run `--compare-live-damaged-projects` with a live bridge and a fresh
+`CLO_MCP_STATE` directory visible to both adapters. Set
+`CLO_SCENE_OPEN_PROJECT` to the shared two-panel ZPRJ and
+`CLO_SCENE_OPEN_AVATAR_PROJECT` to the shared project with an embedded avatar.
+Unset `CLO_RUST_CHECKPOINT_DIR`. Compare eight damaged ZPRJ fixtures and one
+missing file through append, replace, and checkpoint restore. For damaged
+files, append reports success and preserves the existing garment and path.
+Replace and restore report success, adopt the bad file's path, and clear
+the garment. In both modes, independently stored avatars are imported.
+All three calls against the missing file return an error and preserve the
+scene. Check detailed panels and seams after every call, and verify that
+the input fixtures remain byte-identical.
 
 Run `--compare-live-scene-open` with a live bridge and a fresh disposable
 `CLO_MCP_STATE`. Set `CLO_SCENE_OPEN_PROJECT` to `multi-colorway-colored.zprj`,

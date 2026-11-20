@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
-use zip::ZipArchive;
+use zip::{result::ZipError, ZipArchive};
 
 pub(super) const ZPRJ: &[u8] = b" ZPRJ       CLO ";
 pub(super) const ZPAC: &[u8; 16] = b" ZPAC       CLO ";
@@ -58,22 +58,58 @@ pub(super) fn consume(data: &[u8], cursor: &mut usize, marker: &[u8]) -> Result<
     }
 }
 
-pub(super) fn open_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Result<ZipArchive<R>, String> {
-    let mut prefix = [0u8; 16];
-    reader
-        .read_exact(&mut prefix)
-        .map_err(|e| format!("read native file header: {e}"))?;
-    if prefix != header {
-        return Err("unexpected native CLO file header".into());
+enum ArchiveOpenError {
+    Malformed(String),
+    Other(String),
+}
+
+impl ArchiveOpenError {
+    fn message(self) -> String {
+        match self {
+            Self::Malformed(message) | Self::Other(message) => message,
+        }
     }
-    reader
-        .rewind()
-        .map_err(|e| format!("seek before native archive: {e}"))?;
-    let archive = ZipArchive::new(reader).map_err(|e| format!("read embedded CLO archive: {e}"))?;
+}
+
+fn parse_archive<R: Read + Seek>(mut reader: R, header: &[u8]) -> Result<ZipArchive<R>, ArchiveOpenError> {
+    let mut prefix = [0u8; 16];
+    reader.read_exact(&mut prefix).map_err(|error| {
+        let message = format!("read native file header: {error}");
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            ArchiveOpenError::Malformed(message)
+        } else {
+            ArchiveOpenError::Other(message)
+        }
+    })?;
+    if prefix != header {
+        return Err(ArchiveOpenError::Malformed("unexpected native CLO file header".into()));
+    }
+    reader.rewind()
+        .map_err(|error| ArchiveOpenError::Other(format!("seek before native archive: {error}")))?;
+    let archive = ZipArchive::new(reader).map_err(|error| {
+        let message = format!("read embedded CLO archive: {error}");
+        if matches!(error, ZipError::InvalidArchive(_)) {
+            ArchiveOpenError::Malformed(message)
+        } else {
+            ArchiveOpenError::Other(message)
+        }
+    })?;
     if archive.len() > MAX_MEMBERS {
-        return Err("native CLO archive has too many entries".into());
+        return Err(ArchiveOpenError::Other("native CLO archive has too many entries".into()));
     }
     Ok(archive)
+}
+
+pub(super) fn open_archive<R: Read + Seek>(reader: R, header: &[u8]) -> Result<ZipArchive<R>, String> {
+    parse_archive(reader, header).map_err(ArchiveOpenError::message)
+}
+
+fn scene_archive<R: Read + Seek>(reader: R, header: &[u8]) -> Result<Option<ZipArchive<R>>, String> {
+    match parse_archive(reader, header) {
+        Ok(archive) => Ok(Some(archive)),
+        Err(ArchiveOpenError::Malformed(_)) => Ok(None),
+        Err(error) => Err(error.message()),
+    }
 }
 
 pub(super) fn optional_member<R: Read + Seek>(
@@ -503,6 +539,16 @@ fn read_garment<R: Read + Seek>(mut archive: ZipArchive<R>) -> Result<Value, Str
         state["native_texture_warnings"] = json!([error]);
     }
     Ok(state)
+}
+
+pub(in crate::compat_scene) fn read_scene_project(path: &Path) -> Result<Option<Value>, String> {
+    let Some(mut outer) = scene_archive(bounded_file(path)?, ZPRJ)? else {
+        return Ok(None);
+    };
+    let Some((_, garment)) = optional_member(&mut outer, "zpac")? else {
+        return Ok(None);
+    };
+    scene_archive(Cursor::new(garment), ZPAC)?.map(read_garment).transpose()
 }
 
 pub(in crate::compat_scene) fn read(path: &Path, project: bool) -> Result<Value, String> {

@@ -118,12 +118,28 @@ fn seams_survive_pattern_index_changes_and_round_trip() {
     assert_eq!(state["avatar"]["name"], "Sample Avatar");
     let current = state.clone();
     let native = root.0.join("native.zprj");
-    fs::write(&native, b" ZPRJ").unwrap();
-    let error = dispatch("scene_open", &json!({"path":native}), &mut state)
+    fs::write(&native, b" ZPRJ       CLO ").unwrap();
+    assert_eq!(
+        tool(&mut state, "scene_open", json!({"path":native,"mode":"append"})),
+        json!({"ok":true,"path":native,"pattern_count":2,"avatars":["Sample Avatar"]}),
+    );
+    assert_eq!(state, current);
+
+    let unsupported = root.0.join("native.zpac");
+    fs::write(&unsupported, b" ZPAC").unwrap();
+    let error = dispatch("scene_open", &json!({"path":unsupported}), &mut state)
         .unwrap()
         .unwrap_err();
     assert!(error.contains("native file header"));
     assert_eq!(state, current);
+
+    assert_eq!(
+        tool(&mut state, "scene_open", json!({"path":native})),
+        json!({"ok":true,"path":native,"pattern_count":0,"avatars":[]}),
+    );
+    assert_eq!(state["project_path"], json!(native));
+    assert_eq!(tool(&mut state, "seams_list", json!({}))["count"], 0);
+    assert!(state["avatar"].is_null());
 }
 
 #[test]
