@@ -1,6 +1,6 @@
 //! Conforming refinement along selected pattern boundaries.
 
-use super::{boolean, distance2, edge, Edge, Point2, MAX_SIMULATION_VERTICES};
+use super::{boolean, distance2, edge, split_marked_edges, Edge, Point2, MAX_SIMULATION_VERTICES};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,29 +12,6 @@ fn distance_to_segment(point: Point2, [a, b]: [Point2; 2]) -> f64 {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let t = (((point[0] - a[0]) * ab[0] + (point[1] - a[1]) * ab[1]) / length).clamp(0.0, 1.0);
     distance2(point, [a[0] + t * ab[0], a[1] + t * ab[1]])
-}
-
-fn subdivide(t: [usize; 3], mid: [Option<usize>; 3], output: &mut Vec<[usize; 3]>) {
-    match mid {
-        [None, None, None] => output.push(t),
-        [Some(ab), Some(bc), Some(ca)] => {
-            let [a, b, c] = t;
-            output.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
-        }
-        _ => {
-            let two = mid.iter().flatten().count() == 2;
-            let i = mid.iter().position(|slot| slot.is_none() == two).unwrap();
-            let [a, b, c] = [t[i], t[(i + 1) % 3], t[(i + 2) % 3]];
-            if two {
-                let bc = mid[(i + 1) % 3].unwrap();
-                let ca = mid[(i + 2) % 3].unwrap();
-                output.extend([[c, ca, bc], [a, b, ca], [b, bc, ca]]);
-            } else {
-                let ab = mid[i].unwrap();
-                output.extend([[a, ab, c], [ab, b, c]]);
-            }
-        }
-    }
 }
 
 pub(super) fn refine(
@@ -95,30 +72,14 @@ pub(super) fn refine(
         if midpoints.is_empty() {
             break;
         }
-        let mut refined = Vec::with_capacity(triangles.len());
-        for &[a, b, c] in triangles.iter() {
-            let split =
-                [edge(a, b), edge(b, c), edge(c, a)].map(|key| midpoints.get(&key).copied());
-            subdivide([a, b, c], split, &mut refined);
-        }
-        for side in &mut *sides {
-            let mut expanded = Vec::with_capacity(side.len());
-            for pair in side.windows(2) {
-                expanded.push(pair[0]);
-                expanded.extend(midpoints.get(&edge(pair[0], pair[1])).copied());
-            }
-            expanded.extend(side.last().copied());
-            *side = expanded;
-        }
-        *triangles = refined;
+        split_marked_edges(triangles, sides, &midpoints);
     }
     Ok(added)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::compat_fit::solver::flat_cross;
+    use crate::compat_fit::solver::{flat_cross, subdivide};
 
     #[test]
     fn every_edge_split_pattern_preserves_area_and_winding() {

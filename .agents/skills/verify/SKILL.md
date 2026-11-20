@@ -104,6 +104,12 @@ preserved. Reopen the Rust project and repeat from the new mesh. Compare against
 a disposable copy without the recorded `inner_seam_rest` coordinates, and check
 that points outside the new mesh are rejected rather than snapped to a boundary.
 
+For local edge refinement, run `cargo test --locked adaptive_remesh_preserves_boundary_and_avoids_uniform_subdivision`.
+At the MCP boundary, probe two particle distances on the same saved garment.
+Check mesh size, preserved seams, triangulated area and boundary incidence.
+Save and reopen both a new adaptive mesh and an older Rust mesh, and check
+that a zero-step continuation preserves the meshes and accumulated step count.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.

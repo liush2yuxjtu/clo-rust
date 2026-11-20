@@ -6,7 +6,7 @@ use crate::collision::MeshCollider;
 use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 type Point = [f64; 3];
 type Point2 = [f64; 2];
@@ -204,7 +204,141 @@ fn triangulate(points: &[Point2]) -> Result<Vec<[usize; 3]>, String> {
     Ok(triangles)
 }
 
-fn refine(
+fn subdivide(t: [usize; 3], mid: [Option<usize>; 3], output: &mut Vec<[usize; 3]>) {
+    match mid {
+        [None, None, None] => output.push(t),
+        [Some(ab), Some(bc), Some(ca)] => {
+            let [a, b, c] = t;
+            output.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+        }
+        _ => {
+            let two = mid.iter().flatten().count() == 2;
+            let i = mid.iter().position(|slot| slot.is_none() == two).unwrap();
+            let [a, b, c] = [t[i], t[(i + 1) % 3], t[(i + 2) % 3]];
+            if two {
+                let bc = mid[(i + 1) % 3].unwrap();
+                let ca = mid[(i + 2) % 3].unwrap();
+                output.extend([[c, ca, bc], [a, b, ca], [b, bc, ca]]);
+            } else {
+                let ab = mid[i].unwrap();
+                output.extend([[a, ab, c], [ab, b, c]]);
+            }
+        }
+    }
+}
+
+fn split_marked_edges(
+    triangles: &mut Vec<[usize; 3]>,
+    sides: &mut [Vec<usize>],
+    midpoints: &BTreeMap<Edge, usize>,
+) {
+    let mut refined = Vec::with_capacity(triangles.len());
+    for &[a, b, c] in triangles.iter() {
+        let split = [edge(a, b), edge(b, c), edge(c, a)].map(|key| midpoints.get(&key).copied());
+        subdivide([a, b, c], split, &mut refined);
+    }
+    for side in &mut *sides {
+        let mut expanded = Vec::with_capacity(side.len());
+        for pair in side.windows(2) {
+            expanded.push(pair[0]);
+            expanded.extend(midpoints.get(&edge(pair[0], pair[1])).copied());
+        }
+        expanded.extend(side.last().copied());
+        *side = expanded;
+    }
+    *triangles = refined;
+}
+
+fn shorten_mesh_diagonals(points: &[Point2], triangles: &mut [[usize; 3]]) {
+    let edges = |[a, b, c]: [usize; 3]| [edge(a, b), edge(b, c), edge(c, a)];
+    let mut neighbors = BTreeMap::<Edge, Vec<usize>>::new();
+    for (face, &triangle) in triangles.iter().enumerate() {
+        for key in edges(triangle) {
+            neighbors.entry(key).or_default().push(face);
+        }
+    }
+    let mut queue: VecDeque<_> = neighbors.keys().copied().collect();
+    for _ in 0..triangles.len().saturating_mul(32) {
+        let Some(key @ (u, v)) = queue.pop_front() else {
+            break;
+        };
+        let Some(&[first, second]) = neighbors.get(&key).map(Vec::as_slice) else {
+            continue;
+        };
+        let opposite = |face: usize| triangles[face].iter().copied().find(|&x| x != u && x != v);
+        let (Some(c), Some(d)) = (opposite(first), opposite(second)) else {
+            continue;
+        };
+        if c == d
+            || neighbors.contains_key(&edge(c, d))
+            || distance2(points[c], points[d]) + 1e-8 >= distance2(points[u], points[v])
+        {
+            continue;
+        }
+        let a = flat_cross(points[c], points[d], points[u]);
+        let b = flat_cross(points[c], points[d], points[v]);
+        if a.abs() <= 1e-8 || b.abs() <= 1e-8 || a.is_sign_positive() == b.is_sign_positive() {
+            continue;
+        }
+        let oriented = |other, area: f64| {
+            if area > 0.0 {
+                [c, d, other]
+            } else {
+                [d, c, other]
+            }
+        };
+        for (face, replacement) in [(first, oriented(u, a)), (second, oriented(v, b))] {
+            for old in edges(triangles[face]) {
+                if let Some(entries) = neighbors.get_mut(&old) {
+                    entries.retain(|&i| i != face);
+                    if entries.is_empty() {
+                        neighbors.remove(&old);
+                    }
+                }
+            }
+            triangles[face] = replacement;
+            for new in edges(replacement) {
+                neighbors.entry(new).or_default().push(face);
+                queue.push_back(new);
+            }
+        }
+    }
+}
+
+fn refine_adaptive(
+    points: &mut Vec<Point2>,
+    triangles: &mut Vec<[usize; 3]>,
+    sides: &mut [Vec<usize>],
+    distance: f64,
+) {
+    let limit = distance * distance;
+    shorten_mesh_diagonals(points, triangles);
+    for _ in 0..12 {
+        if triangles.len() > 24_000 {
+            break;
+        }
+        let mut midpoints = BTreeMap::new();
+        for &[a, b, c] in triangles.iter() {
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                if distance2(points[u], points[v]) > limit {
+                    midpoints.entry(edge(u, v)).or_insert_with(|| {
+                        let midpoint = std::array::from_fn(|i| (points[u][i] + points[v][i]) * 0.5);
+                        let index = points.len();
+                        points.push(midpoint);
+                        index
+                    });
+                }
+            }
+        }
+        if midpoints.is_empty() {
+            break;
+        }
+        split_marked_edges(triangles, sides, &midpoints);
+        shorten_mesh_diagonals(points, triangles);
+    }
+}
+
+fn refine_uniform(
     points: &mut Vec<Point2>,
     triangles: &mut Vec<[usize; 3]>,
     sides: &mut [Vec<usize>],
@@ -349,6 +483,15 @@ fn sampled_sides(indices: &[usize], corners: &[usize]) -> Vec<Vec<usize>> {
 }
 
 fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
+    build_mesh(pattern, distance, state, false)
+}
+
+fn build_mesh(
+    pattern: &Value,
+    distance: f64,
+    state: &Value,
+    legacy_uniform: bool,
+) -> Result<Mesh, String> {
     let (mut points, corners) = perimeter(pattern)?;
     if points.len() > 512 {
         return Err(
@@ -359,6 +502,11 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
     let mut sides = sampled_sides(&indices, &corners);
     let mut triangles = triangulate(&points)?;
     if distance.is_finite() {
+        let refine = if legacy_uniform {
+            refine_uniform
+        } else {
+            refine_adaptive
+        };
         refine(&mut points, &mut triangles, &mut sides, distance);
     }
     let shirring_edges =
@@ -1165,6 +1313,12 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let saved_pose = existing["source"] == NATIVE_SAVED_POSE;
     let use_native = !explicit_distance && (saved_pose || existing["source"] == RUST_NATIVE_REST);
     let prior_meshes = array(&existing["meshes"]);
+    let legacy_uniform = !use_native
+        && !explicit_distance
+        && existing["particle_distance"].is_number()
+        && !prior_meshes.is_empty()
+        && existing["mesh_refinement"] != "adaptive";
+
     let (mut meshes, resume) = if use_native {
         (
             native_meshes(patterns, prior_meshes, state, saved_pose)?,
@@ -1182,7 +1336,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 if !(3.0..=500.0).contains(&target) {
                     return Err("individual pattern particle_distance must be 3..500 mm".into());
                 }
-                new_mesh(pattern, target, state)
+                build_mesh(pattern, target, state, legacy_uniform)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut resume = (distance - number(existing, "particle_distance", -1.0)).abs() < 1e-9
@@ -1392,6 +1546,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         state["simulation"]["texcoords_units"] = json!("mm");
     } else {
         state["simulation"]["particle_distance"] = json!(distance);
+        if !legacy_uniform {
+            state["simulation"]["mesh_refinement"] = json!("adaptive");
+        }
     }
     let mut limitations = vec![
         "self-collision unavailable".to_owned(),
@@ -1446,6 +1603,46 @@ pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
 #[cfg(test)]
 mod native_pose_tests {
     use super::*;
+
+    #[test]
+    fn adaptive_remesh_preserves_boundary_and_avoids_uniform_subdivision() {
+        let mut points = vec![[0., 0.], [120., 0.], [120., 3.], [0., 3.]];
+        let mut triangles = triangulate(&points).unwrap();
+        let mut sides = vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![3, 0]];
+        let mut uniform_points = points.clone();
+        refine_uniform(
+            &mut uniform_points,
+            &mut triangles.clone(),
+            &mut sides.clone(),
+            20.0,
+        );
+        refine_adaptive(&mut points, &mut triangles, &mut sides, 20.0);
+        assert!(points.len() < uniform_points.len());
+        let mut incidence = BTreeMap::new();
+        let mut twice_area = 0.0;
+        for &[a, b, c] in &triangles {
+            let area = flat_cross(points[a], points[b], points[c]);
+            assert!(area > 0.0);
+            twice_area += area;
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                assert!(distance2(points[u], points[v]) <= 400.0);
+                *incidence.entry(edge(u, v)).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(twice_area, 720.0);
+        let boundary: BTreeSet<_> = sides
+            .iter()
+            .flat_map(|side| side.windows(2).map(|pair| edge(pair[0], pair[1])))
+            .collect();
+        let actual: BTreeSet<_> = incidence
+            .into_iter()
+            .filter_map(|(key, count)| {
+                assert!(count == 1 || count == 2);
+                (count == 1).then_some(key)
+            })
+            .collect();
+        assert_eq!(actual, boundary);
+    }
 
     #[test]
     fn native_material_uses_separate_axial_and_bias_coefficients() {
