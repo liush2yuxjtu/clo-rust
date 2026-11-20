@@ -1,5 +1,6 @@
 //! Read the verified panel, sewing, materials, and stored mesh fields from CLO archives.
 
+use super::native_pose::{editable_records, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use crate::compat_scene::patterns::Point;
 use serde_json::{json, Value};
 use std::fs::File;
@@ -288,35 +289,77 @@ fn mesh(data: &[u8]) -> Result<(usize, usize, &[u8]), String> {
     Err("missing native PAC rest mesh".into())
 }
 
-pub(super) fn posed_topology(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
-    let (triangle_marker, triangle_count, rest) = mesh(data)?;
-    let start = triangle_marker + TRIANGLES.len();
-    Ok((&data[start..start + triangle_count * 12], rest))
+pub(super) fn mesh_fields<'a>(mesh: &Fields<'a>) -> Result<(&'a [u8], &'a [u8]), String> {
+    let count = |key| {
+        let bytes = mesh.get(key, 5)?;
+        let value = u32::from_le_bytes(bytes.try_into().map_err(|_| "invalid PAC mesh count width")?);
+        Ok::<_, String>(value as usize)
+    };
+    let vertex_count = count(VERTEX_COUNT)?;
+    let triangle_count = count(TRI_COUNT)?;
+    if vertex_count == 0 || vertex_count > MAX_COORDS
+        || triangle_count == 0 || triangle_count > 2 * MAX_COORDS
+    {
+        return Err("unsupported native PAC mesh counts".into());
+    }
+    let rest = mesh.get(REST, BYTE_TYPE)?;
+    let triangles = mesh.get(TRIANGLES, BYTE_TYPE)?;
+    if rest.len() != vertex_count * 8 || triangles.len() != triangle_count * 12 {
+        return Err("native PAC mesh has inconsistent array lengths".into());
+    }
+    if sizes(triangles).any(|index| index >= vertex_count) {
+        return Err("native PAC triangle index is out of range".into());
+    }
+    Ok((triangles, rest))
 }
 
 fn outline(data: &[u8]) -> Result<(Vec<Value>, usize, usize), String> {
     let (mesh_start, triangles, positions) = mesh(data)?;
     let outline_data = &data[..mesh_start];
-    let mut cursor =
+    let start =
         find(outline_data, BOUNDARY).ok_or("missing native PAC boundary list")? + BOUNDARY.len();
-    let (lines, count) = sized_list(outline_data, &mut cursor, 0x14, 65536)?;
+    let (lines, vertices) = outline_boundary(&outline_data[start..], positions, |node| {
+        let mut field = find(node, POINT_INDEX).ok_or("missing native PAC boundary vertex")?
+            + POINT_INDEX.len();
+        uint(node, &mut field)
+    })?;
+    Ok((lines, vertices, triangles))
+}
+
+fn typed_outline(record: &Fields<'_>) -> Result<(Vec<Value>, usize, usize), String> {
+    let mesh = record.map(b"mapFabricShape2D")?.map(b"mapMesh2D")?;
+    let (triangles, positions) = mesh_fields(&mesh)?;
+    let boundary = mesh.get(BOUNDARY, LIST_TYPE)?;
+    let (lines, vertices) = outline_boundary(boundary, positions, |node| {
+        let index = Fields::read(node)?.get(POINT_INDEX, 5)?;
+        Ok(u32::from_le_bytes(index.try_into().map_err(|_| "invalid PAC boundary vertex width")?)
+            as usize)
+    })?;
+    Ok((lines, vertices, triangles.len() / 12))
+}
+
+fn outline_boundary(
+    boundary: &[u8],
+    positions: &[u8],
+    vertex_index: impl Fn(&[u8]) -> Result<usize, String>,
+) -> Result<(Vec<Value>, usize), String> {
+    let mut cursor = 0;
+    let (lines, count) = sized_list(boundary, &mut cursor, LIST_TYPE, 65536)?;
     if count < 3 {
         return Err("native PAC boundary has fewer than three edges".into());
     }
     let (mut first, mut expected) = (None, None);
     let mut points = Vec::new();
     for size in sizes(lines) {
-        let line = take(outline_data, &mut cursor, size)?;
+        let line = take(boundary, &mut cursor, size)?;
         let mut inner = 0;
-        let (indices, path_count) = sized_list(line, &mut inner, 0x16, MAX_COORDS)?;
+        let (indices, path_count) = sized_list(line, &mut inner, MAP_TYPE, MAX_COORDS)?;
         if path_count < 2 || points.len().saturating_add(path_count) > MAX_OUTLINE_POINTS {
             return Err("native PAC boundary has too few or too many samples".into());
         }
         for (i, size) in sizes(indices).enumerate() {
             let node = take(line, &mut inner, size)?;
-            let mut field = find(node, POINT_INDEX).ok_or("missing native PAC boundary vertex")?
-                + POINT_INDEX.len();
-            let point = coord(positions, uint(node, &mut field)?)?;
+            let point = coord(positions, vertex_index(node)?)?;
             if i == 0 {
                 if expected.is_some_and(|p| p != point) {
                     return Err("native PAC boundary edges are disconnected".into());
@@ -343,21 +386,17 @@ fn outline(data: &[u8]) -> Result<(Vec<Value>, usize, usize), String> {
     if first != expected {
         return Err("native PAC boundary does not close".into());
     }
-    Ok((points, positions.len() / 8, triangles))
+    Ok((points, positions.len() / 8))
 }
 
 fn parse(pac: &[u8]) -> Result<Value, String> {
-    let tags = panel_tags(pac)?;
-    if tags.is_empty() {
-        return Err("native PAC has no recognized editable panel records".into());
-    }
     let mut patterns = Vec::new();
     let mut edge_counts = Vec::new();
     let (mut rest_vertices, mut triangles) = (0usize, 0usize);
-    for (i, panel) in tags.iter().enumerate() {
-        let end = tags.get(i + 1).map_or(pac.len(), |r| r.start);
-        let (points, verts, faces) = outline(&pac[panel.body..end])
-            .map_err(|e| format!("native PAC panel {:?}: {e}", panel.name))?;
+    let mut append_outline = |name: &str, outline: Result<(Vec<Value>, usize, usize), String>|
+        -> Result<(), String> {
+        let (points, verts, faces) = outline
+            .map_err(|error| format!("native PAC panel {name:?}: {error}"))?;
         if rest_vertices.saturating_add(verts) > MAX_COORDS {
             return Err("native PAC project has too many rest mesh vertices".into());
         }
@@ -365,8 +404,24 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         triangles += faces;
         edge_counts.push(points.iter().filter(|point| point.get(2).is_none()).count());
         patterns.push(json!({
-            "id": i + 1, "name": panel.name, "points": points, "sampled_polyline": true, "arrangement": "", "fabric_index": 0
+            "id": patterns.len() + 1, "name": name, "points": points, "sampled_polyline": true, "arrangement": "", "fabric_index": 0
         }));
+        Ok(())
+    };
+    if let Ok(root) = Fields::read(pac) {
+        for (_, name, record) in editable_records(&root)? {
+            append_outline(name, typed_outline(&record))?;
+        }
+    } else {
+        // Older partially decoded payloads can still contain ordered panel and mesh records.
+        let tags = panel_tags(pac)?;
+        for (i, panel) in tags.iter().enumerate() {
+            let end = tags.get(i + 1).map_or(pac.len(), |record| record.start);
+            append_outline(panel.name, outline(&pac[panel.body..end]))?;
+        }
+    }
+    if patterns.is_empty() {
+        return Err("native PAC has no recognized editable panel records".into());
     }
     let panel_settings_error = super::native_pose::restore_panel_settings(pac, &mut patterns).err();
     let sewing = super::native_seams::read(pac, &patterns, &edge_counts)?;

@@ -1,6 +1,6 @@
 //! Read a stored native drape without claiming that it was solved by the Rust engine.
 
-use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
+use super::clo_native::{mesh_fields, sized_list, sizes, take, uint};
 use crate::compat_scene::patterns::{curve_length, points, Point};
 use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde_json::{json, Value};
@@ -119,9 +119,9 @@ fn inner_seam_paths(record: &Fields<'_>) -> Result<InnerSeamPaths, String> {
 }
 
 fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String> {
-    let geometry = record.get(b"mapFabricShape2D", MAP_TYPE)?;
+    let geometry = record.map(b"mapFabricShape2D")?.map(b"mapMesh2D")?;
     let positions3d = record.get(b"baPosition3D", BYTE_TYPE)?;
-    let (triangles, positions2d) = posed_topology(geometry)?;
+    let (triangles, positions2d) = mesh_fields(&geometry)?;
     if positions3d.len() % 12 != 0 || positions3d.len() / 12 != positions2d.len() / 8 {
         return Err(format!(
             "native pose for {name:?} has inconsistent position counts"
@@ -247,18 +247,8 @@ pub(super) fn panel_records_with_slots<'a>(
     root: &Fields<'a>,
     panels: &[Value],
 ) -> Result<Vec<(usize, Fields<'a>)>, String> {
-    let editor = root.map(b"mapPatternEditor")?;
-    let patterns = editor.map(b"mapPatternList")?;
-    let records = map_list(patterns.get(b"listPattern", LIST_TYPE)?, LIMIT)?;
     let mut result = Vec::new();
-    for (slot, record) in records.into_iter().enumerate() {
-        let mut offset = 0;
-        if uint(record.get(b"uiPatternType", UINT_TYPE)?, &mut offset)? != 0 {
-            continue;
-        }
-        let element = record.map(b"mapElement")?;
-        let name = std::str::from_utf8(element.get(b"qsNameUTF8", BYTE_TYPE)?)
-            .map_err(|e| e.to_string())?;
+    for (slot, name, record) in editable_records(root)? {
         if panels
             .get(result.len())
             .is_none_or(|panel| panel["name"] != name)
@@ -271,6 +261,30 @@ pub(super) fn panel_records_with_slots<'a>(
         return Err("native editable records do not match the imported panel count".into());
     }
     Ok(result)
+}
+
+pub(super) fn editable_records<'a>(
+    root: &Fields<'a>,
+) -> Result<Vec<(usize, &'a str, Fields<'a>)>, String> {
+    let patterns = root.map(b"mapPatternEditor")?.map(b"mapPatternList")?;
+    let records = map_list(patterns.get(b"listPattern", LIST_TYPE)?, LIMIT)?;
+    let mut editable = Vec::new();
+    for (slot, record) in records.into_iter().enumerate() {
+        if u32::from_le_bytes(
+            record.get(b"uiPatternType", UINT_TYPE)?
+                .try_into().map_err(|_| "invalid native panel type width")?,
+        ) != 0 {
+            continue;
+        }
+        let element = record.map(b"mapElement")?;
+        let name = std::str::from_utf8(element.get(b"qsNameUTF8", BYTE_TYPE)?)
+            .map_err(|e| e.to_string())?;
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err("invalid native editable panel name".into());
+        }
+        editable.push((slot, name, record));
+    }
+    Ok(editable)
 }
 
 pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result<(), String> {

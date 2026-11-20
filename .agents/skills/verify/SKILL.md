@@ -429,6 +429,13 @@ When running CLO on a remote Boat VM, copy the same saved project to the
 Rust host and verify its SHA-256 before comparing. Paths and runtime versions
 are host-specific.
 
+Run `--verify-reordered-native-archives` with `CLO_REORDERED_ZPRJ` and
+`CLO_REORDERED_ZPAC` set to the two Boat fixtures listed in the acceptance
+record. Verify the two panels, named seam, material assignments, colorway
+order and active index, and each archive's particle distance. Reopen the
+portable save and check that zero simulation steps preserve triangle
+indices, rest UVs, and posed vertices exactly.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.

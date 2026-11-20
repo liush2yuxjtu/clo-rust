@@ -3736,6 +3736,56 @@ async def compare_shared_checkpoint_folder():
                       "auto_collision_preserves_existing": True}))
 
 
+async def verify_reordered_native_archives():
+    fixtures = [
+        (Path(os.environ["CLO_REORDERED_ZPRJ"]).resolve(strict=True), "zprj", 20, 52),
+        (Path(os.environ["CLO_REORDERED_ZPAC"]).resolve(strict=True), "zpac", 25, 36),
+    ]
+    checked = []
+    with TemporaryDirectory(prefix="clo-reordered-native-") as directory:
+        for fixture, kind, distance, vertices in fixtures:
+            async with open_backend("rust") as session:
+                await inspect_contract(session)
+                reply = await json_result(session, "scene_open", {"path": str(fixture)})
+                assert reply["native_import"]["rest_vertices_validated"] == vertices
+                assert reply["native_import"]["saved_pose_meshes"] == 2
+                assert reply["native_import"]["full_edge_seams_restored"] == 1
+                scene = await json_result(session, "scene_info")
+                assert scene["pattern_count"] == 2 and scene["fabric_count"] == 1
+                assert scene["colorways"] == ["Original", "Alternate"] and scene["current_colorway"] == 1
+                assert [row["name"] for row in scene["patterns"]] == ["Front", "Back"]
+                assert all(row["fabric_index"] == 0 for row in scene["patterns"])
+                groups = await json_result(session, "seams_list")
+                group, = groups["groups"]
+                assert group["name"] == "Sewing_8359" and group["patterns"] == ["Front", "Back"]
+                pair, = group["native_segments"]
+                assert [edge["direction"] for edge in pair] == [True, False]
+                for name in ("Front", "Back"):
+                    panel = await json_result(session, "pattern_info", {"pattern": name})
+                    lines = panel["line_info"]["lines"]
+                    assert panel["particle_distance"] == distance and len(lines) == 3
+                    assert abs(lines[0]["length"] - 100) < 0.001
+                path = Path(directory) / f"{kind}.clorust"
+                await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+                saved = json.loads(path.read_text())["scene"]
+                pose = saved["simulation"]
+                assert pose["source"] == "native_saved_pose"
+                assert sum(len(mesh["positions"]) for mesh in pose["meshes"]) == vertices
+                await json_result(session, "scene_open", {"path": str(path)})
+                result = await json_result(session, "simulate", {"steps": 0})
+                assert result["ok"] and result["steps"] == 0
+                reopened = path.with_name(f"{kind}-reopened.clorust")
+                await json_result(session, "scene_save", {"path": str(reopened), "thumbnail": False})
+                checked_meshes = json.loads(reopened.read_text())["scene"]["simulation"]["meshes"]
+                for before, after in zip(pose["meshes"], checked_meshes, strict=True):
+                    assert all(before[key] == after[key] for key in ("id", "positions", "triangles", "texcoords"))
+                    assert after["velocities"] == [[0, 0, 0]] * len(before["positions"])
+                checked.append({"format": kind, "panels": 2, "colorways": scene["colorways"],
+                                "seam_groups": groups["count"], "pose_vertices": vertices,
+                                "particle_distance": distance, "zero_step_pose_exact": True})
+    print(json.dumps({"case": "reordered native PAC fields", "fixtures": checked}, ensure_ascii=False))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -4082,6 +4132,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-shared-checkpoint-folder", action="store_const", dest="comparison",
                              const=compare_shared_checkpoint_folder,
                              help="compare a shared checkpoint listing and restore the native archive in Rust")
+    comparisons.add_argument("--verify-reordered-native-archives", action="store_const", dest="comparison",
+                             const=verify_reordered_native_archives,
+                             help="verify the two native Boat colorway archives and saved poses")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
@@ -4091,7 +4144,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_recolor_opacity, verify_fabric_texture_clear,
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
-                                verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
+                                verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
+                                verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,
                                 verify_build_checkpoints,
