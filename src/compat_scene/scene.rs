@@ -618,6 +618,9 @@ fn checkpoint_dir() -> PathBuf {
     if let Some(path) = env::var_os("CLO_RUST_CHECKPOINT_DIR") {
         return PathBuf::from(path);
     }
+    if let Some(path) = env::var_os("CLO_MCP_STATE") {
+        return PathBuf::from(path).join("checkpoints");
+    }
     if let Some(path) = env::var_os("XDG_STATE_HOME") {
         return PathBuf::from(path).join("clo-rust").join("checkpoints");
     }
@@ -727,6 +730,10 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     let name = string(args, "name")?;
     let path = checkpoint_path(name)?;
     if !path.is_file() {
+        let native = path.with_extension("zprj");
+        if native.is_file() {
+            return open(&json!({"path": native, "mode": "replace"}), state);
+        }
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
     let document = formats::read_json(&path)?;
@@ -750,16 +757,20 @@ pub(super) fn checkpoint_list(_: &Value, _: &mut Value) -> Reply {
     };
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
-        if extension(&entry.path()) != "clorust"
-            || !entry.file_type().map_err(|err| err.to_string())?.is_file()
-        {
+        let path = entry.path();
+        let native = path.extension().and_then(|ext| ext.to_str()) == Some("zprj");
+        if !native && extension(&path) != "clorust" {
+            continue;
+        }
+        if !entry.file_type().map_err(|err| err.to_string())?.is_file()
+            || (native && path.with_extension("clorust").is_file()) {
             continue;
         }
         let time = entry
             .metadata()
             .and_then(|m| m.modified())
             .map_err(|err| err.to_string())?;
-        files.push((entry.path(), time));
+        files.push((path, time));
     }
     files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let rows: Vec<_> = files.into_iter().map(|(path, time)| {

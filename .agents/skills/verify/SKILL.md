@@ -359,6 +359,13 @@ checkpoint directory leaves a successful build with a null checkpoint path.
 With the official stdio command configured, run `--compare-checkpoint-listing`
 to compare order and local timestamps using disposable directories without
 starting CLO.
+Run `--compare-shared-checkpoint-folder` with the same official command and a
+native `CLO_CHECKPOINT_FIXTURE` containing saved drape. Unset
+`CLO_RUST_CHECKPOINT_DIR` for this case. Both adapters list the fixture from the
+same disposable `CLO_MCP_STATE/checkpoints`. Rust restores it by name and checks
+the archived geometry, fabrics, seams, and pose, then verifies isolation of a
+same-name `.clorust` write and failed restores. A live CLO restore is a separate
+case requiring the bridge.
 
 Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an

@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -2554,6 +2555,71 @@ async def compare_checkpoint_listing():
     print(json.dumps({"tool": "checkpoint_list", "same_order_and_local_timestamps": listings["rust"]}))
 
 
+async def compare_shared_checkpoint_folder():
+    fixture = os.environ.get("CLO_CHECKPOINT_FIXTURE")
+    assert fixture, "set CLO_CHECKPOINT_FIXTURE to a saved native CLO project"
+    assert "CLO_RUST_CHECKPOINT_DIR" not in os.environ, "unset CLO_RUST_CHECKPOINT_DIR for this case"
+    with TemporaryDirectory() as scratch:
+        settings = {"CLO_MCP_STATE": scratch}
+        directory = Path(scratch) / "checkpoints"
+        directory.mkdir()
+        native = directory / "native-drape.zprj"
+        shutil.copyfile(fixture, native)
+        with native.open("rb") as source:
+            native_digest = hashlib.file_digest(source, "sha256").hexdigest()
+        async with open_backend("official", settings) as clo, open_backend("rust", settings) as rust:
+            async def listing(session):
+                return (await json_result(session, "checkpoint_list"))["checkpoints"]
+
+            async def saved_scene(name):
+                path = Path(scratch) / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path)})
+                return json.loads(path.read_text())["scene"]
+
+            for session in (clo, rust):
+                await inspect_contract(session)
+            rows = await listing(clo)
+            assert await listing(rust) == rows
+            row, = rows
+            assert row["name"] == "native-drape" and Path(row["path"]) == native
+
+            direct = await json_result(rust, "scene_open", {"path": str(native)})
+            assert direct["pattern_count"] and direct["native_import"]["saved_pose_loaded"]
+            scene = await json_result(rust, "scene_info")
+            baseline = await saved_scene("direct")
+            assert baseline["simulation"]["meshes"]
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            restored = await json_result(rust, "checkpoint_restore", {"name": "native-drape"})
+            assert restored == direct
+            info = await json_result(rust, "scene_info")
+            unequal = sorted(key for key in scene.keys() | info.keys() if scene.get(key) != info.get(key))
+            assert not unequal, [(key, str(scene.get(key))[:200], str(info.get(key))[:200]) for key in unequal]
+            state = await saved_scene("restored")
+            for field in ("patterns", "fabrics", "native_seam_groups", "simulation", "avatar"):
+                assert state.get(field) == baseline.get(field), field
+
+            (directory / "corrupt.zprj").write_text("not a CLO project")
+            before_error = await json_result(rust, "scene_info")
+            for name in ("missing", "corrupt"):
+                assert (await rust.call_tool("checkpoint_restore", {"name": name})).isError
+                assert await json_result(rust, "scene_info") == before_error
+
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            portable = await json_result(rust, "checkpoint_save", {"name": "native-drape"})
+            assert Path(portable["path"]) == native.with_suffix(".clorust")
+            rust_name, = [row for row in await listing(rust) if row["name"] == "native-drape"]
+            clo_name, = [row for row in await listing(clo) if row["name"] == "native-drape"]
+            assert rust_name["path"] == portable["path"] and clo_name["path"] == str(native)
+            assert (await json_result(rust, "checkpoint_restore", {"name": "native-drape"}))["pattern_count"] == 0
+            with native.open("rb") as source:
+                assert hashlib.file_digest(source, "sha256").hexdigest() == native_digest
+    print(json.dumps({"tools": ["checkpoint_list", "checkpoint_restore", "checkpoint_save"],
+                      "case": "shared native checkpoint folder", "same_native_listing": True,
+                      "restored_patterns": direct["pattern_count"],
+                      "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
+                      "corrupt_and_missing_preserve_scene": True, "portable_name_precedence": True}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -2821,6 +2887,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
+    comparisons.add_argument("--compare-shared-checkpoint-folder", action="store_const", dest="comparison",
+                             const=compare_shared_checkpoint_folder,
+                             help="compare a shared checkpoint listing and restore the native archive in Rust")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")
