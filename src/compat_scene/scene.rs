@@ -404,7 +404,18 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
         "append" => true,
         mode => return Err(format!("unknown scene open mode {mode:?}")),
     };
-    match extension(path).as_str() {
+    let ext = extension(path);
+    let reply = open_path(path, &ext, append, state)?;
+    if append || ext == "avt" {
+        crate::compat_runtime::invalidate_scene_ui_snapshot(state);
+    } else {
+        crate::compat_runtime::clear_scene_ui(state, true);
+    }
+    Ok(reply)
+}
+
+fn open_path(path: &Path, ext: &str, append: bool, state: &mut Value) -> Reply {
+    match ext {
         "json" | "clorust" => {
             let content = formats::read_json(path)?;
             match content["format"].as_str() {
@@ -745,6 +756,7 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
         restored[formats::native_save::SOURCE] = source;
     }
     replace_scene(state, restored);
+    crate::compat_runtime::clear_scene_ui(state, true);
     Ok(open_reply(state, &path))
 }
 

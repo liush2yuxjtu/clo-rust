@@ -1245,6 +1245,75 @@ async def verify_tiered_build_relaxation():
                       "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
 
 
+async def verify_scene_open_ui_state():
+    with TemporaryDirectory(prefix="clo-open-scene-ui-") as directory:
+        root = Path(directory)
+        checkpoints = root / "checkpoints"
+        async with open_backend("rust", {"CLO_RUST_CHECKPOINT_DIR": str(checkpoints)}) as rust:
+            await inspect_contract(rust)
+
+            async def save_single(name):
+                await json_result(rust, "scene_clear", {"keep_avatar": False})
+                await json_result(rust, "pattern_create", {"name": name, "points": [[0, 0], [80, 0], [0, 80]]})
+                path = str(root / f"{name}.clorust")
+                await json_result(rust, "scene_save", {"path": path})
+                return path
+
+            async def select(name):
+                ui = await json_result(rust, "clo_ui_state")
+                row = next(node for node in ui["nodes"] if node["AXRole"] == "AXRow" and node["AXTitle"] == name)
+                reply = await json_result(rust, "clo_ui_action", {"snapshot": ui["snapshot"], "action": "press", "element": row["id"]})
+                return {"snapshot": reply["state"]["snapshot"], "action": "set_value", "element": 8, "value": "Renamed"}
+
+            async def selected():
+                reply = await json_result(rust, "clo_api_call", {"name": "pattern_api.GetSelectedPattern"})
+                return reply["value"]
+
+            async def stale(action):
+                result = await rust.call_tool("clo_ui_action", action)
+                assert result.isError and any("Stale UI snapshot" in block.text for block in result.content)
+
+            first = await save_single("First")
+            second = await save_single("Second")
+            await json_result(rust, "checkpoint_save", {"name": "second-only"})
+            action = await select("Second")
+            await json_result(rust, "scene_open", {"path": first, "mode": "replace"})
+            await stale(action)
+            assert await selected() == []
+            action = await select("First")
+            await json_result(rust, "scene_open", {"path": second, "mode": "append"})
+            await stale(action)
+            assert await selected() == ["First"]
+            action = await select("First")
+            await json_result(rust, "checkpoint_restore", {"name": "second-only"})
+            await stale(action)
+            assert await selected() == []
+
+            action = await select("Second")
+            before = await json_result(rust, "scene_info")
+            bad = root / "invalid.clorust"
+            bad.write_text("invalid project")
+            assert (await rust.call_tool("scene_open", {"path": str(bad)})).isError
+            assert (await rust.call_tool("checkpoint_restore", {"name": "missing"})).isError
+            assert await json_result(rust, "scene_info") == before
+            await json_result(rust, "clo_ui_action", action)
+            assert await selected() == ["Renamed"]
+
+            native = False
+            if fixture := os.environ.get("CLO_CHECKPOINT_FIXTURE"):
+                shutil.copyfile(fixture, checkpoints / "original.zprj")
+                action = await select("Renamed")
+                reply = await json_result(rust, "checkpoint_restore", {"name": "original"})
+                assert reply["pattern_count"] > 0
+                await stale(action)
+                assert await selected() == []
+                native = True
+    print(json.dumps({"tools": ["scene_open", "checkpoint_restore", "clo_ui_action"],
+                      "case": "scene changes invalidate old UI snapshots", "replace_clears_selection": True,
+                      "append_keeps_selection": True, "portable_restore_clears_selection": True,
+                      "failed_load_preserves_snapshot": True, "native_restore_clears_selection": native}))
+
+
 async def verify_scene_clear_state():
     with TemporaryDirectory(prefix="clo-clear-scene-") as directory:
         path = str(Path(directory) / "before-clear.clorust")
@@ -3253,6 +3322,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-build-snapshot-workflow", action="store_const", dest="comparison",
                              const=verify_build_snapshot_workflow,
                              help="verify build snapshot order, view aliases, images and error readback")
+    comparisons.add_argument("--verify-scene-open-ui-state", action="store_const", dest="comparison",
+                             const=verify_scene_open_ui_state,
+                             help="verify UI token and selection readback across scene changes")
     comparisons.add_argument("--verify-scene-clear-state", action="store_const", dest="comparison",
                              const=verify_scene_clear_state,
                              help="verify clear and fresh project state, stale UI and session history")
@@ -3339,7 +3411,8 @@ if __name__ == "__main__":
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
-                                verify_scene_clear_state, verify_garment_session_history, verify_build_checkpoints,
+                                verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,
+                                verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_elastic_parameter_updates, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,

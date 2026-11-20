@@ -403,6 +403,11 @@ the scripting `NewProject` call. Check that keeping the avatar also keeps
 materials and project identity, a fresh project resets material selection,
 and stale UI observations are rejected in both modes. Read back the last
 garment spec to confirm its session lifetime.
+Run `--verify-scene-open-ui-state` to use an observed selection across
+replacement, append and checkpoint restore. Verify stale tokens are rejected
+after a successful load, with selection retained on append. A failed open or
+restore should preserve both the original scene and its valid UI token. Set
+`CLO_CHECKPOINT_FIXTURE` to also check restoration of a native archive.
 Run `--verify-build-checkpoints` for the `auto_before_build_` path in build
 and rebuild responses. Empty or appended scenes skip automatic checkpoints.
 Read back the pre-replacement geometry, materials, and saved simulation.

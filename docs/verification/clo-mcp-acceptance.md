@@ -14,7 +14,7 @@
 | `clo_api_doc` | Rust 短名和限定名返回同一记录 | 双端名称歧义、缺失项和重载 |
 | `scene_info` | 历史 Carlita 对照匹配 10 个工程字段 | 新版本相同工程、空场景和切换 |
 | `scene_clear` | Rust 两种清场、材料索引重置和旧 UI 快照拒绝，最后规格仍可读 | 双端 `keep_avatar`、材料和缝组读回 |
-| `scene_open` | Rust 原生、DXF、JSON 追加及保存姿态；本轮检查点同源读回 | 双端替换、追加、损坏文件和场景读回 |
+| `scene_open` | Rust 原生、DXF、JSON 追加及保存姿态，成功打开使旧 UI 快照失效 | 双端替换、追加、损坏文件和场景读回 |
 | `scene_save` | Rust 工程保存重开 | 双端原生工程回开、缩略图和失败路径 |
 | `scene_export` | Rust 导出实调及 FBX 回开 | 双端格式、单位、材质、色组和人台 |
 | `snapshot` | Rust 图像调用 | 双端正侧背面、视角顺序和错误 |
@@ -40,7 +40,7 @@
 | `simulate` | 本轮 Rust 重划网格、速度和续算 | 双端步数、粒距、缝合与接触量测 |
 | `simulation_reset` | Rust 恢复排布、保留设置 | 同一变形场景的双端重置和读回 |
 | `checkpoint_save` | 本轮 Rust 同名保存验证原生源文件 SHA-256 | 双端保存时机、命名和失败路径 |
-| `checkpoint_restore` | 本轮 Rust 按原生名称恢复 36 片及姿态；坏档保留当前场景 | 原生端现场恢复、双端导出与回开 |
+| `checkpoint_restore` | Rust 原生名称恢复 36 片及姿态，成功恢复使旧 UI 快照失效 | 原生端现场恢复、双端导出与回开 |
 | `checkpoint_list` | 本轮双端比较时间排序和共享原生归档 | 现场保存和恢复之后的列表 |
 | `garment_plan_preview` | 本轮双端比较版型、领袖、面料、数值、非法输入和无副作用 | 现场人台量体预览 |
 | `garment_build` | Rust 实调和构建、检查点、快照用例 | 双端加载人台、替换和追加、缝合和模拟读回 |
