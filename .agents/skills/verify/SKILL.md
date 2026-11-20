@@ -490,9 +490,14 @@ a new Python request can read the scene.
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.
-The case compares the direct and Python layout exports with `snapshot_2d`, checks the
-thumbnail camera direction and reopens the FBX. It rejects unsupported layout
-modes without writing the destination. Compare live reference export and
+The case compares the direct and Python layout exports with `snapshot_2d`, checks
+the thumbnail camera direction, and exports and reopens an FBX at a Unicode
+path through `ExportFBXW`. It exercises `ExportThumbnail3DW` through Python and
+checks the wide asset and temporary folder calls. It rejects unsupported layout
+modes without writing the destination, tests search limits, and checks missing
+short and qualified documentation names. Set `CLO_RUNTIME_EXPORT_CATALOG` to a
+native catalog capture indexed by module to compare the nine named entries
+including their signatures and summaries. Compare live reference export and
 argument behavior separately when the CLO bridge is available.
 
 Run `--verify-checkpoint-workflow` for automatic checkpoint names, newest-first

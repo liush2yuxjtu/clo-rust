@@ -2000,25 +2000,44 @@ async def verify_runtime_export_workflow():
         "export_api.ExportFBX", "export_api.ExportSnapshot2D",
         "export_api.ExportThumbnail3D", "utility_api.GetCLOAssetFolderPath",
     )
+    aliases = (
+        "export_api.ExportFBXW", "export_api.ExportThumbnail3DW",
+        "utility_api.GetCLOAssetFolderPathW", "utility_api.GetCLOTemporaryFolderPathW",
+    )
+    checked_names = (*names, "utility_api.GetCLOTemporaryFolderPath", *aliases)
+    captured = {}
+    if capture := os.environ.get("CLO_RUNTIME_EXPORT_CATALOG"):
+        modules = json.loads(Path(capture).read_text())
+        captured = {entry["name"]: entry for rows in modules.values() for entry in rows}
+        assert set(checked_names) <= captured.keys()
     async with open_backend("rust") as session:
         await inspect_contract(session)
-        for name in names:
+        for name in checked_names:
             module, short = name.split(".")
-            request = {"module": module, "query": short, "limit": 1}
+            request = {"module": module, "query": name, "limit": 1}
             expected = await json_result(session, "clo_api_catalog", request)
-            assert expected["total"] == 1 and expected["entries"][0]["name"] == name
-            assert expected["next_offset"] is None
-            search = await json_result(session, "clo_api_search", {"query": short.lower(), "limit": 1})
-            assert json.loads(search["result"])["entries"] == expected["entries"]
+            entry, = expected["entries"]
+            assert entry["name"] == name and entry["signature"] is None
+            if captured:
+                assert entry == captured[name], (entry, captured[name])
+            search = await json_result(session, "clo_api_search", {"query": name.lower(), "limit": 1})
+            assert json.loads(search["result"]) == expected
             describe = await json_result(session, "clo_api_describe", {"name": name})
+            assert describe["doc"].splitlines()[0] == entry["summary"]
             for query in (name, short):
                 doc = await json_result(session, "clo_api_doc", {"function_name": query})
                 assert json.loads(doc["result"]) == describe
             assert describe["name"] == name and describe["doc"]
-        request = {"module": "export_api", "query": "Export", "limit": 1}
+        request = {"module": "export_api", "query": "ExportFBX", "limit": 1}
         first = await json_result(session, "clo_api_catalog", request)
         second = await json_result(session, "clo_api_catalog", {**request, "offset": first["next_offset"]})
-        assert first["next_offset"] == 1 and first["entries"] != second["entries"]
+        assert first["next_offset"] == 1 and second["next_offset"] is None
+        assert [page["entries"][0]["name"] for page in (first, second)] == [names[0], aliases[0]]
+        missing = await json_result(session, "clo_api_doc", {"function_name": "ExportUnknownFixture"})
+        assert json.loads(missing["result"]) == {"matches": [], "help": "Use a qualified name from clo_api_catalog."}
+        assert (await session.call_tool("clo_api_doc", {"function_name": "export_api.ExportUnknownFixture"})).isError
+        for limit in (0, 501):
+            assert (await session.call_tool("clo_api_search", {"query": "ExportFBX", "limit": limit})).isError
 
         async def invoke(name, args=None):
             request = {"name": name}
@@ -2031,6 +2050,8 @@ async def verify_runtime_export_workflow():
         })
         scene = await json_result(session, "scene_info")
         assert await invoke(names[3]) == (scene["asset_folder"] or "").replace("\\", "/")
+        assert await invoke(aliases[2], [False]) == await invoke(names[3], [False])
+        assert await invoke(aliases[3]) == await invoke("utility_api.GetCLOTemporaryFolderPath")
         with TemporaryDirectory() as directory:
             folder = Path(directory)
             layout = str(folder / "layout.png")
@@ -2053,8 +2074,15 @@ async def verify_runtime_export_workflow():
                 thumbnails.append(path.read_bytes())
             assert all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in thumbnails)
             assert thumbnails[0] != thumbnails[1]
-            fbx = folder / "piece.fbx"
-            assert await invoke(names[0], [str(fbx), {"$type": "ApiTypes.ImportExportOption"}]) == [str(fbx)]
+            wide_png = folder / "斜面.png"
+            wide = await json_result(session, "clo_run_python", {
+                "code": f"export_api.ExportThumbnail3DW({str(wide_png)!r})",
+            })
+            assert wide["value"] == str(wide_png) and wide_png.read_bytes() == thumbnails[-1]
+            fbx = folder / "纸样.fbx"
+            options = {"$type": "ApiTypes.ImportExportOption"}
+            assert await invoke(names[0], [str(folder / "piece.fbx"), options]) == [str(folder / "piece.fbx")]
+            assert await invoke(aliases[0], [str(fbx), options]) == [str(fbx)]
             assert fbx.stat().st_size > 1000
             assert await json_result(session, "scene_info") == scene
             await json_result(session, "scene_open", {"path": str(fbx)})
@@ -2062,7 +2090,9 @@ async def verify_runtime_export_workflow():
             await json_result(session, "scene_save", {"path": str(saved)})
             mesh, = json.loads(saved.read_text())["scene"]["imported_meshes"]
             assert len(mesh["positions"]) == 3 and len(mesh["triangles"]) == 1
-    print(json.dumps({"workflow": "runtime export", "discovered_and_called": names,
+    print(json.dumps({"workflow": "runtime export", "discovered_and_called": checked_names,
+                      "native_catalog_matches": len(checked_names) if captured else None,
+                      "unicode_exports": True, "missing_doc_and_search_limits": "pass",
                       "png_matches_snapshot": True, "python_entry_point": True,
                       "camera_changes_thumbnail": True,
                       "fbx_reopened": True, "invalid_mode_error": "pass"}))

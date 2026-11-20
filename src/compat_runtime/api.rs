@@ -61,6 +61,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Export the active garment as FBX and return the generated file paths."
     ),
     (
+        "export_api.ExportFBXW",
+        "(path, option=None)",
+        "Export the active garment as FBX and return the generated file paths."
+    ),
+    (
         "export_api.ExportGLB",
         "(path, option=None)",
         "Export the active garment as GLB."
@@ -82,6 +87,11 @@ const FUNCTIONS: &[Entry] = functions![
     ),
     (
         "export_api.ExportThumbnail3D",
+        "(path)",
+        "Export a PNG of the current garment from the selected camera direction."
+    ),
+    (
+        "export_api.ExportThumbnail3DW",
         "(path)",
         "Export a PNG of the current garment from the selected camera direction."
     ),
@@ -491,7 +501,17 @@ const FUNCTIONS: &[Entry] = functions![
         "Get the Rust workbench temporary directory."
     ),
     (
+        "utility_api.GetCLOTemporaryFolderPathW",
+        "()",
+        "Get the Rust workbench temporary directory."
+    ),
+    (
         "utility_api.GetCLOAssetFolderPath",
+        "(bLinuxTypePathDelimeter=True)",
+        "Return the configured CLO asset folder, or an empty string when unset."
+    ),
+    (
+        "utility_api.GetCLOAssetFolderPathW",
         "(bLinuxTypePathDelimeter=True)",
         "Return the configured CLO asset folder, or an empty string when unset."
     ),
@@ -611,12 +631,21 @@ const TYPES: &[(&str, &[(&str, &str)])] = &[
 
 fn native_function_doc(name: &str) -> Option<&'static str> {
     match name {
+        "export_api.ExportFBX" => Some("ExportFBX(*args, **kwargs)"),
+        "export_api.ExportFBXW" => Some("ExportFBXW(arg0: str, arg1: Marvelous::ImportExportOption) -> List[str]"),
+        "export_api.ExportSnapshot2D" => Some("ExportSnapshot2D(arg0: str, arg1: int) -> List[str]"),
+        "export_api.ExportThumbnail3D" => Some("ExportThumbnail3D(*args, **kwargs)"),
+        "export_api.ExportThumbnail3DW" => Some("ExportThumbnail3DW(arg0: str) -> str"),
         "import_api.ImportAvatar" => Some("ImportAvatar(arg0: str, arg1: Marvelous::ImportExportOption) -> bool"),
         "pattern_api.GetPatternCount" => Some("GetPatternCount() -> int"),
         "pattern_api.GetPatternIndex" => Some("GetPatternIndex(arg0: str) -> int"),
         "pattern_api.GetPatternIndexW" => Some("GetPatternIndexW(arg0: str) -> int"),
         "pattern_api.GetPatternPieceName" => Some("GetPatternPieceName(arg0: int) -> str"),
         "pattern_api.MovePatternPoint" => Some("MovePatternPoint(arg0: int, arg1: int, arg2: float, arg3: float) -> None"),
+        "utility_api.GetCLOAssetFolderPath" => Some("GetCLOAssetFolderPath(bLinuxTypePathDelimeter: bool = True) -> str"),
+        "utility_api.GetCLOAssetFolderPathW" => Some("GetCLOAssetFolderPathW(bLinuxTypePathDelimeter: bool = True) -> str"),
+        "utility_api.GetCLOTemporaryFolderPath" => Some("GetCLOTemporaryFolderPath() -> str"),
+        "utility_api.GetCLOTemporaryFolderPathW" => Some("GetCLOTemporaryFolderPathW() -> str"),
         _ => None,
     }
 }
@@ -1132,6 +1161,13 @@ pub(super) fn invoke(
             format!("Unknown Rust API name: {name}. Use clo_api_catalog for implemented entries.")
         })?;
     let arg = bind(entry, &args, &kwargs)?;
+    let name = match name {
+        "export_api.ExportFBXW" => "export_api.ExportFBX",
+        "export_api.ExportThumbnail3DW" => "export_api.ExportThumbnail3D",
+        "utility_api.GetCLOAssetFolderPathW" => "utility_api.GetCLOAssetFolderPath",
+        "utility_api.GetCLOTemporaryFolderPathW" => "utility_api.GetCLOTemporaryFolderPath",
+        _ => name,
+    };
     if name.starts_with("rest_api.") {
         return super::http::request(name, &arg);
     }
