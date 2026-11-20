@@ -4375,7 +4375,7 @@ async def verify_native_two_corner_archives():
                 for a, b in zip(actual, expected, strict=True):
                     assert all(a[key] == b[key] for key in ("lineIndex", "start", "end"))
                 length_errors = [abs(a["length"] - b["length"]) for a, b in zip(actual, expected, strict=True)]
-                assert length_errors[1] < 0.001, length_errors
+                assert max(length_errors) < 0.01, length_errors
 
                 name = "Curve Readback" if suffix == "zprj" else "曲线 É"
                 renamed = await json_result(session, "clo_api_call", {
@@ -4407,6 +4407,37 @@ async def verify_native_two_corner_archives():
                                  "glb_mesh_counts": [(len(positions), len(indices) // 3)
                                                      for positions, indices in expected_meshes]}
     print(json.dumps({"case": "native two-corner outline archives", "formats": cases}))
+
+
+async def verify_native_curve_measurements():
+    folder = Path(os.environ["CLO_NATIVE_TWO_CORNER_FIXTURES"]).resolve(strict=True)
+    reference = json.loads((folder / "curve-measure-native.json").read_text())
+    fixture = folder / "curve-measure-reference.zpac"
+    reports = {}
+    async with open_backend("rust") as session:
+        for mode in ("created", "reopened"):
+            if mode == "created":
+                for name, row in reference.items():
+                    await json_result(session, "pattern_create", {"name": name, "points": row["points"]})
+            else:
+                opened = await json_result(session, "scene_open", {"path": str(fixture), "mode": "replace"})
+                assert opened["pattern_count"] == len(reference)
+            results = {}
+            for name, row in reference.items():
+                actual = await json_result(session, "pattern_info", {"pattern": name})
+                measured = actual["line_info"]["lines"]
+                length_error = 0.0
+                for expected, observed in zip(row["edges"], measured, strict=True):
+                    assert expected["lineIndex"] == observed["lineIndex"]
+                    for end in ("start", "end"):
+                        assert all(abs(expected[end][axis] - observed[end][axis]) < 0.001 for axis in ("x", "y"))
+                    length_error = max(length_error, abs(observed["length"] - expected["length"]))
+                bounds_error = max(abs(float(row["bbox"][key]) - float(actual["bbox"][key]))
+                                   for key in ("Width", "Height"))
+                assert max(length_error, bounds_error) < 0.01, (mode, name, length_error, bounds_error)
+                results[name] = {"length_error_mm": length_error, "bounds_error_mm": bounds_error}
+            reports[mode] = results
+    print(json.dumps({"case": "native curved outline measurements", "tolerance_mm": 0.01, "modes": reports}))
 
 
 async def verify_native_colorway_exports():
@@ -5317,6 +5348,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-two-corner-archives", action="store_const", dest="comparison",
                              const=verify_native_two_corner_archives,
                              help="reopen and export two-corner native project and garment archives")
+    comparisons.add_argument("--verify-native-curve-measurements", action="store_const", dest="comparison",
+                             const=verify_native_curve_measurements,
+                             help="compare curve lengths and bounds against native creation and archive captures")
     comparisons.add_argument("--verify-native-colorway-exports", action="store_const", dest="comparison",
                              const=verify_native_colorway_exports,
                              help="reopen all mesh formats exported from a native two-colorway archive")
@@ -5343,6 +5377,7 @@ if __name__ == "__main__":
                                 verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
                                 verify_native_colorway_exports, verify_native_colorway_textures, verify_native_two_corner_archives,
+                                verify_native_curve_measurements,
                                 verify_native_colorway_normals, verify_native_colorway_refresh,
                                 verify_native_texture_transforms,
                                 verify_tiered_build_relaxation,

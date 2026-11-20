@@ -130,6 +130,8 @@ pub struct Mesh {
     inner_seam_rest: InnerSeamRest,
 }
 
+const MAX_PERIMETER_VERTICES: usize = 512;
+
 fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
     let mut vertices: Vec<Point2> = Vec::new();
     let mut corners = Vec::new();
@@ -160,7 +162,7 @@ fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
     }
     if corners.len() == 2 {
         // Two-corner curved outlines need physical samples between the corners.
-        return crate::compat_scene::sampled_perimeter(pattern);
+        return crate::compat_scene::sampled_perimeter(pattern, MAX_PERIMETER_VERTICES);
     }
     if vertices.len() < 3 || corners.len() < 3 {
         return Err("pattern requires at least three distinct corners".into());
@@ -512,7 +514,7 @@ fn build_mesh(
     legacy_uniform: bool,
 ) -> Result<Mesh, String> {
     let (mut points, corners) = perimeter(pattern)?;
-    if points.len() > 512 {
+    if points.len() > MAX_PERIMETER_VERTICES {
         return Err(
             "mesh triangulation currently supports at most 512 perimeter points per pattern".into(),
         );

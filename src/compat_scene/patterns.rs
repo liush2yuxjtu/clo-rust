@@ -104,37 +104,73 @@ fn bezier(points: &[Point], t: f64) -> Point {
     work[0]
 }
 
-fn curve(edge: &[Point], sampled: bool) -> Vec<Point> {
+const CURVE_STEPS: u32 = 29;
+
+pub(super) fn curve(edge: &[Point], sampled: bool) -> Vec<Point> {
+    curve_with_steps(edge, sampled, CURVE_STEPS)
+}
+
+fn curve_with_steps(edge: &[Point], sampled: bool, steps: u32) -> Vec<Point> {
     if sampled || edge.len() < 3 {
         return edge.to_vec();
     }
     if edge[1..edge.len() - 1].iter().all(|p| p.kind == 3) {
-        return (0..=32)
-            .map(|i| bezier(edge, f64::from(i) / 32.0))
+        return (0..=steps)
+            .map(|i| bezier(edge, f64::from(i) / f64::from(steps)))
             .collect();
     }
+    natural_spline(edge, steps)
+}
+
+fn natural_spline(edge: &[Point], steps: u32) -> Vec<Point> {
+    let mut knots = edge.to_vec();
+    knots.dedup_by(|a, b| a.x == b.x && a.y == b.y);
+    if knots.len() < 3 {
+        return knots;
+    }
+    let spans: Vec<_> = knots.windows(2).map(|p| p[0].distance(p[1])).collect();
+    if spans.iter().any(|&h| h == 0.0 || !h.is_finite()) {
+        return knots;
+    }
+    // Solve the tridiagonal system for second derivatives, with zero
+    // curvature at the endpoints and chord-length knot parameters.
+    let mut upper = vec![0.0; knots.len()];
+    let mut curvature = vec![[0.0; 2]; knots.len()];
+    for i in 1..knots.len() - 1 {
+        let (left, right) = (spans[i - 1], spans[i]);
+        let divisor = 2.0 * (left + right) - left * upper[i - 1];
+        upper[i] = right / divisor;
+        let derivative = |a, b, c, previous| {
+            (6.0 * ((c - b) / right - (b - a) / left) - left * previous) / divisor
+        };
+        let (a, b, c) = (knots[i - 1], knots[i], knots[i + 1]);
+        let [x, y] = curvature[i - 1];
+        curvature[i] = [derivative(a.x, b.x, c.x, x), derivative(a.y, b.y, c.y, y)];
+    }
+    for i in (1..knots.len() - 1).rev() {
+        let next = curvature[i + 1];
+        for (value, following) in curvature[i].iter_mut().zip(next) {
+            *value -= upper[i] * following;
+        }
+    }
     let mut result = Vec::new();
-    for i in 0..edge.len() - 1 {
-        let a = edge[i.saturating_sub(1)];
-        let b = edge[i];
-        let c = edge[i + 1];
-        let d = edge[(i + 2).min(edge.len() - 1)];
-        for step in 0..16 {
-            let t = f64::from(step) / 16.0;
-            let evaluate = |a: f64, b: f64, c: f64, d: f64| {
-                0.5 * ((2.0 * b)
-                    + (c - a) * t
-                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
-                    + (-a + 3.0 * b - 3.0 * c + d) * t * t * t)
+    for (i, h) in spans.into_iter().enumerate() {
+        let (a, b) = (knots[i], knots[i + 1]);
+        for step in 0..steps {
+            let t = f64::from(step) / f64::from(steps);
+            let s = 1.0 - t;
+            let evaluate = |a, b, left, right| {
+                s * a + t * b + h * h / 6.0
+                    * ((s * s * s - s) * left + (t * t * t - t) * right)
             };
             result.push(Point {
-                x: evaluate(a.x, b.x, c.x, d.x),
-                y: evaluate(a.y, b.y, c.y, d.y),
+                x: evaluate(a.x, b.x, curvature[i][0], curvature[i + 1][0]),
+                y: evaluate(a.y, b.y, curvature[i][1], curvature[i + 1][1]),
                 kind: 0,
             });
         }
     }
-    result.push(edge[edge.len() - 1]);
+    result.push(knots[knots.len() - 1]);
     result
 }
 
@@ -154,22 +190,28 @@ pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
     Ok(result)
 }
 
-pub(crate) fn sampled_perimeter(pattern: &Value) -> Result<(Vec<[f64; 2]>, Vec<usize>), String> {
+pub(crate) fn sampled_perimeter(pattern: &Value, max_samples: usize) -> Result<(Vec<[f64; 2]>, Vec<usize>), String> {
     let mut vertices = Vec::new();
     let mut corners = Vec::new();
-    for edge in split_edges(&points(pattern)?) {
+    let outline = points(pattern)?;
+    let steps = (max_samples / outline.len()).clamp(1, CURVE_STEPS as usize) as u32;
+    for edge in split_edges(&outline) {
         corners.push(vertices.len());
-        let sampled = curve(&edge, flag(pattern, "sampled_polyline", false));
+        let sampled = curve_with_steps(&edge, flag(pattern, "sampled_polyline", false), steps);
         vertices.extend(sampled[..sampled.len() - 1].iter().map(|point| [point.x, point.y]));
     }
     Ok((vertices, corners))
 }
 
 fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
+    if let Ok([left, bottom, right, top]) = serde_json::from_value::<[f64; 4]>(pattern["native_outline_bounds"].clone()) {
+        let [dx, dy] = offset(pattern);
+        return Ok([left + dx, bottom + dy, right + dx, top + dy]);
+    }
     Ok(point_bounds(outline(pattern)?, offset(pattern)))
 }
 
-fn point_bounds(points: impl IntoIterator<Item = Point>, [dx, dy]: [f64; 2]) -> [f64; 4] {
+pub(super) fn point_bounds(points: impl IntoIterator<Item = Point>, [dx, dy]: [f64; 2]) -> [f64; 4] {
     points.into_iter().fold(
         [
             f64::INFINITY,
@@ -672,10 +714,9 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
 
 fn set_points(pattern: &mut Value, points: Vec<Point>) {
     pattern["points"] = Value::Array(points.into_iter().map(Point::record).collect());
-    pattern
-        .as_object_mut()
-        .expect("pattern object")
-        .remove("native_outline_metrics");
+    let record = pattern.as_object_mut().expect("pattern object");
+    record.remove("native_outline_metrics");
+    record.remove("native_outline_bounds");
 }
 
 fn reflect(p: Point, a: Point, b: Point) -> Point {

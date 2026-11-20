@@ -163,10 +163,17 @@ Rust 保存改名时同步更新裁片、面料形状和名称标注中的 UTF-8
 | `two-corner-curve.zprj` | `be5e947012dba9c0d7215f5438aca6fbfa909a3abef6afc9608036e4e88d4b82` |
 | `two-corner-curve.zpac` | `660887594e97c37bad9e2fa859ad99d801b686f3bd284a12dc8e6b7b8888b6b7` |
 | `two-corner-curve.glb` | `6072cc69a3b2be24f4fff5f24f96763d79fb6b1b3d9982b1521f3dd43cc83bf1` |
+| `curve-measure-reference.zpac` | `f006263ad7864c2a6cf2b71c1709b081c239f5bb2e6f294c664512156195eb67` |
 
-曲边长度仍有差异。官方为 176.1746 mm，Rust 为 172.8330 mm，
-差 3.3416 mm。直边差小于 0.001 mm。复跑使用
-`--verify-native-two-corner-archives`。
+原始两角点曲边在官方 CLO 中为 176.1746 mm，Rust 为 176.1736 mm，
+差约 0.00096 mm。ZPRJ 和 ZPAC 均通过逐边 0.01 mm 验收。
+`--verify-native-two-corner-archives` 同时复核原网格和 GLB。
+
+用官方 CLO 捕获七组 Bézier、样条和混合曲线，记录新建时的控制点、
+端点、边长及包围盒，并保存 ZPAC。`--verify-native-curve-measurements`
+在 Rust 中分别新建七组曲线和读回原生归档，再比较同一组量测。
+端点允许误差为 0.001 mm，边长和包围盒宽高为 0.01 mm。两条路径
+的最大边长差为 0.00230 mm，最大包围盒宽高差为 0.00451 mm。
 
 ## 48 项逐项记录
 
@@ -192,7 +199,7 @@ Rust 保存改名时同步更新裁片、面料形状和名称标注中的 UTF-8
 | `avatar_measurements` | Rust 与原生保存数据对照的独立记录 | 同一现场人台的刷新和缓存策略 |
 | `arrangement_points` | Carlita 110 个名称及底层完整排布记录与原生留档逐字段一致 | 双端更换人台、多人台和空场景 |
 | `pattern_list` | 历史 42 片的轮廓、设置和子形状对照 | 当前版本详略模式、编辑后索引读回 |
-| `pattern_info` | 历史 322 条外边、520 条子形状边及缺失裁片对照 | 当前版本编辑后的点、线和索引 |
+| `pattern_info` | 历史 322 条外边、520 条子形状边及缺失裁片对照，本轮七组曲线的新建与归档量测 | 当前版本编辑后的点、线和索引 |
 | `pattern_create` | 双端自动名称规则、重名、活动面料、两角点曲线、非法类型和排布失败的状态通过。Rust 验证曲线保存重开、网格生成及旧快照行为 | 其他复杂轮廓与原生对话框交互 |
 | `pattern_delete` | 双端名称、重复项、越界和溢出后的裁片与缝组读回通过。Rust 单独验证剩余姿态续算、旧快照拒绝与重用 ID 后的选区 | 双端桌面选区、更多数字文本和复杂缝组 |
 | `pattern_set_arrangement` | 双端按名称和索引设置，两组偏移、方向、类型及错误后的场景读回一致 | 更多人台的排布和模拟几何 |

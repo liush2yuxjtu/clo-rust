@@ -1,7 +1,7 @@
 //! Read a stored native drape without claiming that it was solved by the Rust engine.
 
 use super::clo_native::{mesh_fields, sized_list, sizes, take, uint};
-use crate::compat_scene::patterns::{curve_length, points, Point};
+use crate::compat_scene::patterns::{curve, curve_length, point_bounds, points, Point};
 use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -331,8 +331,9 @@ pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result
                 panel["saved_arrangement"] = settings;
             }
         }
-        if let Some(metrics) = outline_metrics(record, panel) {
+        if let Some((metrics, limits)) = outline_metrics(record, panel) {
             panel["native_outline_metrics"] = json!(metrics);
+            panel["native_outline_bounds"] = json!(limits);
         }
         if let Some(children) = child_shapes(record) {
             panel["native_children"] = json!(children);
@@ -406,13 +407,13 @@ fn line_shape(line: &Fields<'_>, vertices: &[Point]) -> Option<(Vec<Point>, bool
     let mut edge = vec![endpoint(b"uiStartPointIndex")?];
     match kind {
         0 => (),
-        2 => {
+        2 | 3 => {
             let control = map_list(line.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
             if control.is_empty() {
                 return None;
             }
             for point in control {
-                edge.push(shape_point(&point, 2)?);
+                edge.push(shape_point(&point, kind as u64)?);
             }
         }
         _ => return None,
@@ -426,7 +427,7 @@ fn line_metrics(edge: &[Point], straight: bool) -> Option<Value> {
     length.is_finite().then(|| json!({"length": length, "straight": straight}))
 }
 
-fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<Vec<Value>> {
+fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f64; 4])> {
     let shape = record.map(b"mapShape2D").ok()?;
     let transform = shape_transform(&shape)?;
     let vertices = shape_vertices(&shape)?;
@@ -440,19 +441,28 @@ fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<Vec<Value>> {
         (actual.x - expected.x).hypot(actual.y - expected.y) <= 0.05
     };
     let mut metrics = Vec::with_capacity(lines.len());
+    let mut limits = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
     for (i, line) in lines.iter().enumerate() {
-        let (mut edge, straight) = line_shape(line, &vertices)?;
+        let (edge, straight) = line_shape(line, &vertices)?;
         if !matches(edge[0], corners[i])
             || !matches(*edge.last()?, corners[(i + 1) % corners.len()])
         {
             return None;
         }
-        for point in &mut edge {
+        let mut sampled = curve(&edge, false);
+        let [left, bottom, right, top] =
+            point_bounds(sampled.iter().map(|&p| transform.position(p)), [0.0; 2]);
+        limits = [limits[0].min(left), limits[1].min(bottom), limits[2].max(right), limits[3].max(top)];
+        for point in &mut sampled {
             *point = transform.vector(*point);
         }
-        metrics.push(line_metrics(&edge, straight)?);
+        let length = curve_length(&sampled, true);
+        if !length.is_finite() {
+            return None;
+        }
+        metrics.push(json!({"length": length, "straight": straight}));
     }
-    Some(metrics)
+    limits.iter().all(|n| n.is_finite()).then_some((metrics, limits))
 }
 
 fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Value> {
