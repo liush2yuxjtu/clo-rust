@@ -225,6 +225,13 @@ scene, then advance one simulation step. Verify duplicate and
 out-of-range seam rejection. Set `CLO_DISPLAY_FIXTURE` to check
 sewing and reopening with a native pose archive as well.
 
+Run `--verify-delete-keeps-drape` to delete panels by name and index from
+a simulated scene. Check that repeated references are deduplicated,
+an invalid batch preserves the scene, and only the deleted panels'
+meshes and sewing are removed. Reopen and resume the surviving
+simulation. Set `CLO_DISPLAY_FIXTURE` to also check archived meshes and
+native seam groups after deleting a native panel.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

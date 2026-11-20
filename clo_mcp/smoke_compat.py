@@ -1355,6 +1355,77 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_delete_keeps_drape():
+    with TemporaryDirectory(prefix="clo-delete-drape-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            names = ("Front", "Drop 1", "Drop 2", "Back")
+            for i, name in enumerate(names):
+                x = 140 * i
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 45, 70]],
+                })
+            for a, b in (("Front", "Back"), ("Front", "Drop 1"), ("Drop 2", "Back")):
+                await json_result(rust, "sew", {"pattern_a": a, "line_a": 0,
+                                                "pattern_b": b, "line_b": 0})
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+            _, before = await save("before")
+            invalid = await rust.call_tool("pattern_delete", {"patterns": ["Drop 1", "missing"]})
+            assert invalid.isError
+            _, rejected = await save("rejected")
+            assert rejected["patterns"] == before["patterns"]
+            assert rejected["simulation"] == before["simulation"]
+            assert rejected["seams"] == before["seams"]
+
+            result = await json_result(rust, "pattern_delete", {"patterns": ["Drop 1", "2", "Drop 1"]})
+            assert result == {"deleted": 2, "pattern_count": 2}
+            path, kept = await save("edited")
+            assert [p["name"] for p in kept["patterns"]] == ["Front", "Back"]
+            assert kept["seams"] == before["seams"][:1]
+            remaining = [mesh for mesh in before["simulation"]["meshes"] if mesh["name"] in ("Front", "Back")]
+            assert kept["simulation"] == before["simulation"] | {"meshes": remaining}
+            assert (await json_result(rust, "seams_list"))["count"] == 1
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 0})
+            _, zero = await save("zero")
+            assert zero["simulation"] == kept["simulation"]
+            await json_result(rust, "simulate", {"steps": 1})
+            _, continued = await save("continued")
+            assert continued["simulation"]["steps"] == 4
+            await json_result(rust, "pattern_delete", {"patterns": ["Front", "Back"]})
+            _, empty = await save("empty")
+            assert empty["simulation"] is None and not empty["seams"]
+
+            native_count = None
+            if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                _, original = await save("native")
+                removed = original["patterns"][0]["id"]
+                expected = [m for m in original["simulation"]["meshes"] if m["id"] != removed]
+                assert 0 < len(expected) < len(original["simulation"]["meshes"])
+                groups = [g for g in original["native_seam_groups"] if not any(
+                    end["pattern_id"] == removed for pair in g["segments"] for end in pair
+                )]
+                await json_result(rust, "pattern_delete", {"patterns": ["0"]})
+                path, native = await save("native-edited")
+                assert native["native_seam_groups"] == groups
+                await json_result(rust, "scene_open", {"path": str(path)})
+                _, opened = await save("native-reopened")
+                assert opened["simulation"] == original["simulation"] | {"meshes": expected}
+                native_count = len(expected)
+    print(json.dumps({"tools": ["pattern_delete", "seams_list", "scene_open", "simulate"],
+                      "case": "delete panels without resetting the remaining drape",
+                      "retained_panels": 2, "retained_seam_groups": 1, "continued_step": 4,
+                      "invalid_batch_and_empty_scene": "pass", "native_meshes_preserved": native_count}))
+
+
 async def verify_sew_keeps_drape():
     with TemporaryDirectory(prefix="clo-sew-drape-") as directory:
         root = Path(directory)
@@ -2109,6 +2180,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-sew-keeps-drape", action="store_const", dest="comparison",
                              const=verify_sew_keeps_drape,
                              help="verify newly added seams solve from the saved drape")
+    comparisons.add_argument("--verify-delete-keeps-drape", action="store_const", dest="comparison",
+                             const=verify_delete_keeps_drape,
+                             help="verify panel deletion removes only associated meshes and sewing")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2125,7 +2199,8 @@ if __name__ == "__main__":
                                 verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
-                                verify_display_edits_keep_drape, verify_sew_keeps_drape)
+                                verify_display_edits_keep_drape, verify_sew_keeps_drape,
+                                verify_delete_keeps_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -477,7 +477,12 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
         for i in indices.iter().rev() {
             vec_mut(state, "patterns").remove(*i);
         }
-        invalidate_geometry(state);
+        if let Some(meshes) = state["simulation"].get_mut("meshes").and_then(Value::as_array_mut) {
+            meshes.retain(|mesh| !removed.contains(&mesh["id"]));
+            if meshes.is_empty() {
+                invalidate_geometry(state);
+            }
+        }
     }
     Ok(json!({"deleted": indices.len(), "pattern_count": array(state, "patterns").len()}))
 }
