@@ -27,9 +27,12 @@ For MCP changes, install `clo_mcp/requirements.txt` in a Python 3.11+ virtual en
 
 Run `--verify-fabric-texture-clear` to clear a single map with an empty image
 path. Check that the other maps persist through a portable save, the cleared base
-is absent in GLB, and errors leave existing maps intact. With two fabrics, verify
-that an unknown map or unreadable image leaves the valid target selected.
-An invalid fabric index keeps the previously selected fabric.
+is absent in GLB, and other maps remain intact. With two fabrics, verify
+that an unknown map returns an error after selecting the target. Successful
+map calls select the target in the reopened fixture. After adding a fabric,
+CLO’s colorway update can reselect the newly added fabric. Missing or unreadable
+images return success and keep the existing textures. A signed index that does
+not select a valid fabric uses the previously selected material.
 Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
 base and normal maps to also check native archive reopen and preservation of the
 other maps. Add the missing channels after reopening and verify that all new
@@ -47,7 +50,9 @@ new opacity image after recoloring and checks that its bytes survive the save.
 Check each of faces 0, 1, and 2 through
 `fabric_api.GetFabricPBRMaterialBaseColor` and the native face records when present.
 Compare six-digit hex, shorthand hex, and a compound color name, and check that
-invalid hex and invalid fabric indices leave the material list intact.
+invalid hex and negative fabric indices return errors. For an in-range
+unsigned integer that names no fabric, verify three false face results and
+the bridge's texture cleanup on the current fabric.
 
 Set `CLO_DESATURATION_REFERENCE_DIR` to the official GLB capture directory
 and install Pillow to verify the decoded base image after direct Rust export.
@@ -62,7 +67,8 @@ fabric to another panel. Use both its name and its numeric index as a string
 while another panel has that same numeric name. Verify both references select
 the index. Read back the effects of each failed stage: a missing panel leaves
 the registered fabric and existing assignments, an invalid color leaves the
-new assignment, and a texture error leaves the applied color and assignment.
+new assignment, and a missing texture returns success and leaves the applied
+color and assignment.
 Check that adding leaves both original assignments
 and the drape intact. Reopen at zero steps, compare positions and velocities,
 and check each GLB mesh's material. Optionally set `CLO_FABRIC_ASSIGN_FIXTURE`
@@ -71,6 +77,22 @@ nested library case. Check that `fabric_library` follows path order, preserves
 duplicate basenames, filters accented names case-insensitively, and skips
 Rust material JSON when the library contains CLO fabrics. The `denim` keyword
 must load the standard file at the library root even with a same-named nested file.
+
+Run `--compare-live-fabric-edits` with both backends sharing the native
+Fabric library and a fresh `CLO_MCP_STATE` directory. Set
+`CLO_FABRIC_LIVE_FIXTURE` to the two-panel ZPRJ, and
+`CLO_FABRIC_LIVE_SAVED_FIXTURE` to a ZPRJ with two saved fabrics.
+Set `CLO_FABRIC_LIVE_IMAGE` and `CLO_FABRIC_LIVE_WIDE_IMAGE` to static PNGs readable
+from both backends. Use the same configured library path in both backends,
+including the Wine drive prefix on Boat. Compare whole responses and full
+fabric lists, the assigned fabric indices, and the stored material count.
+Check repeated and missing references, a positive nonexistent panel and
+signed/unsigned overflow after a valid assignment. Check successful and
+failed recolors and map edits, including the selected material and base map
+readback. Open the other fixture after adding materials and verify the saved
+project selects the actual edit target again. Include a wide PNG of
+6300 × 1485. Check renderer and archive
+persistence through the separate fabric export and native reopen cases.
 
 For release-download, checksum, or cache changes, use an existing release with the required assets and run `CLO_RUST_RELEASE=<tag> python -m clo_mcp.smoke_release` with GitHub CLI access. The smoke test exercises the actual published download, checksum verification, cache hit, seam audit, and replay through stdio. For new releases, build and test on each target platform, run the binary's `--version`, compute its SHA-256 checksum, and confirm the published tag and assets. Run the release-download smoke test against the published tag.
 

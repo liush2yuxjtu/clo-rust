@@ -272,16 +272,16 @@ async def verify_fabric_assignment_workflow():
             material_names = [model["materials"][mesh["primitives"][0]["material"]]["name"] for mesh in model["meshes"]]
             assert material_names == [updated["fabrics"][index]["name"] for index in (new_index, back_index)]
 
-            for label, options, expected_color in (
-                ("invalid-color", {"color": "#gggggg"}, [0.85, 0.85, 0.85]),
-                ("invalid-texture", {"color": "#246", "texture_image": str(root / "missing.png")},
-                 [34 / 255, 68 / 255, 102 / 255]),
+            for label, options, expected_color, expect_error in (
+                ("invalid-color", {"color": "#gggggg"}, [0.85, 0.85, 0.85], True),
+                ("missing-texture", {"color": "#246", "texture_image": str(root / "missing.png")},
+                 [34 / 255, 68 / 255, 102 / 255], False),
             ):
                 before = await save_fabric_records(rust, root / "before-error.clorust")
                 result = await rust.call_tool("fabric_apply", {
                     "fabric": "cotton", "patterns": ["Back"], **options,
                 })
-                assert result.isError, label
+                assert bool(result.isError) == expect_error, label
                 after = await save_fabric_records(rust, root / "after-error.clorust")
                 assert after[:-1] == before
                 index = after[-1]["index"]
@@ -318,9 +318,135 @@ async def verify_fabric_assignment_workflow():
                       "numeric_reference_preceded_name": True,
                       "selection_error_retained_fabric": True,
                       "color_error_retained_assignment": True,
-                      "texture_error_retained_color": True,
+                      "missing_texture_retained_color": True,
                       "invalid_assignment_preserved_scene": True, "glb_materials": material_names}
                      | library_report, ensure_ascii=False))
+
+
+async def compare_live_fabric_edits():
+    fixture = Path(os.environ["CLO_FABRIC_LIVE_FIXTURE"])
+    image = Path(os.environ["CLO_FABRIC_LIVE_IMAGE"])
+    wide = Path(os.environ["CLO_FABRIC_LIVE_WIDE_IMAGE"])
+    saved_fabrics = Path(os.environ["CLO_FABRIC_LIVE_SAVED_FIXTURE"])
+    assert all(path.is_file() for path in (fixture, image, wide, saved_fabrics))
+    state = Path(os.environ["CLO_MCP_STATE"])
+    missing = state / "missing-fabric-texture.png"
+    corrupt = state / "corrupt-fabric-texture.png"
+    assert state.is_dir() and not missing.exists() and not corrupt.exists()
+    apply_cases = (
+        ("denim default all", {"fabric": "denim"}, False, [1, 1]),
+        ("cotton by name", {"fabric": "cotton", "patterns": ["Back"], "color": "#246"}, False, [0, 1]),
+        ("satin duplicate references", {"fabric": "satin", "patterns": ["1", "1"]}, False, [0, 1]),
+        ("jersey empty selection", {"fabric": "jersey", "patterns": []}, False, [1, 1]),
+        ("chiffon named color", {"fabric": "chiffon", "color": "navy"}, False, [1, 1]),
+        ("explicit library filename", {"fabric": "V2_Woven_Denim_1.zfab", "patterns": ["0"]}, False, [1, 0]),
+        ("unrecognized keyword fallback", {"fabric": "fabric-absent-404"}, False, [1, 1]),
+        ("missing name before assignment", {"fabric": "cotton", "patterns": ["Front", "missing-panel"]}, True, [0, 0]),
+        ("out-of-range positive index", {"fabric": "cotton", "patterns": ["0", "99", "1"]}, False, [1, 1]),
+        ("negative index after valid assignments", {"fabric": "cotton", "patterns": ["0", "99", "1", "-1"]}, True, [1, 1]),
+        ("unsigned overflow after first assignment", {"fabric": "cotton", "patterns": ["0", "4294967296", "1"]}, True, [1, 0]),
+        ("bad color after assignment", {"fabric": "cotton", "patterns": ["1"], "color": "#gggggg"}, True, [0, 1]),
+        ("missing texture after recolor", {"fabric": "cotton", "patterns": ["1"], "color": "navy", "texture_image": str(missing)}, False, [0, 1]),
+        ("wide texture after recolor", {"fabric": "cotton", "patterns": ["1"], "color": "navy", "texture_image": str(wide)}, False, [0, 1]),
+    )
+    edit_cases = (
+        ("fabric_set_color", {"fabric_index": 0, "color": "#246"}, False, 1, ("None", image.stem)),
+        ("fabric_set_color", {"fabric_index": 99, "color": "navy"}, False, 1, ("None", "None")),
+        ("fabric_set_color", {"fabric_index": -1, "color": "navy"}, True, 1, ("None", image.stem)),
+        ("fabric_set_color", {"fabric_index": 0, "color": "#gggggg"}, True, 1, ("None", image.stem)),
+        ("fabric_set_texture", {"fabric_index": 0, "image_path": str(image)}, False, 1, (image.stem, image.stem)),
+        ("fabric_set_texture", {"fabric_index": 0, "image_path": str(missing)}, False, 1, ("None", image.stem)),
+        ("fabric_set_texture", {"fabric_index": 0, "image_path": str(corrupt)}, False, 1, ("None", image.stem)),
+        ("fabric_set_texture", {"fabric_index": 0, "image_path": "", "map": "unknown"}, True, 0, ("None", image.stem)),
+        ("fabric_set_texture", {"fabric_index": 99, "image_path": ""}, False, 1, ("None", "None")),
+        ("fabric_set_texture", {"fabric_index": -1, "image_path": str(wide)}, False, 1, ("None", wide.stem)),
+        ("fabric_set_texture", {"fabric_index": 2147483648, "image_path": ""}, True, 1, ("None", image.stem)),
+    )
+
+    async def read(session):
+        scene = await json_result(session, "scene_info")
+        listing = await json_result(session, "fabric_list")
+        total = (await json_result(session, "clo_api_call", {
+            "name": "fabric_api.GetFabricCount", "args": [False],
+        }))["value"]
+        return listing, [panel["fabric_index"] for panel in scene["patterns"]], total
+
+    async def attempt(session, tool, args, error):
+        if error:
+            assert (await session.call_tool(tool, args)).isError, (tool, args)
+            return "error"
+        return await json_result(session, tool, args)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        with corrupt.open("x", encoding="utf-8") as handle:
+            handle.write("invalid image")
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+            apply_checks = []
+            for label, args, error, assignment in apply_cases:
+                observed = []
+                for session in (clo, rust):
+                    await json_result(session, "scene_open", {"path": str(fixture)})
+                    reply = await attempt(session, "fabric_apply", args, error)
+                    listing, panels, total = await read(session)
+                    assert total == 2 and panels == assignment, (label, panels, total)
+                    observed.append((reply, listing))
+                assert observed[0] == observed[1], (label, observed)
+                if label == "out-of-range positive index":
+                    assert observed[0][0]["assigned"]["assigned"] == [True, False, True]
+                if label == "wide texture after recolor":
+                    assert observed[0][1]["fabrics"][1]["info"]["Texture"] == wide.stem
+                apply_checks.append({"case": label, "assignment": assignment, "result": observed[0][0]})
+
+            edit_checks = []
+            for tool, args, error, current, textures in edit_cases:
+                observed = []
+                for session in (clo, rust):
+                    await json_result(session, "scene_open", {"path": str(fixture)})
+                    await json_result(session, "fabric_apply", {
+                        "fabric": "cotton", "patterns": ["1"], "texture_image": str(image),
+                    })
+                    reply = await attempt(session, tool, args, error)
+                    listing, panels, total = await read(session)
+                    assert total == 2 and panels == [0, 1]
+                    assert listing["current"] == current, (tool, args, listing)
+                    assert tuple(row["info"]["Texture"] for row in listing["fabrics"]) == textures
+                    observed.append((reply, listing))
+                assert observed[0] == observed[1], (tool, args, observed)
+                edit_checks.append({"tool": tool, "args": args, "current": current,
+                                    "textures": textures, "result": observed[0][0]})
+            for session in (clo, rust):
+                await json_result(session, "scene_open", {"path": str(fixture)})
+                await json_result(session, "fabric_apply", {"fabric": "cotton", "patterns": ["1"]})
+                await json_result(session, "clo_api_call", {
+                    "name": "fabric_api.SetCurrentFabricIndex", "args": [0],
+                })
+                assert (await read(session))[0]["current"] == 0
+                await json_result(session, "fabric_set_color", {"fabric_index": 0, "color": "#246"})
+                assert (await read(session))[0]["current"] == 1
+            for backend, session in (("official", clo), ("rust", rust)):
+                await json_result(session, "scene_open", {"path": str(saved_fabrics)})
+                select = {"name": "fabric_api.SetCurrentFabricIndex", "args": [1]}
+                for tool, args in (
+                    ("fabric_set_color", {"fabric_index": 0, "color": "#246"}),
+                    ("fabric_set_texture", {"fabric_index": 0, "image_path": str(image)}),
+                ):
+                    await json_result(session, "clo_api_call", select)
+                    await json_result(session, tool, args)
+                    listing, _, _ = await read(session)
+                    assert listing["current"] == 0, (backend, tool, listing)
+        finally:
+            corrupt.unlink()
+            if original["project_path"]:
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"assignment_cases": apply_checks, "edit_cases": edit_checks,
+                      "complete_fabric_list_matched": True, "reselected_latest_added_fabric": True,
+                      "reopen_reset_fabric_selection": True, "result": "pass"}, ensure_ascii=False))
 
 
 async def verify_fabric_recolor_opacity():
@@ -374,7 +500,7 @@ async def verify_fabric_recolor_opacity():
             await recolor(sheer, " navy gold ", [0.83, 0.68, 0.22])
             await recolor(sheer, "#246")
             before_invalid = await materials()
-            for index, color in ((opaque, "#x24"), (9001, "#246")):
+            for index, color in ((opaque, "#x24"), (-1, "#246")):
                 rejected = await rust.call_tool("fabric_set_color", {"fabric_index": index, "color": color})
                 assert rejected.isError
             assert await materials() == before_invalid
@@ -502,17 +628,18 @@ async def verify_fabric_texture_clear():
                 "name": "fabric_api.AddFabric", "args": ["denim"],
             }))["value"]
             assert other != index
-            for patch, expected_current in (
-                ({"map": "unknown"}, index),
-                ({"image_path": str(root / "missing.png")}, index),
-                ({"fabric_index": 9001}, other),
+            for patch, expected_current, error in (
+                ({"map": "unknown"}, index, True),
+                ({"image_path": str(root / "missing.png")}, other, False),
+                ({"fabric_index": 9001}, other, False),
             ):
                 await json_result(rust, "clo_api_call", {
                     "name": "fabric_api.SetCurrentFabricIndex", "args": [other],
                 })
-                assert (await rust.call_tool("fabric_set_texture", {
+                result = await rust.call_tool("fabric_set_texture", {
                     "fabric_index": index, "image_path": "", "map": "normal", **patch,
-                })).isError
+                })
+                assert bool(result.isError) == error, patch
                 listing = await json_result(rust, "fabric_list")
                 assert listing["current"] == expected_current, patch
                 assert await maps(index) == {"normal": str(image)}
@@ -528,6 +655,9 @@ async def verify_fabric_texture_clear():
             project, _ = read_gltf_export(glb)
             primitive = project["meshes"][0]["primitives"][0]
             assert "baseColorTexture" not in project["materials"][primitive["material"]]["pbrMetallicRoughness"]
+            await successful(rust, "clo_api_call", {
+                "name": "fabric_api.SetCurrentFabricIndex", "args": [index],
+            })
             await successful(rust, "clo_api_call", {
                 "name": "fabric_api.SetNormalMapImageGivenFilePath", "args": [""],
             })
@@ -6057,6 +6187,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-fabric-recolor-opacity", action="store_const", dest="comparison",
                              const=verify_fabric_recolor_opacity,
                              help="verify opacity map policy after recolor and archive reopen")
+    comparisons.add_argument("--compare-live-fabric-edits", action="store_const", dest="comparison",
+                             const=compare_live_fabric_edits,
+                             help="compare native fabric assignment, colors, textures and failure-state readback")
     comparisons.add_argument("--verify-fabric-assignment-workflow", action="store_const", dest="comparison",
                              const=verify_fabric_assignment_workflow,
                              help="add and assign fabrics separately while retaining a simulated pose")

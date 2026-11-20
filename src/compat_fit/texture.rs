@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-const MAX_DIMENSION: u32 = 4096;
+const MAX_PIXELS: u64 = 4096 * 4096;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const DECODE_BYTES: usize = 96 * 1024 * 1024;
 
@@ -56,10 +56,8 @@ impl BaseTexture {
             .map_err(|error| format!("decode JPEG: {error}"))?;
         let image = decoder.info().ok_or("JPEG has no image metadata")?;
         let (width, height) = (u32::from(image.width), u32::from(image.height));
-        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(format!(
-                "JPEG texture dimensions must be within {MAX_DIMENSION} × {MAX_DIMENSION}"
-            ));
+        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+            return Err(format!("JPEG texture must have between 1 and {MAX_PIXELS} pixels"));
         }
         let channels = match image.pixel_format {
             jpeg_decoder::PixelFormat::L8 => 1,
@@ -108,10 +106,8 @@ impl BaseTexture {
             .read_info()
             .map_err(|error| format!("decode PNG: {error}"))?;
         let info = reader.info();
-        if info.width > MAX_DIMENSION || info.height > MAX_DIMENSION {
-            return Err(format!(
-                "base texture PNG dimensions exceed {MAX_DIMENSION} × {MAX_DIMENSION}"
-            ));
+        if u64::from(info.width) * u64::from(info.height) > MAX_PIXELS {
+            return Err(format!("base texture PNG exceeds {MAX_PIXELS} pixels"));
         }
         if info.animation_control.is_some() {
             return Err("animated PNG base textures are not supported".into());

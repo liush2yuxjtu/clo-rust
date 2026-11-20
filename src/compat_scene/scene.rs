@@ -137,6 +137,9 @@ fn recognized_state(content: Value) -> Result<Value, String> {
 fn replace_scene(state: &mut Value, mut scene: Value) {
     if let Some(runtime) = state.get("runtime") {
         scene["runtime"] = runtime.clone();
+        if let Some(runtime) = scene["runtime"].as_object_mut() {
+            runtime.remove("last_added_fabric");
+        }
     }
     *state = scene;
 }
@@ -553,6 +556,9 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 vec_mut(state, "fabrics").extend(fabrics);
             } else {
                 state["fabrics"] = json!(fabrics);
+                if let Some(runtime) = state["runtime"].as_object_mut() {
+                    runtime.remove("last_added_fabric");
+                }
                 state["colorways"] = loaded["colorways"]
                     .as_array()
                     .map_or_else(|| json!([DEFAULT_COLORWAY]), |names| json!(names));

@@ -308,12 +308,11 @@ mod texture_tests {
         assert!(right[2] > 150 && right[0] == 0 && right[1] == 0, "right: {right:?}");
         assert!(response["render_warnings"].is_null());
         for path in [&damaged, &unsupported] {
-            assert!(call(
-                "fabric_set_texture",
-                json!({"fabric_index":0,"image_path":path}),
-                &mut state
-            )
-            .is_err());
+            assert_eq!(
+                call("fabric_set_texture", json!({"fabric_index":0,"image_path":path}), &mut state)
+                    .unwrap(),
+                json!({"ok":true}),
+            );
             assert_eq!(
                 state["fabrics"][0]["texture_maps"]["base"],
                 json!(first.canonicalize().unwrap())

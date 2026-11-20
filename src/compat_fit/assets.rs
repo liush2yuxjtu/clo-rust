@@ -881,8 +881,8 @@ pub(super) fn load_material(reference: &str) -> Result<(Value, String, Option<Pa
     let reference = reference.trim();
     let path = Path::new(reference);
     if let Some((path, matched)) = native_fabric_path(reference)? {
-        let path = path.canonicalize().map_err(|e| e.to_string())?;
-        let data = crate::compat_scene::read_native_fabric(&path)
+        let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+        let data = crate::compat_scene::read_native_fabric(&canonical)
             .map_err(|error| format!("cannot load fabric {}: {error}", path.display()))?;
         return Ok((data, matched.to_owned(), Some(path)));
     }
@@ -1250,25 +1250,36 @@ pub(super) fn apply_material(
 ) -> Result<Value, String> {
     let patterns = array(&state["patterns"]);
     let pattern_refs = array(&args["patterns"]);
-    let selection: Result<Vec<_>, _> = if pattern_refs.is_empty() {
-        Ok((0..patterns.len()).collect())
+    let panel_count = patterns.len();
+    let selection: Result<Vec<i64>, _> = if pattern_refs.is_empty() {
+        (0..panel_count).map(|index| i64::try_from(index).map_err(|_| "pattern index is too large".into())).collect()
     } else {
         pattern_refs
             .iter()
-            .map(|r| pattern_index(patterns, r))
+            .map(|r| crate::compat_scene::bridge_pattern_index(patterns, r))
             .collect()
     };
-    // A failed selection leaves the new fabric in the project and all pieces on their old fabrics.
+    // Resolve every name before editing. Numeric references instead reach
+    // the native assignment one by one, where an invalid value can fail late.
     let selected = selection.as_deref().unwrap_or_default();
     let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
-        pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&i)
+        pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&(i as i64))
     });
     let name = material["name"].clone();
     let index = register_material(state, material, preserve_default)?;
     let selected = selection?;
-    assign_material(state, &selected, index);
+    let mut assigned = Vec::with_capacity(selected.len());
+    for &reference in &selected {
+        let panel = u32::try_from(reference).map_err(|_| "pattern index must fit in an unsigned 32-bit integer")?;
+        let panel = panel as usize;
+        let exists = panel < panel_count;
+        if exists {
+            assign_material(state, &[panel], index);
+        }
+        assigned.push(exists);
+    }
     let mut result = json!({"fabric":{"index":index,"name":name},"matched":matched,"file":file,
-        "assigned":{"assigned":vec![true;selected.len()],"patterns":selected}});
+        "assigned":{"assigned":assigned,"patterns":selected}});
     if let Some(color) = args
         .get("color")
         .filter(|v| !v.is_null() && v.as_str() != Some(""))
@@ -1279,9 +1290,7 @@ pub(super) fn apply_material(
         result["color"] = json!({"ok":[true,true,true]});
     }
     if let Some(path) = args["texture_image"].as_str().filter(|s| !s.is_empty()) {
-        let path = texture(path, "base")?;
-        update_material_texture(find_fabric_mut(state, index)?, "base", &path);
-        result["texture"] = json!({"ok":true});
+        result["texture"] = fabric_set_texture(&json!({"fabric_index":index,"image_path":path}), state)?;
     }
     crate::compat_scene::refresh_colorway_exports(state);
     Ok(result)
@@ -1301,6 +1310,7 @@ fn register_material(state: &mut Value, mut material: Value, preserve_default: b
     material["index"] = json!(index);
     fabrics.push(material);
     state["current_fabric"] = json!(index);
+    state["runtime"]["last_added_fabric"] = json!(index);
     Ok(index)
 }
 
@@ -1327,31 +1337,37 @@ fn find_fabric_mut(state: &mut Value, index: u64) -> Result<&mut Value, String> 
 }
 
 pub fn fabric_set_color(args: &Value, state: &mut Value) -> Result<Value, String> {
+    let rgb = parse_color(&args["color"])?;
     let index = args["fabric_index"]
         .as_u64()
-        .ok_or("fabric_index must be a nonnegative integer")?;
-    let rgb = parse_color(&args["color"])?;
-    let fabric = find_fabric_mut(state, index)?;
-    let clear_opacity = update_material_color(fabric, rgb);
-    if clear_opacity {
-        state["current_fabric"] = json!(index);
+        .filter(|&value| u32::try_from(value).is_ok())
+        .ok_or("fabric_index must be an unsigned 32-bit integer")?;
+    if let Ok(fabric) = find_fabric_mut(state, index) {
+        let clear_opacity = update_material_color(fabric, rgb);
+        let selected = if clear_opacity { index } else { state["current_fabric"].as_u64().unwrap_or(0) };
+        crate::compat_scene::mark_native_fabric_color(state, index, clear_opacity);
+        finish_fabric_edit(state, selected);
+        return Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}));
     }
-    crate::compat_scene::mark_native_fabric_color(state, index, clear_opacity);
-    crate::compat_scene::refresh_colorway_exports(state);
-    Ok(json!({"rgb":rgb,"result":{"ok":[true,true,true]}}))
+    // The face setters return false, but the bridge's cleanup still uses the
+    // current fabric when selecting a nonexistent fabric has no effect.
+    let current = state["current_fabric"].as_u64().unwrap_or(0);
+    for kind in ["base", "opacity"] {
+        clear_fabric_texture(state, current, kind);
+    }
+    finish_fabric_edit(state, current);
+    Ok(json!({"rgb":rgb,"result":{"ok":[false,false,false]}}))
 }
 
-pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, String> {
-    let index = args["fabric_index"]
-        .as_u64()
-        .ok_or("fabric_index must be a nonnegative integer")?;
-    find_fabric_mut(state, index)?;
-    state["current_fabric"] = json!(index);
-    let kind = string(args, "map", "base");
-    let input = string(args, "image_path", "");
-    if input.is_empty() {
-        validate_texture_map(kind)?;
-        let fabric = find_fabric_mut(state, index)?;
+fn finish_fabric_edit(state: &mut Value, selected: u64) {
+    // CLO’s colorway update reselects the latest fabric added to the live scene.
+    let current = state["runtime"]["last_added_fabric"].as_u64().unwrap_or(selected);
+    state["current_fabric"] = json!(current);
+    crate::compat_scene::refresh_colorway_exports(state);
+}
+
+fn clear_fabric_texture(state: &mut Value, index: u64, kind: &str) {
+    if let Ok(fabric) = find_fabric_mut(state, index) {
         if let Some(maps) = fabric["texture_maps"].as_object_mut() {
             maps.remove(kind);
         }
@@ -1361,12 +1377,35 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
                 catalog.remove("Texture");
             }
         }
-    } else {
-        let path = texture(input, kind)?;
-        update_material_texture(find_fabric_mut(state, index)?, kind, &path);
+        crate::compat_scene::mark_native_fabric_texture(state, index, kind, true);
     }
-    crate::compat_scene::mark_native_fabric_texture(state, index, kind, input.is_empty());
-    crate::compat_scene::refresh_colorway_exports(state);
+}
+
+pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, String> {
+    let requested = args["fabric_index"]
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or("fabric_index must be a signed 32-bit integer")?;
+    let current = state["current_fabric"].as_u64().unwrap_or(0);
+    let index = u64::try_from(requested)
+        .ok()
+        .filter(|&index| array(&state["fabrics"]).iter().any(|fabric| fabric["index"] == index))
+        .unwrap_or(current);
+    let kind = string(args, "map", "base");
+    let input = string(args, "image_path", "");
+    if let Err(error) = validate_texture_map(kind) {
+        state["current_fabric"] = json!(index);
+        return Err(error);
+    }
+    if input.is_empty() {
+        clear_fabric_texture(state, index, kind);
+    } else if let Ok(path) = texture(input, kind) {
+        if let Ok(fabric) = find_fabric_mut(state, index) {
+            update_material_texture(fabric, kind, &path);
+            crate::compat_scene::mark_native_fabric_texture(state, index, kind, false);
+        }
+    }
+    finish_fabric_edit(state, index);
     Ok(json!({"ok":true}))
 }
 

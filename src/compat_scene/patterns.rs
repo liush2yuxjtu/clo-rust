@@ -584,7 +584,7 @@ fn discard_panel_pose(state: &mut Value, id: &Value) {
     }
 }
 
-fn bridge_pattern_index(patterns: &[Value], reference: &Value) -> Result<i64, String> {
+pub(crate) fn bridge_pattern_index(patterns: &[Value], reference: &Value) -> Result<i64, String> {
     if let Some(index) = reference.as_i64() {
         return Ok(index);
     }
