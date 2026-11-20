@@ -297,6 +297,9 @@ pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result
         if let Some(metrics) = outline_metrics(record, panel) {
             panel["native_outline_metrics"] = json!(metrics);
         }
+        if let Some(children) = child_shapes(record) {
+            panel["native_children"] = json!(children);
+        }
     }
     Ok(())
 }
@@ -316,63 +319,142 @@ fn coordinates<const N: usize>(record: &Fields<'_>, key: &[u8], kind: u8) -> Opt
     Some(result)
 }
 
-fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<Vec<Value>> {
-    let shape = record.map(b"mapShape2D").ok()?;
+#[derive(Clone, Copy)]
+struct Transform2D([f64; 6]);
+
+impl Transform2D {
+    fn vector(self, p: Point) -> Point {
+        let [a, b, c, d, _, _] = self.0;
+        Point { x: a * p.x + c * p.y, y: b * p.x + d * p.y, ..p }
+    }
+
+    fn position(self, p: Point) -> Point {
+        let [a, b, c, d, tx, ty] = self.0.map(|n| n as f32);
+        let (x, y) = (p.x as f32, p.y as f32);
+        Point {
+            x: f64::from(a * x + c * y + tx),
+            y: f64::from(b * x + d * y + ty),
+            ..p
+        }
+    }
+}
+
+fn shape_transform(shape: &Fields<'_>) -> Option<Transform2D> {
     let transform = shape.map(b"mapTransformer2D").ok()?;
     let [a, b, 0.0, c, d, 0.0, tx, ty, 1.0] = coordinates(&transform, b"m3Matrix", 13)? else {
         return None;
     };
-    let linear = |[x, y]: [f64; 2], kind| Point {
-        x: a * x + c * y,
-        y: b * x + d * y,
-        kind,
+    Some(Transform2D([a, b, c, d, tx, ty]))
+}
+
+fn shape_point(record: &Fields<'_>, kind: u64) -> Option<Point> {
+    let [x, y] = coordinates(record, b"v2Position", 10)?;
+    Some(Point { x, y, kind })
+}
+
+fn shape_vertices(shape: &Fields<'_>) -> Option<Vec<Point>> {
+    map_list(shape.get(b"listPoint", LIST_TYPE).ok()?, LIMIT)
+        .ok()?
+        .iter()
+        .map(|point| shape_point(point, 0))
+        .collect()
+}
+
+fn line_shape(line: &Fields<'_>, vertices: &[Point]) -> Option<(Vec<Point>, bool)> {
+    let endpoint = |key| {
+        let i = uint(line.get(key, UINT_TYPE).ok()?, &mut 0).ok()?;
+        vertices.get(i).copied()
     };
-    let vertices = map_list(shape.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let kind = i32::from_le_bytes(line.get(b"iLineType", 4).ok()?.try_into().ok()?);
+    let mut edge = vec![endpoint(b"uiStartPointIndex")?];
+    match kind {
+        0 => (),
+        2 => {
+            let control = map_list(line.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
+            if control.is_empty() {
+                return None;
+            }
+            for point in control {
+                edge.push(shape_point(&point, 2)?);
+            }
+        }
+        _ => return None,
+    }
+    edge.push(endpoint(b"uiEndPointIndex")?);
+    Some((edge, kind == 0))
+}
+
+fn line_metrics(edge: &[Point], straight: bool) -> Option<Value> {
+    let length = curve_length(edge, false);
+    length.is_finite().then(|| json!({"length": length, "straight": straight}))
+}
+
+fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<Vec<Value>> {
+    let shape = record.map(b"mapShape2D").ok()?;
+    let transform = shape_transform(&shape)?;
+    let vertices = shape_vertices(&shape)?;
     let lines = map_list(shape.get(b"listLine", LIST_TYPE).ok()?, LIMIT).ok()?;
     let corners: Vec<_> = points(panel).ok()?.into_iter().filter(|p| p.kind == 0).collect();
     if corners.len() != lines.len() {
         return None;
     }
-    let index = |row: &Fields<'_>, key| {
-        uint(row.get(key, UINT_TYPE).ok()?, &mut 0).ok()
-    };
-    let endpoint = |row, key| {
-        let vertex = vertices.get(index(row, key)?)?;
-        Some(linear(coordinates(vertex, b"v2Position", 10)?, 0))
-    };
     let matches = |actual: Point, expected: Point| {
-        (actual.x + tx - expected.x).hypot(actual.y + ty - expected.y) <= 0.05
+        let actual = transform.position(actual);
+        (actual.x - expected.x).hypot(actual.y - expected.y) <= 0.05
     };
     let mut metrics = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
-        let start = endpoint(line, b"uiStartPointIndex")?;
-        let end = endpoint(line, b"uiEndPointIndex")?;
-        if !matches(start, corners[i]) || !matches(end, corners[(i + 1) % corners.len()]) {
+        let (mut edge, straight) = line_shape(line, &vertices)?;
+        if !matches(edge[0], corners[i])
+            || !matches(*edge.last()?, corners[(i + 1) % corners.len()])
+        {
             return None;
         }
-        let kind = i32::from_le_bytes(line.get(b"iLineType", 4).ok()?.try_into().ok()?);
-        let mut edge = vec![start];
-        match kind {
-            0 => (),
-            2 => {
-                let control = map_list(line.get(b"listPoint", LIST_TYPE).ok()?, LIMIT).ok()?;
-                if control.is_empty() {
-                    return None;
-                }
-                for point in control {
-                    edge.push(linear(coordinates(&point, b"v2Position", 10)?, 2));
-                }
-            }
-            _ => return None,
+        for point in &mut edge {
+            *point = transform.vector(*point);
         }
-        edge.push(end);
-        let length = curve_length(&edge, false);
-        if !length.is_finite() {
-            return None;
-        }
-        metrics.push(json!({"length": length, "straight": kind == 0}));
+        metrics.push(line_metrics(&edge, straight)?);
     }
     Some(metrics)
+}
+
+fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Value> {
+    let transform = shape_transform(shape)?;
+    let vertices = shape_vertices(shape)?;
+    let lines = map_list(shape.get(b"listLine", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let mut metrics = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let (mut edge, straight) = line_shape(line, &vertices)?;
+        for point in &mut edge {
+            *point = parent.vector(transform.vector(*point));
+        }
+        metrics.push(line_metrics(&edge, straight)?);
+    }
+    let points: Vec<_> = vertices
+        .into_iter()
+        .map(|p| {
+            let point = parent.position(transform.position(p));
+            (point.x.is_finite() && point.y.is_finite()).then(|| point.record())
+        })
+        .collect::<Option<_>>()?;
+    Some(json!({"type": kind, "points": points, "lines": metrics}))
+}
+
+fn child_shapes(record: &Fields<'_>) -> Option<Vec<Value>> {
+    let parent = shape_transform(&record.map(b"mapShape2D").ok()?)?;
+    let interiors = map_list(record.get(b"listInnerShape", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let baselines = map_list(record.get(b"listDummyShape", LIST_TYPE).ok()?, LIMIT).ok()?;
+    let mut children = Vec::with_capacity(interiors.len() + baselines.len());
+    for shape in &interiors {
+        children.push(child_shape(shape, parent, "InnerShape")?);
+    }
+    for baseline in &baselines {
+        if baseline.get(b"enDummyType", 4).ok()? != 1i32.to_le_bytes() {
+            return None;
+        }
+        children.push(child_shape(&baseline.map(b"mapShape2D").ok()?, parent, "Base Line")?);
+    }
+    Some(children)
 }
 
 fn float(record: &Fields<'_>, key: &[u8]) -> Option<f32> {

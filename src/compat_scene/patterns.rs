@@ -333,15 +333,51 @@ fn centre([left, bottom, right, top]: [f64; 4]) -> [f64; 2] {
     [(left + right) / 2., (bottom + top) / 2.]
 }
 
+fn input_points(pts: impl IntoIterator<Item = Point>, [dx, dy]: [f64; 2]) -> Vec<Value> {
+    let mut records = vec![Value::Null];
+    records.extend(pts.into_iter().enumerate().map(|(n, p)| {
+        json!({"Point positionX": p.x + dx, "Point positionY": p.y + dy, "Point index": n.to_string()})
+    }));
+    records[0] = json!({"Point count": (records.len() - 1).to_string()});
+    records
+}
+
+fn input_line(index: usize, length: &Value, straight: bool) -> Value {
+    let kind = if straight { "Straight type" } else { "" };
+    json!({"Line index": index.to_string(), "Line length": length, "Line type": kind})
+}
+
+fn input_children(pattern: &Value) -> Result<Vec<Value>, String> {
+    let Some(children) = pattern["native_children"].as_array() else {
+        return Ok(vec![json!({"Children shape count": "0"})]);
+    };
+    // CLO includes the parent shape in this count.
+    let mut records = vec![json!({"Children shape count": (children.len() + 1).to_string()})];
+    for (index, child) in children.iter().enumerate() {
+        let points = array(child, "points")
+            .iter()
+            .map(Point::from_json)
+            .collect::<Result<Vec<_>, _>>()?;
+        let lines = array(child, "lines");
+        let mut line_list = vec![json!({"Line count": lines.len().to_string()})];
+        line_list.extend(lines.iter().enumerate().map(|(i, line)| {
+            input_line(i, &line["length"], flag(line, "straight", false))
+        }));
+        records.push(json!({
+            "Shape index": index.to_string(), "Shape name": pattern["name"],
+            "Shape type": child["type"], "PointList": input_points(points, offset(pattern)),
+            "LineList": line_list,
+        }));
+    }
+    Ok(records)
+}
+
 pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &args["pattern"])?;
     let pattern = &state["patterns"][i];
     let [dx, dy] = offset(pattern);
     let pts = points(pattern)?;
-    let mut records = vec![json!({"Point count": corner_offsets(&pts).len().to_string()})];
-    records.extend(pts.iter().filter(|p| p.kind == 0).enumerate().map(|(n, p)| {
-        json!({"Point positionX": p.x + dx, "Point positionY": p.y + dy, "Point index": n.to_string()})
-    }));
+    let records = input_points(pts.iter().copied().filter(|p| p.kind == 0), [dx, dy]);
     let edges = split_edges(&pts);
     let lines = lines(pattern)?;
     let mut line_list = vec![json!({"Line count": lines.len().to_string()})];
@@ -349,8 +385,7 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
         let straight = pattern["native_outline_metrics"][n]["straight"]
             .as_bool()
             .unwrap_or(edge.len() == 2);
-        let kind = if straight { "Straight type" } else { "" };
-        json!({"Line index": n.to_string(), "Line length": line["length"], "Line type": kind})
+        input_line(n, &line["length"], straight)
     }));
     let limits = bounds(pattern)?;
     let [left, bottom, right, top] =
@@ -368,7 +403,7 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
             "patternIndex": i, "status": "success", "boundingBox": {"minX": left, "minY": bottom,
                 "maxX": right, "maxY": top, "width": right - left, "height": top - bottom}},
         "input_info": {"Pattern InputInformation": [{"Pattern index": i.to_string(), "Pattern name": pattern["name"],
-            "PointList": records, "LineList": line_list, "Children Information": [{"Children shape count": "0"}]}]},
+            "PointList": records, "LineList": line_list, "Children Information": input_children(pattern)?}]},
         "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0),
         "arrangement": arrangement,
         "seam_groups": group_indices(state, pattern), "layer": pattern["layer"].as_i64().unwrap_or(0),
@@ -516,11 +551,25 @@ fn flip(pattern: &mut Value, horizontal: bool) -> Result<(), String> {
     } else {
         midpoint(|p| p.y)
     };
-    for p in &mut pts {
+    let mirror = |p: &mut Point| {
         if horizontal {
             p.x = 2. * centre - p.x;
         } else {
             p.y = 2. * centre - p.y;
+        }
+    };
+    for p in &mut pts {
+        mirror(p);
+    }
+    if let Some(children) = pattern["native_children"].as_array_mut() {
+        for child in children {
+            if let Some(points) = child["points"].as_array_mut() {
+                for point in points {
+                    let mut p = Point::from_json(point)?;
+                    mirror(&mut p);
+                    *point = p.record();
+                }
+            }
         }
     }
     set_points(pattern, pts);

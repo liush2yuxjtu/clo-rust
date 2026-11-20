@@ -84,8 +84,13 @@ from `pattern_list`. Accept at most 0.1 mm length difference, 0.001 mm midpoint
 or corner-bounds axis difference, and 0.001 normalized midpoint axis difference.
 Save and reopen a disposable Rust copy and confirm matching readback. Check
 that a rejected point edit preserves the outline metrics and a successful edit
-recomputes the affected lengths. Child shapes and exact curve evaluation
-require separate checks.
+recomputes the affected lengths.
+
+Use `--compare-saved-pattern-children` with saved internal shapes and baselines
+to additionally compare the child count, order, type, names, points and line
+descriptors. Check child line lengths to within 0.1 mm. Use a disposable Rust
+scene to check save/reopen and a translated or reflected pattern. Verify
+internal sewing via the separate solver cases.
 
 Use `--compare-saved-seams` to compare each saved sewing group's index, name
 and member list against the live CLO project, and check every panel's group

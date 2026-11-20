@@ -389,7 +389,28 @@ async def compare_saved_pattern_settings():
     }))
 
 
-async def compare_saved_pattern_outline():
+async def compare_saved_pattern_children():
+    await compare_saved_pattern_outline(include_children=True)
+
+
+def compare_child_shapes(expected, observed, panel):
+    assert expected[0] == observed[0], (panel, expected[0], observed[0])
+    assert len(expected) == len(observed), panel
+    count, largest = 0, 0.0
+    for left, right in zip(expected[1:], observed[1:], strict=True):
+        for key in ("Shape index", "Shape name", "Shape type", "PointList"):
+            assert left[key] == right[key], (panel, left["Shape index"], key)
+        assert left["LineList"][0] == right["LineList"][0], panel
+        for a, b in zip(left["LineList"][1:], right["LineList"][1:], strict=True):
+            assert a["Line index"] == b["Line index"] and a["Line type"] == b["Line type"], panel
+            delta = abs(a["Line length"] - b["Line length"])
+            assert delta <= 0.1, (panel, left["Shape index"], a["Line index"], delta)
+            largest = max(largest, delta)
+            count += 1
+    return len(expected) - 1, count, largest
+
+
+async def compare_saved_pattern_outline(include_children=False):
     async def read(session):
         listing = await json_result(session, "pattern_list", {"detail": True})
         assert listing["count"] == len(listing["patterns"]) > 0
@@ -416,11 +437,20 @@ async def compare_saved_pattern_outline():
     checked = 0
     length_error = 0.0
     midpoint_error = 0.0
+    child_count = child_lines = 0
+    child_error = 0.0
     for expected, observed in zip(expected_panels, observed_panels, strict=True):
         assert expected["name"] == observed["name"] and expected["index"] == observed["index"]
         name, index = expected["name"], expected["index"]
         expected_input, = expected["input_info"]["Pattern InputInformation"]
         observed_input, = observed["input_info"]["Pattern InputInformation"]
+        if include_children:
+            shapes, segments, error = compare_child_shapes(
+                expected_input["Children Information"], observed_input["Children Information"], name,
+            )
+            child_count += shapes
+            child_lines += segments
+            child_error = max(child_error, error)
         assert expected_input["PointList"] == observed_input["PointList"], name
         assert expected["line_info"]["lineCount"] == observed["line_info"]["lineCount"], name
         expected_bounds = expected["line_info"]["boundingBox"]
@@ -452,11 +482,16 @@ async def compare_saved_pattern_outline():
                 assert listed_e[key] == listed_o[key], (name, key)
             assert abs(listed_e["length"] - listed_o["length"]) <= 0.100001
             checked += 1
-    print(json.dumps({
+    result = {
         "tools": ["pattern_info", "pattern_list"], "case": "saved outer outline",
         "patterns": actual["count"], "lines": checked, "max_length_error_mm": length_error,
         "max_midpoint_axis_error_mm": midpoint_error, "missing_panel_error": "pass",
-    }))
+    }
+    if include_children:
+        assert child_count > 0 and child_lines > 0, "use a project with saved interior shapes"
+        result.update(child_shapes=child_count, child_lines=child_lines,
+                      max_child_length_error_mm=child_error, case="saved outline and child shapes")
+    print(json.dumps(result))
 
 
 async def main(comparison=None):
@@ -639,6 +674,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-pattern-outline", action="store_const", dest="comparison",
                              const=compare_saved_pattern_outline,
                              help="compare outer outline line descriptors for the same saved CLO project")
+    comparisons.add_argument("--compare-saved-pattern-children", action="store_const", dest="comparison",
+                             const=compare_saved_pattern_children,
+                             help="also compare native child shapes and baselines in the saved project")
     comparisons.add_argument("--compare-saved-seams", action="store_const", dest="comparison",
                              const=compare_saved_seams,
                              help="compare ordered seam groups and panel membership in a saved CLO project")
