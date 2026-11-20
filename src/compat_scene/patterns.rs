@@ -542,7 +542,8 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let corners = corner_offsets(&points);
     let [dx, dy] = offset(&state["patterns"][i]);
     let mut moved = Vec::new();
-    for change in args["moves"].as_array().ok_or("moves must be an array")? {
+    let changes = args["moves"].as_array().ok_or("moves must be an array")?;
+    let outcome = changes.iter().try_for_each(|change| -> Result<(), String> {
         let cursor = nested_integer(&change["point"])
             .and_then(|value| usize::try_from(value).ok())
             .ok_or("point must be a nonnegative integer")?;
@@ -571,13 +572,15 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
             ..p
         };
         moved.push(json!({"point": cursor, "x": x, "y": y}));
-    }
+        Ok(())
+    });
     if points != original {
         set_points(&mut state["patterns"][i], points);
         let id = state["patterns"][i]["id"].clone();
         discard_panel_pose(state, &id);
         crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     }
+    outcome?;
     Ok(json!({"index": i, "moved": moved}))
 }
 

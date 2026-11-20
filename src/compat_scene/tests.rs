@@ -47,7 +47,7 @@ impl Drop for Temporary {
 }
 
 #[test]
-fn pattern_edit_query_and_failed_edit_are_atomic() {
+fn pattern_edit_retains_completed_moves_before_failure() {
     let mut state = scene();
     piece(&mut state, "Front");
     tool(
@@ -69,7 +69,6 @@ fn pattern_edit_query_and_failed_edit_are_atomic() {
         json!({"pattern":"Front","moves":[{"point":0,"dx":-10},{"point":1,"x":230,"y":-10}]}),
     );
     assert_eq!(r["moved"][0]["x"], 90.);
-    let current = state.clone();
     assert!(dispatch(
         "pattern_edit_points",
         &json!({"pattern":"Front","moves":[{"point":0,"dx":10},{"point":20,"dx":1}]}),
@@ -77,7 +76,9 @@ fn pattern_edit_query_and_failed_edit_are_atomic() {
     )
     .unwrap()
     .is_err());
-    assert_eq!(state, current);
+    let outline = tool(&mut state, "__clo_pattern_outline", json!({"pattern":"Front"}));
+    assert_eq!(outline["points"][0][0], 100.);
+    let current = state.clone();
     assert!(dispatch(
         "pattern_set_arrangement",
         &json!({"pattern":"0","point":"missing"}),

@@ -387,8 +387,10 @@ and verify that the other panel's saved mesh and velocities match exactly.
 Check that a subsequent step continues the original simulation.
 Exercise numeric strings for corner coordinates and index, relative offsets
 when just one absolute coordinate is present, and `MovePatternPoint` returning
-`null` with a visible point change. Verify a zero move and an invalid batch
-preserve the scene geometry and pose.
+`null` with a visible point change. Repeated relative offsets use the
+point coordinates from before the batch. Verify a zero move preserves
+the pose, and that a late invalid move keeps completed moves, invalidates
+the old UI snapshot and preserves the other panel's pose.
 
 Run `--verify-elastic-parameter-updates` after changing edge elastic settings.
 Set strength and target length through the API on disabled edges, then check

@@ -2855,17 +2855,31 @@ async def verify_geometry_edits_rebuild_one_panel():
                 "pattern": "Front", "moves": [{"point": "0", "x": "ignored", "dy": "0"}],
             })
             assert no_op == {"index": 0, "moved": [{"point": 0, "x": 0.0, "y": 0.0}]}
+            _, unchanged = await save("unchanged")
+            assert unchanged["patterns"] == original["patterns"]
+            assert unchanged["simulation"] == original["simulation"]
+            observed = await json_result(rust, "clo_ui_state")
             invalid = await rust.call_tool("pattern_edit_points", {
                 "pattern": "Front", "moves": [{"point": 0, "dx": 15}, {"point": 1, "dy": "invalid"}],
             })
             assert invalid.isError
-            _, unchanged = await save("unchanged")
-            assert unchanged["patterns"] == original["patterns"]
-            assert unchanged["simulation"] == original["simulation"]
+            stale = await rust.call_tool("clo_ui_action", {
+                "snapshot": observed["snapshot"], "action": "press", "element": 2,
+            })
+            assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
+            partial_path, partial = await save("partial")
+            assert partial["patterns"][1] == original["patterns"][1]
+            assert partial["simulation"]["meshes"] == [remaining]
+            await json_result(rust, "scene_open", {"path": str(partial_path)})
+            info = await json_result(rust, "pattern_info", {"pattern": "Front"})
+            points = {row["Point index"]: row for row in info["input_info"]["Pattern InputInformation"][0]["PointList"]
+                      if "Point index" in row}
+            assert (points["0"]["Point positionX"], points["1"]["Point positionY"]) == (15, 0)
             results = []
             for tool, args in (
                 ("pattern_edit_points", {"moves": [{"point": " 1 ", "x": "ignored", "dx": "40"},
-                                                   {"point": 2.9, "x": "56.5", "y": "90"}]}),
+                                                   {"point": 2.9, "x": "56.5", "y": "90"},
+                                                   {"point": 1, "dx": 50}]}),
                 ("pattern_set_arrangement", {"point": "Back"}),
                 ("pattern_ops", {"op": "flip", "args": {"horizontal": True}}),
                 ("pattern_ops", {"op": "delete_point", "args": {"point": 1}}),
@@ -2883,7 +2897,8 @@ async def verify_geometry_edits_rebuild_one_panel():
                     })
                     assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
                     assert reply["moved"] == [{"point": 1, "x": 140, "y": 0},
-                                              {"point": 2, "x": 56.5, "y": 90}]
+                                              {"point": 2, "x": 56.5, "y": 90},
+                                              {"point": 1, "x": 150, "y": 0}]
                     raw = await json_result(rust, "clo_api_call", {
                         "name": "pattern_api.MovePatternPoint", "args": [0, 3, 0, 61],
                     })
@@ -2925,7 +2940,8 @@ async def verify_geometry_edits_rebuild_one_panel():
                       "case": "rebuild only the edited panel", "edits": results,
                       "unaffected_pose_and_velocities": "unchanged", "continued_step": 4,
                       "native_meshes_preserved": native_count, "point_inputs": "pass",
-                      "zero_move_and_invalid_batch_preserved_pose": True, "api_returned_null": True}))
+                      "zero_move_preserved_pose": True, "failed_batch_kept_completed_move": True,
+                      "repeated_offsets_used_original_point": True, "api_returned_null": True}))
 
 
 async def verify_symmetry_sewing():
