@@ -56,18 +56,27 @@ inputs, results, state changes, and error cases pass the dual-backend comparison
 
 | Check | Passing evidence |
 | --- | --- |
-| Public tool contract | `tools/list` entries match the pinned contract, including names, descriptions, and input/output schemas, on each backend. |
+| Public tool contract | Native reference MCP and both adapters advertise the same 48 pinned definitions, including names, descriptions, and input/output schemas. |
 | Rust call smoke | One successful representative call per public tool in an isolated synthetic Rust scene. The JSON report shows each tool and its MCP content types. |
 | Dual-backend behavior | The same relevant cases pass through both backends, with assertions for returned values, observable scene changes, errors, and produced files as applicable. |
 
 From the repository root, use a Python 3.11+ environment with `clo_mcp/requirements.txt`
-installed. Build the binary and save the all-tool call report and the detailed smoke log:
+installed. Replace the example Python path with the reference MCP's venv interpreter.
+Build the binary and save each run's exit status, JSON on stdout, and log on stderr:
 
 ```sh
 cargo build --release --locked
 export CLO_RUST_BINARY="$PWD/target/release/pattern-native"
-python -m clo_mcp.sweep_compat > rust-tool-calls.json 2> rust-tool-calls.log
-CLO_RUST_AVATAR_DIR='' CLO_RUST_FABRIC_DIR='' python -m clo_mcp.smoke_compat
+export CLO_MCP_OFFICIAL_COMMAND='["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp.server"]'
+evidence_dir="$(mktemp -d)"
+git rev-parse HEAD > "$evidence_dir/revision.txt"
+python -m clo_mcp.smoke_compat --verify-tool-contracts \
+  > "$evidence_dir/contracts.json" 2> "$evidence_dir/contracts.log"
+python -m clo_mcp.sweep_compat \
+  > "$evidence_dir/rust-tool-calls.json" 2> "$evidence_dir/rust-tool-calls.log"
+python -m clo_mcp.smoke_compat --compare-strapped-draft-preview \
+  > "$evidence_dir/strapped-preview.json" 2> "$evidence_dir/strapped-preview.log"
+printf 'Evidence: %s\n' "$evidence_dir"
 ```
 
 The sweep exits nonzero for missing, unexpected, or failed calls. Its success criterion
@@ -76,21 +85,14 @@ is `expected_count = called_count = ok_count = 48` with empty `missing`,
 
 #### Read the evidence and reproduce a matched case
 
-Use the adapter's `tools/list` result to verify registration. `inspect_contract`
-compares the complete entries for all 48 pinned tools. `sweep_compat` then sends
+The contract command reads `tools/list` directly from the reference MCP and
+from both adapters without opening the CLO desktop or using its Python bridge.
+Expect `public_tool_count: 48` and three `pass` fields. `sweep_compat` sends
 actual `tools/call` requests against Rust. Its `OK` status means the MCP result
 has no error flag for that representative call. The 11 diagnostic tools listed
 by the adapter are outside the 48-tool acceptance count.
 
-For a concrete dual-backend example, set the official stdio command as shown
-below and run:
-
-```sh
-python -m clo_mcp.smoke_compat --compare-strapped-draft-preview \
-  > strapped-preview.json 2> strapped-preview.log
-```
-
-This sends the same seven `garment_plan_preview` specs to both backends with
+The preview command sends the same seven `garment_plan_preview` specs to both backends with
 `use_scene_measurements=false`. It asserts equality of every returned field,
 including pieces and seams, then checks that both reject `{"spec": []}` and
 that `garment_last_spec` remains unchanged. The JSON records the piece and seam
@@ -114,8 +116,12 @@ the relevant evidence for each revision. See the [48-tool evidence record](../..
 
 For scene-backed checks, save `clo_status` and confirm `bridge=up` before
 recording a live comparison. Keep results at case granularity. A tool-level
-behavior PASS requires all applicable cases in the checklist below. Report the
-three totals separately and link the case evidence behind the behavioral tally.
+behavior PASS requires all applicable cases in the checklist below. For example,
+compare `scene_info` with the same saved project and inspect ordered panels,
+avatars, fabrics, and seam groups. For a mutation, also read back the affected
+state and check that a rejected request leaves it intact. For a file or image,
+reopen or parse it and verify the properties the case requires. Report the
+three results separately and link the case evidence behind the behavioral tally.
 
 Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
 to include the official backend smoke. Run it with the CLO 3D bridge connected.

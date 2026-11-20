@@ -475,7 +475,7 @@ async def smoke_official():
     print("Official MCP: 48 contracts and 11 diagnostics listed. Live CLO status, preview and input error passed")
 
 
-async def compare_desktop_observation():
+async def inspect_reference_contract():
     expected = {entry["name"]: entry for entry in json.loads(CONTRACT.read_text())}
     async with stdio_client(official_parameters()) as (reader, writer):
         async with ClientSession(reader, writer) as native:
@@ -486,7 +486,20 @@ async def compare_desktop_observation():
             assert len(advertised) == len(expected) == 48
             assert actual == expected, sorted(name for name in actual.keys() | expected.keys()
                                               if actual.get(name) != expected.get(name))
+            return len(advertised)
 
+
+async def verify_tool_contracts():
+    count = await inspect_reference_contract()
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+    print(json.dumps({"check": "tools/list", "public_tool_count": count,
+                      "reference_mcp": "pass", "official_adapter": "pass", "rust_adapter": "pass"}))
+
+
+async def compare_desktop_observation():
+    await inspect_reference_contract()
     summary = {}
     invalid_limits = ({"max_nodes": -1}, {"max_nodes": 0}, {"max_nodes": 5001},
                       {"max_depth": -1}, {"max_depth": 0}, {"max_depth": 31})
@@ -3343,6 +3356,9 @@ async def verify_mixed_native_append():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--verify-tool-contracts", action="store_const", dest="comparison",
+                             const=verify_tool_contracts,
+                             help="compare native and adapter tools/list without launching CLO")
     comparisons.add_argument("--verify-fabric-recolor-opacity", action="store_const", dest="comparison",
                              const=verify_fabric_recolor_opacity,
                              help="verify opacity map policy after recolor and archive reopen")
