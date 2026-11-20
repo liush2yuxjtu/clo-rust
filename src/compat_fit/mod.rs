@@ -265,12 +265,7 @@ mod texture_tests {
             &mut state,
         )
         .unwrap();
-        assert!(array(&simulation["limitations"])
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .unwrap()
-                .contains("Unrecovered native seam groups omitted from constraints: 1")));
+        assert_eq!(simulation["native_unsupported_seam_groups"], 1);
         assert!(
             state["simulation"]["meshes"][0]["texcoords"]
                 .as_array()

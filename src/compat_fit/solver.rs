@@ -1,3 +1,5 @@
+mod native_stitches;
+
 use super::{array, assets, boolean, number, string};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -954,6 +956,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         return Err("simulation scene exceeds 130000 vertices; increase particle_distance or split the garment".into());
     }
     let seam_constraints = stitches(state, &meshes, &offsets)?;
+    let native_stitches = native_stitches::build(state, &meshes, &offsets, &weights);
     let iterations = match quality {
         0 => 4,
         1 => 7,
@@ -981,6 +984,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             for c in constraints.iter().chain(&seam_constraints) {
                 apply_constraint(&mut positions, &weights, c);
             }
+            for stitch in &native_stitches.constraints {
+                stitch.apply(&mut positions, &weights);
+            }
             for (p, &weight) in positions.iter_mut().zip(&weights) {
                 if weight > 0.0 {
                     project_proxy(p, body, &proxies);
@@ -995,6 +1001,12 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let gap = seam_constraints
         .iter()
         .map(|c| length(sub(positions[c.a], positions[c.b])))
+        .chain(
+            native_stitches
+                .constraints
+                .iter()
+                .map(|stitch| stitch.gap(&positions)),
+        )
         .fold(0.0, f64::max);
     let effective = constraints.iter().map(|c| c.rest).fold(0.0, f64::max);
     for (mesh, &offset) in meshes.iter_mut().zip(&offsets) {
@@ -1033,17 +1045,15 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     if use_native {
         limitations.push("Native topology and saved drape initialize the independent CPU solver. Official CLO solver velocities and state are unavailable.".into());
     }
-    let unrestored = array(&state["native_seam_groups"])
-        .iter()
-        .filter(|group| group["restored"] == false)
-        .count();
-    if unrestored > 0 {
+    if native_stitches.unsupported > 0 {
         limitations.push(format!(
-            "Unrecovered native seam groups omitted from constraints: {unrestored}"
+            "Unsupported or unverified native seam groups omitted from constraints: {}",
+            native_stitches.unsupported
         ));
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
-        "vertices":positions.len(),"stitch_count":seam_constraints.len(),"max_stitch_gap_mm":gap,
+        "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
+        "native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {
@@ -1121,10 +1131,7 @@ mod native_pose_tests {
         assert_eq!(first["initialization"], "native_saved_pose_zero_velocity");
         assert_eq!(first["vertices"], 16);
         assert_eq!(first["stitch_count"], 3);
-        assert!(array(&first["limitations"]).iter().any(|item| item
-            .as_str()
-            .unwrap()
-            .contains("Unrecovered native seam groups omitted from constraints: 1")));
+        assert_eq!(first["native_unsupported_seam_groups"], 1);
         assert_eq!(state["simulation"]["source"], RUST_NATIVE_REST);
         assert_eq!(state["simulation"]["texcoords_units"], "mm");
         assert_eq!(state["simulation"]["steps"], 0);
