@@ -15,19 +15,24 @@ type Edge = (usize, usize);
 struct ClothMaterial {
     stretch: [f64; 3],
     bend: [f64; 3],
+    density_g_per_mm2: Option<f64>,
 }
 
 impl ClothMaterial {
     fn for_panel(pattern: &Value, state: &Value) -> Self {
+        let fabric = assets::assigned_material(state, &pattern["fabric_index"]);
+        let properties = &fabric["info"]["physical_properties"];
+        let density_g_per_mm2 = properties["density"]
+            .as_f64()
+            .filter(|value| (f64::from(f32::from_bits(1))..=f64::from(f32::MAX)).contains(value));
         if boolean(pattern, "strengthen", false) {
             return Self {
                 stretch: [0.995; 3],
                 bend: [0.995 * 0.12; 3],
+                density_g_per_mm2,
             };
         }
-        let fabric = assets::assigned_material(state, &pattern["fabric_index"]);
         let fallback = number(fabric, "stiffness", 0.9).clamp(0.0, 1.0);
-        let properties = &fabric["info"]["physical_properties"];
         // Map the stored coefficients to the bounded responses used by this solver.
         // The reference values are Rust solver parameters, independent of CLO calibration.
         let response = |key: &str, reference: f64| {
@@ -39,6 +44,7 @@ impl ClothMaterial {
         Self {
             stretch: ["stretch_u", "stretch_v", "shear"].map(|key| response(key, 20_000.0)),
             bend: ["bend_u", "bend_v", "bend_bias"].map(|key| 0.12 * response(key, 2_000.0)),
+            density_g_per_mm2,
         }
     }
 
@@ -1048,6 +1054,47 @@ fn apply_constraint(points: &mut [Point], weights: &[f64], c: &Constraint) {
     }
 }
 
+fn append_inverse_masses(mesh: &Mesh, use_density: bool, weights: &mut Vec<f64>) {
+    let offset = weights.len();
+    weights.resize(
+        offset + mesh.points.len(),
+        if mesh.frozen { 0.0 } else { 1.0 },
+    );
+    if mesh.frozen || !use_density {
+        return;
+    }
+    let areas = &mut weights[offset..];
+    areas.fill(0.0);
+    for &[a, b, c] in &mesh.triangles {
+        let share = flat_cross(mesh.points[a], mesh.points[b], mesh.points[c]).abs() / 6.0;
+        for vertex in [a, b, c] {
+            areas[vertex] += share;
+        }
+    }
+    // Source files may contain isolated vertices or zero-area triangles.
+    // Preserve their participation with the mean area of the other vertices.
+    const MIN_AREA: f64 = 1e-9;
+    let (area, count) = areas
+        .iter()
+        .filter(|&&area| area >= MIN_AREA)
+        .fold((0.0, 0), |(sum, count), &area| (sum + area, count + 1));
+    let fallback_area = if count > 0 {
+        area / f64::from(count)
+    } else {
+        1.0
+    };
+    // The CLO default simulation fabric stores 300 g/m².
+    let density = mesh.material.density_g_per_mm2.unwrap_or(0.0003);
+    for vertex in areas {
+        let area = if *vertex >= MIN_AREA {
+            *vertex
+        } else {
+            fallback_area
+        };
+        *vertex = (area * density).recip();
+    }
+}
+
 pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let start = std::time::Instant::now();
     let existing = &state["simulation"];
@@ -1168,6 +1215,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let mut weights = Vec::new();
     let mut constraints = Vec::new();
     let mut elastic = Vec::new();
+    let use_density = meshes
+        .iter()
+        .any(|mesh| mesh.material.density_g_per_mm2.is_some());
     for (mesh, pattern) in meshes.iter().zip(patterns) {
         let offset = positions.len();
         offsets.push(offset);
@@ -1175,7 +1225,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         elastic.extend(elastic_constraints(mesh, pattern, offset)?);
         positions.extend(mesh.positions.iter().copied());
         velocities.extend(mesh.velocities.iter().copied());
-        weights.resize(positions.len(), if mesh.frozen { 0.0 } else { 1.0 });
+        append_inverse_masses(mesh, use_density, &mut weights);
     }
     if positions.len() > MAX_SIMULATION_VERTICES {
         return Err("simulation scene exceeds 130000 vertices; increase particle_distance or split the garment".into());
