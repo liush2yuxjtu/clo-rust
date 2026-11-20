@@ -509,7 +509,10 @@ colorway, call `UpdateColorways(true)`, or edit a fabric to restore grouped
 exports. An out-of-range positive selection and `UpdateColorways(false)` leave
 the export mode intact. Switch between both colorways and verify the live
 material edit remains attached to its original colorway. Reopen the saved
-archive and verify grouped exports on the reopened scene.
+archive with `scene_open` and with the default Python `ImportZprj` or
+`ImportZpac` option object. On each route, confirm grouped GLB output after
+reopening, the active index, and both archived RGBA values. Record the
+preceding save and any colorway refresh calls in the evidence.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

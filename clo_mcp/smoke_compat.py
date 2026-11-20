@@ -4105,9 +4105,22 @@ async def verify_native_colorway_refresh():
                 assert await api(color, 0, 0) == edited
                 await json_result(session, "scene_open", {"path": str(saved)})
                 await export("reopened", "glb", True)
+                importer, option = (
+                    ("ImportZprj", "ImportZPRJOption") if saved.suffix == ".zprj"
+                    else ("ImportZpac", "ImportExportOption")
+                )
+                await json_result(session, "scene_save", {"path": str(saved), "thumbnail": False})
+                await export("before-python-reopen", "glb", False)
+                code = f"import_api.{importer}({str(saved)!r}, ApiTypes.{option}())"
+                assert (await json_result(session, "clo_run_python", {"code": code}))["value"] is True
+                scene = await json_result(session, "scene_info")
+                assert scene["colorways"] == list(names) and scene["current_colorway"] == 1
+                assert [await api(color, i, 0, 0) for i in range(2)] == expected
+                await export("python-reopened", "glb", True)
     print(json.dumps({"case": "native save colorway refresh", "formats": ["zprj", "zpac"],
                       "gltf_and_glb_current_after_save": True, "obj_stays_grouped": True,
-                      "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True}))
+                      "valid_refresh_restores_bundle": True, "active_colorway_materials_match": True,
+                      "public_and_python_reopen_restore_bundle": True}))
 
 
 async def verify_native_append():
