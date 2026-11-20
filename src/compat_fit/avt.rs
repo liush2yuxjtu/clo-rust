@@ -1,6 +1,6 @@
 //! Read static Y-up geometry and arrangement names from a native avatar archive.
 
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 const HEADER: &[u8; 16] = b" AVT        CLO ";
 const MAP: u8 = 22;
@@ -20,6 +20,7 @@ pub(super) struct RestMesh {
     pub triangles: Vec<Triangle>,
     pub part_count: usize,
     pub arrangements: Vec<String>,
+    pub body_faces: Option<Range<usize>>,
     scene_name: Option<String>,
 }
 
@@ -153,6 +154,7 @@ fn append_mesh(controller: &[u8], result: &mut RestMesh) -> Result<(), String> {
             "native avatar index or position byte length disagrees with its declared count".into(),
         );
     }
+    let first_face = result.triangles.len();
     for triangle in indices.chunks_exact(12) {
         let mut face = [0; 3];
         for (corner, bytes) in face.iter_mut().zip(triangle.chunks_exact(4)) {
@@ -167,6 +169,17 @@ fn append_mesh(controller: &[u8], result: &mut RestMesh) -> Result<(), String> {
     for position in positions.chunks_exact(12) {
         result.points.push(xyz(position)?);
     }
+    if let Some(element) = find(&ctl, "mapElement", MAP).and_then(|raw| fields(raw).ok()) {
+        let name = find(&element, "qsNameUTF8", BYTES).or_else(|| find(&element, "qsName", BYTES));
+        if name.is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
+            && result
+                .body_faces
+                .as_ref()
+                .is_none_or(|faces| faces.len() < num_triangles)
+        {
+            result.body_faces = Some(first_face..result.triangles.len());
+        }
+    }
     result.part_count += 1;
     Ok(())
 }
@@ -179,6 +192,7 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         triangles: Vec::new(),
         part_count: 0,
         arrangements: arr_names(&root).unwrap_or_default(),
+        body_faces: None,
         scene_name: find(&root, "qsNameUTF8", BYTES)
             .or_else(|| find(&root, "qsName", BYTES))
             .and_then(|raw| std::str::from_utf8(raw).ok())
@@ -250,7 +264,7 @@ mod tests {
         data
     }
 
-    fn mesh(points: &[[f32; 3]], triangles: &[[u32; 3]]) -> Vec<u8> {
+    fn mesh(name: &str, points: &[[f32; 3]], triangles: &[[u32; 3]]) -> Vec<u8> {
         let rest = record(&[
             (
                 "baPosition",
@@ -286,7 +300,8 @@ mod tests {
                 (points.len() as u32).to_le_bytes().into(),
             ),
         ]);
-        record(&[("mapMesh", MAP, rest)])
+        let element = record(&[("qsNameUTF8", BYTES, name.as_bytes().to_vec())]);
+        record(&[("mapMesh", MAP, rest), ("mapElement", MAP, element)])
     }
 
     fn dan(meshes: &[Vec<u8>]) -> Vec<u8> {
@@ -348,11 +363,11 @@ mod tests {
         let points_b = [
             [3.0, 80.0, -44.0],
             [90.0, 85.0, -22.0],
-            [91.0, 109.0, -55.0],
+            [91.0, 1650.0, -55.0],
         ];
-        let a = mesh(&points_a, &[[0, 1, 2], [1, 2, 3]]);
-        let b = mesh(&points_b, &[[0, 1, 2]]);
-        let file = dan(&[a, mesh(&[], &[]), b]);
+        let a = mesh("body", &points_a, &[[0, 1, 2], [1, 2, 3]]);
+        let b = mesh("hair", &points_b, &[[0, 1, 2]]);
+        let file = dan(&[a, mesh("", &[], &[]), b]);
         fs::write(&path, zip_fixture(&file, false)).unwrap();
         let mut state = json!({});
         let mut call = |name, args| dispatch(name, &args, &mut state).unwrap();
@@ -362,7 +377,7 @@ mod tests {
             response["rest_geometry"],
             json!({
                 "parts":2, "vertices":7, "triangles":3,
-                "bounds_mm":[[-86.25,20.5,-55.0],[121.0,1584.5,90.0]]
+                "bounds_mm":[[-86.25,20.5,-55.0],[121.0,1650.0,90.0]]
             })
         );
         assert!(response["warnings"][0]
@@ -399,9 +414,9 @@ mod tests {
     fn rejects_nonfinite_positions_out_of_range_indices_and_short_records() {
         let valid = [[0.0, 10.0, 12.0], [90.0, 0.0, 20.0], [30.0, 400.0, 50.0]];
         let invalid_floats = [[f32::NAN, 10.0, 12.0], valid[1], valid[2]];
-        let invalid = dan(&[mesh(&invalid_floats, &[[0, 1, 2]])]);
+        let invalid = dan(&[mesh("", &invalid_floats, &[[0, 1, 2]])]);
         assert!(decode(&invalid).err().unwrap().contains("nonfinite"));
-        let invalid = dan(&[mesh(&valid, &[[0, 1, 3]])]);
+        let invalid = dan(&[mesh("", &valid, &[[0, 1, 3]])]);
         assert!(decode(&invalid)
             .err()
             .unwrap()

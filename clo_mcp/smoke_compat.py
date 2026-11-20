@@ -478,6 +478,37 @@ async def compare_saved_arrangements():
     }, ensure_ascii=False))
 
 
+async def compare_saved_avatar_height():
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene = await json_result(session, "scene_info")
+        official = await json_result(session, "avatar_measurements", {"refresh": True})
+    assert official["body"]["source"] == "obj", (
+        "This case compares geometry estimates, requiring CLO's OBJ fallback", official["source"],
+    )
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust = await json_result(session, "avatar_measurements", {"refresh": True})
+    assert official["avatar"] == rust["avatar"]
+    assert rust["source"] == "rust_mesh_estimate"
+    assert official["body"].keys() == rust["body"].keys()
+    heights = {"official": official["body"]["height"], "rust": rust["body"]["height"]}
+    tolerance_mm = 0.25
+    assert abs(heights["official"] - heights["rust"]) <= tolerance_mm, heights
+    print(json.dumps({
+        "tool": "avatar_measurements", "case": "geometry fallback height",
+        "avatar": rust["avatar"], "height_mm": heights, "tolerance_mm": tolerance_mm,
+        "other_differences_mm": {
+            key: round(rust["body"][key] - value, 3)
+            for key, value in official["body"].items()
+            if key not in {"source", "height"}
+        },
+    }, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -502,6 +533,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-arrangements", action="store_const", dest="comparison",
                              const=compare_saved_arrangements,
                              help="compare ordered avatar arrangement names in a saved CLO project")
+    comparisons.add_argument("--compare-saved-avatar-height", action="store_const", dest="comparison",
+                             const=compare_saved_avatar_height,
+                             help="compare geometry fallback height in a saved CLO project")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

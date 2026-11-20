@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -354,6 +355,12 @@ fn fabric_root() -> Option<PathBuf> {
     asset_subfolder("CLO_RUST_FABRIC_DIR", "Fabric")
 }
 
+struct NativeAvatar {
+    parts: usize,
+    arrangements: Vec<String>,
+    body_faces: Option<Range<usize>>,
+}
+
 pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
     let path = path
         .canonicalize()
@@ -367,13 +374,10 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("avatar");
-    let mut rest_details = None;
+    if extension == "avt" {
+        return avatar_from_avt(name, Some(&path), avt::read(&path)?);
+    }
     let (points, faces) = match extension.as_str() {
-        "avt" => {
-            let rest=avt::read(&path)?;
-            rest_details=Some((rest.part_count,rest.arrangements));
-            (rest.points,rest.triangles)
-        }
         "obj" => avatar_obj(&path)?,
         "glb" => {
             let model = gltf::Gltf::open(&path).map_err(|e| format!("invalid avatar GLB: {e}"))?;
@@ -386,22 +390,30 @@ pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
         }
         _ => return Err(format!("avatar format .{extension} is unavailable on the Rust backend; use a supported static AVT, an OBJ in millimetres, or a named-mesh GLB in metres")),
     };
-    avatar_from_mesh(name, Some(&path), points, faces, rest_details)
+    avatar_from_mesh(name, Some(&path), points, faces, None)
 }
 
 pub(crate) fn project_avatar(path: &Path) -> Result<Option<Value>, String> {
     let Some((name, rest)) = avt::read_project(path)? else {
         return Ok(None);
     };
-    let mut avatar = avatar_from_mesh(
-        &name,
-        None,
-        rest.points,
-        rest.triangles,
-        Some((rest.part_count, rest.arrangements)),
-    )?;
+    let mut avatar = avatar_from_avt(&name, None, rest)?;
     avatar["source_project"] = json!(path);
     Ok(Some(avatar))
+}
+
+fn avatar_from_avt(name: &str, path: Option<&Path>, rest: avt::RestMesh) -> Result<Value, String> {
+    avatar_from_mesh(
+        name,
+        path,
+        rest.points,
+        rest.triangles,
+        Some(NativeAvatar {
+            parts: rest.part_count,
+            arrangements: rest.arrangements,
+            body_faces: rest.body_faces,
+        }),
+    )
 }
 
 fn avatar_from_mesh(
@@ -409,7 +421,7 @@ fn avatar_from_mesh(
     path: Option<&Path>,
     mut points: Vec<[f64; 3]>,
     faces: Vec<[usize; 3]>,
-    rest_details: Option<(usize, Vec<String>)>,
+    rest_details: Option<NativeAvatar>,
 ) -> Result<Value, String> {
     let ymin = points.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
     let ymax = points
@@ -430,17 +442,41 @@ fn avatar_from_mesh(
     if !(1.0..=5000.0).contains(&height) {
         return Err("avatar height is out of the supported millimetre range".into());
     }
-    let native_rest = rest_details.is_some();
-    let center_x = if native_rest { (xmin + xmax) / 2.0 } else { 0.0 };
-    let floor = if native_rest { ymin } else { 0.0 };
+    let mut floor = ymin;
+    let mut center_x = (xmin + xmax) / 2.0;
     if rest_details.is_none() {
         for point in &mut points {
             point[0] -= (xmin + xmax) / 2.0;
             point[1] -= ymin;
             point[2] -= (zmin + zmax) / 2.0;
         }
+        floor = 0.0;
+        center_x = 0.0;
     }
-    let mut body = scaled_body(height, height / 1755.0, "rust_mesh_estimate");
+    let mut measure_height = height;
+    let mut measure_faces = faces.as_slice();
+    if let Some(range) = rest_details
+        .as_ref()
+        .and_then(|details| details.body_faces.clone())
+    {
+        let body_faces = &faces[range];
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for &index in body_faces.iter().flatten() {
+            for axis in 0..2 {
+                lo[axis] = lo[axis].min(points[index][axis]);
+                hi[axis] = hi[axis].max(points[index][axis]);
+            }
+        }
+        let body_height = hi[1] - lo[1];
+        if (1.0..=5000.0).contains(&body_height) {
+            measure_height = body_height;
+            floor = lo[1];
+            center_x = (lo[0] + hi[0]) / 2.0;
+            measure_faces = body_faces;
+        }
+    }
+    let mut body = scaled_body(measure_height, measure_height / 1755.0, "rust_mesh_estimate");
     for (measurement, height_key) in [
         ("bust", "h_apex"),
         ("underbust", "h_underbust"),
@@ -449,7 +485,9 @@ fn avatar_from_mesh(
         ("hip", "h_hip"),
     ] {
         let level = body[height_key].as_f64().unwrap() + floor;
-        if let Some(circumference) = mesh_section(&points, &faces, level, center_x, height) {
+        if let Some(circumference) =
+            mesh_section(&points, measure_faces, level, center_x, measure_height)
+        {
             body[measurement] = json!(circumference);
         }
     }
@@ -457,7 +495,7 @@ fn avatar_from_mesh(
         "id":name,"name":name,"path":path,"source":"rust_mesh_estimate","body":body,
         "arrangement_points":POINTS,"mesh":{"positions":points,"triangles":faces}
     });
-    if let Some((parts, names)) = rest_details {
+    if let Some(NativeAvatar { parts, arrangements, .. }) = rest_details {
         avatar["source"] = json!("clo_avt_rest");
         avatar["measurement_source"] = json!("rust_mesh_estimate");
         avatar["rest_geometry"] = json!({
@@ -468,10 +506,10 @@ fn avatar_from_mesh(
             "Loaded saved AVT rest geometry only. Native skinning, posing, and avatar textures are unavailable.",
             "Body measurements are estimated. The imported mesh represents the avatar rest pose.",
         ];
-        if names.is_empty() {
+        if arrangements.is_empty() {
             warnings.push("Native arrangement names are unavailable. Using built-in names.");
         } else {
-            avatar["arrangement_points"] = json!(names);
+            avatar["arrangement_points"] = json!(arrangements);
         }
         avatar["warnings"] = json!(warnings);
     }
