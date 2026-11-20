@@ -137,6 +137,8 @@ async def backend_lifespan(_server):
 
 
 def image_blocks(name, result):
+    if name == "snapshot_2d" and result.get("empty_scene"):
+        return [types.TextContent(type="text", text="2D snapshot failed: there are no patterns.")]
     blocks = []
     summary = {key: value for key, value in result.items() if key != "images"}
     if name == "snapshot_2d":

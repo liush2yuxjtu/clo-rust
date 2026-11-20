@@ -1344,7 +1344,53 @@ async def compare_saved_avatar_cache():
 
 
 async def compare_saved_snapshot_2d():
-    async def capture(session):
+    output_dir = os.environ.get("CLO_SNAPSHOT_2D_OUTPUTS")
+    compare_triangles = os.environ.get("CLO_SNAPSHOT_2D_GEOMETRY") == "triangles"
+    curve_reference_dir = os.environ.get("CLO_SNAPSHOT_2D_CURVES")
+
+    def inspect_outline(png, extent, probes, interiors=()):
+        from io import BytesIO
+        from PIL import Image
+
+        image = Image.open(BytesIO(png))
+        alpha = image.getchannel("A")
+        left, top, right, bottom = alpha.getbbox()
+        x0, y0, x1, y1 = extent
+        scale = (right - left - 1) / (x1 - x0)
+        expected_height = (y1 - y0) * scale
+        assert abs(expected_height - (bottom - top - 1)) <= 3
+
+        def screen(x, y):
+            return left + (x - x0) * scale, bottom - 1 - (y - y0) * scale
+
+        mask = alpha.load()
+        for point in interiors:
+            assert mask[tuple(map(round, screen(*point)))] == 0
+        max_delta = 0.0
+        for point in probes:
+            u, v = screen(*point)
+            nearby = [math.hypot(i - u, j - v)
+                      for i in range(max(0, round(u) - 3), min(image.width, round(u) + 4))
+                      for j in range(max(0, round(v) - 3), min(image.height, round(v) + 4))
+                      if mask[i, j] > 0]
+            assert nearby and min(nearby) <= 3, point
+            max_delta = max(max_delta, min(nearby) / scale)
+        return {"outline_probes": len(probes), "max_probe_delta_mm": max_delta,
+                "transparent_interiors": len(interiors)}
+
+    def inspect_triangles(png, layout):
+        patterns = layout["patterns"]
+        assert len(patterns) == 2 and all(len(pattern["lines"]) == 3 for pattern in patterns)
+        triangles = [[(line["start"]["x"], line["start"]["y"]) for line in pattern["lines"]]
+                     for pattern in patterns]
+        x, y = zip(*(point for triangle in triangles for point in triangle), strict=True)
+        interior = [tuple(sum(axis) / 3 for axis in zip(*triangle, strict=True)) for triangle in triangles]
+        probes = [tuple(p + (q - p) * n / 16 for p, q in zip(a, b, strict=True))
+                  for triangle in triangles for a, b in zip(triangle, triangle[1:] + triangle[:1], strict=True)
+                  for n in range(17)]
+        return inspect_outline(png, (min(x), min(y), max(x), max(y)), probes, interior)
+
+    async def capture(session, backend, triangles=False):
         scene = await json_result(session, "scene_info")
         async with asyncio.timeout(60):
             result = await successful(session, "snapshot_2d")
@@ -1356,22 +1402,45 @@ async def compare_saved_snapshot_2d():
         dimensions = struct.unpack_from(">II", png, 16)
         assert len(png) > 1000 and all(dimensions)
         assert await json_result(session, "scene_info") == scene
-        return scene, dimensions
+        if output_dir:
+            target = Path(output_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / f"{backend}.png").write_bytes(png)
+        details = {}
+        if triangles:
+            details = inspect_triangles(png, await json_result(session, "pattern_list", {"detail": True}))
+        return scene, dimensions, details, png
 
     async with open_backend("official") as session:
         await inspect_contract(session)
-        scene, official = await capture(session)
+        scene, official, official_geometry, _ = await capture(session, "official", compare_triangles)
     assert scene["pattern_count"] > 0
     project = Path(scene["project_path"])
     assert project.is_file() and project.suffix.lower() == ".zprj", project
     async with open_backend("rust") as session:
         await inspect_contract(session)
         await json_result(session, "scene_open", {"path": str(project)})
-        rust_scene, rust = await capture(session)
+        rust_scene, rust, rust_geometry, _ = await capture(session, "rust", compare_triangles)
+        curves = {}
+        if curve_reference_dir:
+            directory = Path(curve_reference_dir).resolve(strict=True)
+            await json_result(session, "scene_open", {"path": str(directory / "snapshot-layout-curved.zpac")})
+            _, _, _, rust_png = await capture(session, "rust-curves")
+            native_png = (directory / "layout-curved-official.png").read_bytes()
+            keys = [(34, 20), (50, 35), (66, 20), (290, 0), (330, 65), (370, 0), (330, 0)]
+            for backend, png in (("official", native_png), ("rust", rust_png)):
+                curves[backend] = inspect_outline(png, (0, 0, 370, 80), keys, [(210, 25)])
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        empty = await successful(session, "snapshot_2d")
+        message, = empty.content
+        assert message.type == "text" and message.text.startswith("2D snapshot failed:")
+        assert (await json_result(session, "scene_info"))["pattern_count"] == 0
     assert scene["patterns"] == rust_scene["patterns"]
     print(json.dumps({
         "tool": "snapshot_2d", "pattern_count": scene["pattern_count"],
         "dimensions": {"official": official, "rust": rust}, "scene_readback": "pass",
+        "geometry": {"official": official_geometry, "rust": rust_geometry},
+        "curves": curves, "empty_rust_capture": "text_only",
     }))
 
 
@@ -2496,7 +2565,7 @@ async def verify_runtime_export_workflow():
         with TemporaryDirectory() as directory:
             folder = Path(directory)
             layout = str(folder / "layout.png")
-            assert await invoke(names[1], [layout, 0]) == [layout]
+            assert await invoke(names[1], [layout, 0]) == []
             capture = await successful(session, "snapshot_2d")
             image, = [block for block in capture.content if block.type == "image"]
             assert base64.b64decode(image.data, validate=True) == Path(layout).read_bytes()
@@ -2504,7 +2573,7 @@ async def verify_runtime_export_workflow():
             scripted = await json_result(session, "clo_run_python", {
                 "code": f"result = export_api.ExportSnapshot2D({scripted_path!r}, 0)",
             })
-            assert scripted["value"] == [scripted_path] and Path(scripted_path).read_bytes() == Path(layout).read_bytes()
+            assert scripted["value"] == [] and Path(scripted_path).read_bytes() == Path(layout).read_bytes()
             invalid = await session.call_tool("clo_api_call", {"name": names[1], "args": [layout, 1]})
             assert invalid.isError and Path(layout).read_bytes() == base64.b64decode(image.data)
             thumbnails = []

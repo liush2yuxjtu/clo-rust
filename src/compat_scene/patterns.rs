@@ -190,6 +190,11 @@ pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
     Ok(result)
 }
 
+pub(crate) fn layout_outline(pattern: &Value) -> Result<Vec<[f64; 3]>, String> {
+    let [dx, dy] = offset(pattern);
+    Ok(outline(pattern)?.into_iter().map(|point| [point.x + dx, point.y + dy, 0.0]).collect())
+}
+
 pub(crate) fn sampled_perimeter(pattern: &Value, max_samples: usize) -> Result<(Vec<[f64; 2]>, Vec<usize>), String> {
     let mut vertices = Vec::new();
     let mut corners = Vec::new();

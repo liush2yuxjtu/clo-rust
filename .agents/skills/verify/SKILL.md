@@ -318,11 +318,24 @@ scene to check save/reopen and a translated or reflected pattern. Verify
 internal sewing via the separate solver cases.
 
 For `snapshot_2d`, run `cargo test --locked flat_snapshot_renders_visible_inner_paths_only`.
-Check an actual saved project with curved and straight internal lines.
-Compare caption and PNG blocks and read the scene before and after capture
-with `--compare-saved-snapshot-2d`. Inspect both images for relative layout,
-outline completeness and visible internal paths. Renderer dimensions may differ.
-Save and reopen the Rust project, render again and verify lines persist.
+The case includes a 524-point boundary and checks visible internal paths
+against intentionally hidden shapes and baselines. Run
+`--compare-saved-snapshot-2d` with the official 2D pane visible and the
+saved project accessible to both servers. See the
+[CLO window layout guide](https://support.clo3d.com/hc/en-us/articles/115000428988-Window-Layout).
+For Wine with a Linux MCP host,
+map the shared drive and normalize the bridge's mixed path separators before
+the official image loader reads the PNG.
+
+Set `CLO_SNAPSHOT_2D_GEOMETRY=triangles` with the two-triangle
+`multi-colorway-colored.zprj` to check 102 points along its edges, transparent
+interiors, and unchanged scene readback. Set `CLO_SNAPSHOT_2D_CURVES` to a
+directory containing `snapshot-layout-curved.zpac` and
+`layout-curved-official.png` to check seven anchor points on the third
+panel's outline and the internal curve on Front. Set `CLO_SNAPSHOT_2D_OUTPUTS`
+to retain PNGs. Geometry is compared after removing canvas scale and translation.
+For the empty native scene, acknowledge the “There are no patterns” dialog
+and check that the tool returns one text block without writing a PNG.
 
 Use `--compare-strapped-draft-preview` to compare offline strapless, tube,
 slip, sweetheart, straight neck and wide strap examples. Compare normalized
@@ -770,7 +783,8 @@ The native engine's direct timed request is independently covered by
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.
-The case compares the direct and Python layout exports with `snapshot_2d`, checks
+The case compares the files written by direct and Python mode-0 layout
+exports with `snapshot_2d` and checks their empty-list SDK receipts. It checks
 the thumbnail camera direction, and exports and reopens an FBX at a Unicode
 path through `ExportFBXW`. It exercises `ExportThumbnail3DW` through Python and
 checks the wide asset and temporary folder calls. It rejects unsupported layout

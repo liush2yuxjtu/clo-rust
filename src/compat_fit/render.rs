@@ -100,17 +100,25 @@ impl TextureCache {
 }
 
 fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<Drawing>, String> {
+    if flat {
+        return array(&state["patterns"]).iter().map(|pattern| {
+            Ok(Drawing {
+                points: crate::compat_scene::layout_outline(pattern)?,
+                faces: Vec::new(),
+                color: [0; 3],
+                texcoords: Vec::new(),
+                texture: None,
+                strokes: crate::compat_scene::internal_strokes(pattern)?,
+            })
+        }).collect();
+    }
     let cached = array(&state["simulation"]["meshes"]);
-    if flat || cached.is_empty() {
-        let meshes = if flat {
-            solver::layout_meshes(state)?
-        } else {
-            solver::initial_meshes(state)?
-        };
+    if cached.is_empty() {
+        let meshes = solver::initial_meshes(state)?;
         return meshes
             .into_iter()
             .enumerate()
-            .filter(|(_, mesh)| flat || !hidden(state, &mesh.id))
+            .filter(|(_, mesh)| !hidden(state, &mesh.id))
             .map(|(index, mesh)| {
                 let mut drawing = Drawing {
                     points: mesh.positions,
@@ -120,11 +128,6 @@ fn pieces(state: &Value, flat: bool, textures: &mut TextureCache) -> Result<Vec<
                     texture: None,
                     strokes: Vec::new(),
                 };
-                if flat {
-                    if let Some(pattern) = array(&state["patterns"]).get(index) {
-                        drawing.strokes = crate::compat_scene::internal_strokes(pattern)?;
-                    }
-                }
                 textures.apply(state, &mesh.fabric_index, index, &mut drawing);
                 Ok(drawing)
             })
@@ -221,29 +224,26 @@ fn project(p: Point, camera: &Camera) -> Point {
 struct Canvas {
     pixels: Vec<u8>,
     depth: Vec<f64>,
+    channels: usize,
 }
 
 impl Canvas {
     fn new(flat: bool) -> Self {
         let [w, h] = SIZE;
+        if flat {
+            return Self { pixels: vec![0; w * h * 4], depth: Vec::new(), channels: 4 };
+        }
         let mut pixels = Vec::with_capacity(w * h * 3);
         for y in 0..h {
-            for x in 0..w {
-                let shade = if flat {
-                    if y % 24 == 0 || x % 24 == 0 {
-                        232
-                    } else {
-                        247
-                    }
-                } else {
-                    (250 - y * 20 / h) as u8
-                };
+            for _ in 0..w {
+                let shade = (250 - y * 20 / h) as u8;
                 pixels.extend([shade, shade, shade.saturating_add(2)]);
             }
         }
         Self {
             pixels,
             depth: vec![f64::NEG_INFINITY; w * h],
+            channels: 3,
         }
     }
 
@@ -252,7 +252,6 @@ impl Canvas {
         [a, b, c]: [Point; 3],
         color: Rgb,
         texture: Option<(&BaseTexture, [[f64; 2]; 3])>,
-        flat: bool,
     ) {
         let [w, h] = SIZE;
         let signed = |a: Point, b: Point, x: f64, y: f64| {
@@ -263,13 +262,9 @@ impl Canvas {
             return;
         }
         let normal = cross(sub(b, a), sub(c, a));
-        let factor = if flat {
-            0.95
-        } else {
-            let n = dot(normal, normal).sqrt().max(1e-15);
-            let light = [-0.43, -0.49, 0.76];
-            0.67 + 0.33 * (dot(normal, light) / n).abs()
-        };
+        let n = dot(normal, normal).sqrt().max(1e-15);
+        let light = [-0.43, -0.49, 0.76];
+        let factor = 0.67 + 0.33 * (dot(normal, light) / n).abs();
         let shade = |rgb: Rgb| rgb.map(|c| (f64::from(c) * factor).min(255.0) as u8);
         let flat_rgb = shade(color);
         let x0 = a[0].min(b[0]).min(c[0]).floor().clamp(0.0, (w - 1) as f64) as usize;
@@ -310,8 +305,9 @@ impl Canvas {
             let x = (a[0] + t * (b[0] - a[0])).round() as isize;
             let y = (a[1] + t * (b[1] - a[1])).round() as isize;
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                let offset = 3 * ((y as usize) * w + x as usize);
+                let offset = self.channels * ((y as usize) * w + x as usize);
                 self.pixels[offset..offset + 3].copy_from_slice(&rgb);
+                self.pixels[offset + 3] = 255;
             }
         }
     }
@@ -334,7 +330,17 @@ impl Canvas {
             ]
         };
         let points: Vec<_> = drawing.points.iter().copied().map(screen).collect();
-        let mut edge_incidence = std::collections::BTreeMap::<(usize, usize), usize>::new();
+        if flat {
+            for (&start, &end) in points.iter().zip(points.iter().cycle().skip(1)) {
+                self.segment(start, end, [45, 53, 68]);
+            }
+            for stroke in &drawing.strokes {
+                for segment in stroke.windows(2) {
+                    self.segment(screen(segment[0]), screen(segment[1]), [180, 53, 72]);
+                }
+            }
+            return Ok(());
+        }
         for &[a, b, c] in &drawing.faces {
             if [a, b, c].iter().any(|&i| i >= points.len()) {
                 return Err("snapshot mesh has out-of-range triangle index".into());
@@ -349,30 +355,7 @@ impl Canvas {
                     ],
                 )
             });
-            self.triangle(
-                [points[a], points[b], points[c]],
-                drawing.color,
-                texture,
-                flat,
-            );
-            if flat {
-                for (start, end) in [(a, b), (b, c), (c, a)] {
-                    *edge_incidence
-                        .entry((start.min(end), start.max(end)))
-                        .or_default() += 1;
-                }
-            }
-        }
-        for ((start, end), count) in edge_incidence {
-            if count == 1 {
-                self.segment(points[start], points[end], [45, 53, 68]);
-            }
-        }
-        for stroke in &drawing.strokes {
-            let projected: Vec<_> = stroke.iter().copied().map(screen).collect();
-            for segment in projected.windows(2) {
-                self.segment(segment[0], segment[1], [180, 53, 72]);
-            }
+            self.triangle([points[a], points[b], points[c]], drawing.color, texture);
         }
         Ok(())
     }
@@ -400,8 +383,9 @@ fn write_chunk(file: &mut impl Write, kind: [u8; 4], data: &[u8]) -> std::io::Re
 
 fn png(file: &mut impl Write, canvas: &Canvas) -> std::io::Result<()> {
     let [w, h] = SIZE;
-    let mut bytes = Vec::with_capacity(h * (w * 3 + 1));
-    for line in canvas.pixels.chunks_exact(w * 3) {
+    let row_bytes = w * canvas.channels;
+    let mut bytes = Vec::with_capacity(h * (row_bytes + 1));
+    for line in canvas.pixels.chunks_exact(row_bytes) {
         bytes.push(0);
         bytes.extend_from_slice(line);
     }
@@ -422,7 +406,8 @@ fn png(file: &mut impl Write, canvas: &Canvas) -> std::io::Result<()> {
     let mut header = Vec::new();
     header.extend((w as u32).to_be_bytes());
     header.extend((h as u32).to_be_bytes());
-    header.extend([8, 2, 0, 0, 0]);
+    let color_type = if canvas.channels == 4 { 6 } else { 2 };
+    header.extend([8, color_type, 0, 0, 0]);
     file.write_all(b"\x89PNG\r\n\x1a\n")?;
     write_chunk(file, *b"IHDR", &header)?;
     write_chunk(file, *b"IDAT", &deflate)?;
@@ -587,6 +572,9 @@ pub(crate) fn export_snapshot(path: &Path, state: &Value, flat: bool) -> Result<
 }
 
 pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, String> {
+    if flat && array(&state["patterns"]).is_empty() {
+        return Ok(json!({"images": [], "empty_scene": true}));
+    }
     let defaults = if flat {
         vec!["2d"]
     } else {
@@ -634,10 +622,13 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
 #[cfg(test)]
 #[test]
 fn flat_snapshot_renders_visible_inner_paths_only() {
+    let mut perimeter = vec![json!([0, 0])];
+    perimeter.extend((1..521).map(|n| json!([f64::from(n) * 100.0 / 521.0, 0, 2])));
+    perimeter.extend([json!([100, 0]), json!([100, 100]), json!([0, 100])]);
     let state = json!({
         "patterns": [{
             "id": 0, "name": "Panel",
-            "points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "points": perimeter, "sampled_polyline": true,
             "native_children": [
                 {"type": "InnerShape", "lines": [{"points": [[20, 50], [50, 65, 2], [80, 50]]}]},
                 {"type": "InnerShape", "visible": false, "lines": [{"points": [[20, 30], [80, 30]]}]},
@@ -646,15 +637,17 @@ fn flat_snapshot_renders_visible_inner_paths_only() {
         }],
     });
     let drawings = scene_drawings(&state, true, &mut TextureCache::default()).unwrap();
+    assert_eq!(drawings[0].points.len(), 524);
     assert_eq!(drawings[0].strokes.len(), 1);
     let canvas = render_canvas(&drawings, "2d", true).unwrap();
     let pixel = |x, y| {
-        let offset = (y * SIZE[0] + x) * 3;
-        &canvas.pixels[offset..offset + 3]
+        let offset = (y * SIZE[0] + x) * 4;
+        &canvas.pixels[offset..offset + 4]
     };
-    let interior = &[180, 53, 72];
+    let interior = &[180, 53, 72, 255];
     assert_eq!(pixel(400, 260), interior);
     assert_ne!(pixel(400, 350), interior);
     assert_ne!(pixel(400, 470), interior);
     assert_ne!(pixel(400, 500), interior);
+    assert_eq!(pixel(400, 350)[3], 0);
 }

@@ -1810,22 +1810,6 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     Ok(result)
 }
 
-pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
-    array(&state["patterns"])
-        .iter()
-        .map(|pattern| {
-            let mut mesh = new_mesh(pattern, f64::INFINITY, state)?;
-            let offset = |axis| pattern["pos_2d"][axis].as_f64().unwrap_or(0.0);
-            mesh.positions = mesh
-                .points
-                .iter()
-                .map(|p| [p[0] + offset(0usize), p[1] + offset(1usize), 0.0])
-                .collect();
-            Ok(mesh)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod native_pose_tests {
     use super::*;

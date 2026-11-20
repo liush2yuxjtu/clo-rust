@@ -252,9 +252,8 @@ mod texture_tests {
         writer.finish().unwrap();
     }
 
-    fn capture(state: &mut Value, is_flat: bool) -> ([[u8; 3]; 2], Value) {
-        let label = if is_flat { "snapshot_2d" } else { "snapshot" };
-        let screenshot = call(label, json!({"views":["front"]}), state).unwrap();
+    fn capture(state: &mut Value) -> ([[u8; 3]; 2], Value) {
+        let screenshot = call("snapshot", json!({"views":["front"]}), state).unwrap();
         let path = screenshot["images"][0]["path"].as_str().unwrap();
         let file = fs::File::open(path).unwrap();
         let mut reader = png::Decoder::new(BufReader::new(file)).read_info().unwrap();
@@ -270,7 +269,7 @@ mod texture_tests {
     }
 
     #[test]
-    fn applies_distinct_base_texels_to_flat_and_simulated_captures() {
+    fn applies_distinct_base_texels_to_simulated_captures() {
         let dir = TempDirectory::new();
         let first = dir.0.join("red-blue.png");
         let second = dir.0.join("transparent-green.png");
@@ -304,18 +303,10 @@ mod texture_tests {
                 .len()
                 > 4
         );
-        for flat in [true, false] {
-            let ([left, right], response) = capture(&mut state, flat);
-            assert!(
-                left[0] > 150 && left[1] == 0 && left[2] == 0,
-                "left: {left:?}"
-            );
-            assert!(
-                right[2] > 150 && right[0] == 0 && right[1] == 0,
-                "right: {right:?}"
-            );
-            assert!(response["render_warnings"].is_null());
-        }
+        let ([left, right], response) = capture(&mut state);
+        assert!(left[0] > 150 && left[1] == 0 && left[2] == 0, "left: {left:?}");
+        assert!(right[2] > 150 && right[0] == 0 && right[1] == 0, "right: {right:?}");
+        assert!(response["render_warnings"].is_null());
         for path in [&damaged, &unsupported] {
             assert!(call(
                 "fabric_set_texture",
@@ -334,23 +325,15 @@ mod texture_tests {
             &mut state,
         )
         .unwrap();
-        for flat in [true, false] {
-            let ([left, right], _) = capture(&mut state, flat);
-            assert!(
-                left[0] > 100 && left[0] == left[1] && left[1] == left[2],
-                "transparent: {left:?}"
-            );
-            assert!(
-                right[1] > 150 && right[0] == 0 && right[2] == 0,
-                "green: {right:?}"
-            );
-        }
+        let ([left, right], _) = capture(&mut state);
+        assert!(left[0] > 100 && left[0] == left[1] && left[1] == left[2], "transparent: {left:?}");
+        assert!(right[1] > 150 && right[0] == 0 && right[2] == 0, "green: {right:?}");
         // Older persisted simulation scenes can predate rest UVs but still render.
-        state["simulation"]["meshes"][0]
+        let uvs = state["simulation"]["meshes"][0]
             .as_object_mut()
             .unwrap()
-            .remove("texcoords");
-        let ([left, right], old_capture) = capture(&mut state, false);
+            .remove("texcoords").unwrap();
+        let ([left, right], old_capture) = capture(&mut state);
         assert_eq!(left, right);
         assert!(old_capture["render_warnings"][0]
             .as_str()
@@ -367,10 +350,11 @@ mod texture_tests {
             json!(second.canonicalize().unwrap())
         );
         assert_eq!(state["fabrics"][0]["base_texture_desaturated"], true);
-        let ([left, right], _) = capture(&mut state, true);
-        assert_eq!(left, [226, 32, 16]);
+        state["simulation"]["meshes"][0]["texcoords"] = uvs;
+        let ([left, right], _) = capture(&mut state);
+        assert_eq!(left, [219, 31, 15]);
         // Equal lightness puts both green texels at rank 255. Only the opaque texel
-        // multiplies the tint by the CLO grayscale value of 245 before flat-view shading.
-        assert_eq!(right, [217, 31, 15]);
+        // multiplies the tint by the CLO grayscale value of 245 before shading.
+        assert_eq!(right, [210, 30, 14]);
     }
 }

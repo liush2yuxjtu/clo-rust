@@ -1272,8 +1272,11 @@ pub(super) fn invoke(
                 return Err("Rust 2D snapshot export supports mode 0".into());
             }
             let path = arg[0].as_str().ok_or("expected a PNG path")?;
+            if flat && patterns.is_empty() {
+                return Ok(json!([]));
+            }
             crate::compat_fit::export_snapshot(std::path::Path::new(path), state, flat)?;
-            Ok(if flat { json!([path]) } else { json!(path) })
+            Ok(if flat { json!([]) } else { json!(path) })
         }
         "export_api.ExportZPac" | "export_api.ExportZPrj" => {
             let result = domain("scene_save", &json!({"path":arg[0],"thumbnail":arg.get(1).and_then(Value::as_bool).unwrap_or(false)}),state)?;
