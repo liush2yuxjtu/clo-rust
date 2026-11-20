@@ -40,7 +40,10 @@ new opacity image after recoloring and checks that its bytes survive the save.
 
 Run `--verify-fabric-assignment-workflow` to register a fabric through
 `AddFabric`, then assign it to one panel through Python and apply a different
-fabric to another panel. Check that adding leaves both original assignments
+fabric to another panel. Use both its name and its numeric index as a string
+while another panel has that same numeric name. Verify both references select
+the index and that a list containing a missing name leaves assignments intact.
+Check that adding leaves both original assignments
 and the drape intact. Reopen at zero steps, compare positions and velocities,
 and check each GLB mesh's material. Optionally set `CLO_FABRIC_ASSIGN_FIXTURE`
 to the absolute path of a real denim `.zfab` for the registration step and a

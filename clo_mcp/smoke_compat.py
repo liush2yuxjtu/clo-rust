@@ -210,7 +210,7 @@ async def verify_fabric_assignment_workflow():
                 rows = (await json_result(rust, "scene_info"))["patterns"]
                 return [row["fabric_index"] for row in rows]
 
-            for name, offset in (("Front", 0), ("Back", 130)):
+            for name, offset in (("1", 0), ("Back", 130)):
                 await json_result(rust, "pattern_create", {"name": name,
                     "points": [[offset, 0], [offset + 100, 0], [offset, 100]]})
             await json_result(rust, "simulate", {"steps": 3, "particle_distance": 45})
@@ -227,9 +227,21 @@ async def verify_fabric_assignment_workflow():
                 "code": f"fabric_api.AssignFabricToPattern({new_index}, 0, 3)",
             })
             assert assigned["value"] is True and await assignments() == [new_index, 0]
-            apply = await json_result(rust, "fabric_apply", {"fabric": "cotton", "color": "#224466", "patterns": ["Back"]})
+            apply = await json_result(rust, "fabric_apply", {
+                "fabric": "cotton", "color": "#224466", "patterns": ["Back", "1"],
+            })
+            assert apply["assigned"] == {"assigned": [True, True], "patterns": [1, 1]}
             back_index = apply["fabric"]["index"]
             assert await assignments() == [new_index, back_index]
+            numeric_assignment = await json_result(rust, "clo_api_call", {
+                "name": "fabric_api.AssignFabricToPattern", "args": [back_index, 1, 3],
+            })
+            assert numeric_assignment["value"] is True
+            assert await assignments() == [new_index, back_index]
+            bad_selection = await rust.call_tool("fabric_apply", {
+                "fabric": "cotton", "patterns": ["0", "missing-panel"],
+            })
+            assert bad_selection.isError and await assignments() == [new_index, back_index]
             bad = await rust.call_tool("clo_api_call", {"name": "fabric_api.AssignFabricToPattern", "args": [new_index, 99, 3]})
             assert bad.isError and await assignments() == [new_index, back_index]
             path, updated = await saved("assigned")
@@ -270,6 +282,7 @@ async def verify_fabric_assignment_workflow():
     print(json.dumps({"tools": ["fabric_apply", "clo_api_call", "clo_run_python", "simulate", "scene_export"],
                       "case": "add fabric, assign one panel, preserve drape", "add_kept_assignments": True,
                       "assigned_indices": [new_index, back_index], "retained_step": 3,
+                      "numeric_reference_preceded_name": True,
                       "invalid_assignment_preserved_scene": True, "glb_materials": material_names}
                      | library_report, ensure_ascii=False))
 

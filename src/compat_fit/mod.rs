@@ -78,13 +78,17 @@ fn number(value: &Value, key: &str, default: f64) -> f64 {
 
 fn pattern_index(patterns: &[Value], reference: &Value) -> Result<usize, String> {
     if let Some(name) = reference.as_str() {
+        let digits = name.strip_prefix('-').unwrap_or(name);
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return name
+                .parse::<i64>()
+                .ok()
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < patterns.len())
+                .ok_or_else(|| format!("pattern index {name} is out of range"));
+        }
         if let Some(found) = patterns.iter().position(|p| p["name"] == name) {
             return Ok(found);
-        }
-        if let Ok(index) = name.parse::<usize>() {
-            if index < patterns.len() {
-                return Ok(index);
-            }
         }
     }
     if let Some(found) = patterns.iter().position(|p| p["id"] == *reference) {
