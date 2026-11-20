@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
 };
@@ -32,6 +32,17 @@ impl Bounds {
             high: std::array::from_fn(|i| self.high[i].max(other.high[i])),
         }
     }
+    fn segment(a: Point, b: Point) -> Self {
+        Self {
+            low: std::array::from_fn(|i| a[i].min(b[i])),
+            high: std::array::from_fn(|i| a[i].max(b[i])),
+        }
+    }
+
+    fn contains_interior(self, point: Point) -> bool {
+        (0..3).all(|i| self.low[i] < point[i] && point[i] < self.high[i])
+    }
+
     fn overlaps(self, other: Self) -> bool {
         (0..3).all(|i| self.low[i] <= other.high[i] && other.low[i] <= self.high[i])
     }
@@ -117,6 +128,32 @@ impl Bvh {
             Box::new(Self::new(right)),
         )
     }
+    fn bounds(&self) -> Bounds {
+        match self {
+            Self::Leaf(bounds, _) | Self::Branch(bounds, _, _) => *bounds,
+        }
+    }
+
+    fn ray_crossings(&self, path: Bounds, start: Point, end: Point, hits: &mut Vec<f64>) {
+        if !self.bounds().overlaps(path) {
+            return;
+        }
+        match self {
+            Self::Branch(_, left, right) => {
+                left.ray_crossings(path, start, end, hits);
+                right.ray_crossings(path, start, end, hits);
+            }
+            Self::Leaf(_, faces) => {
+                hits.extend(
+                    faces
+                        .iter()
+                        .filter(|face| face.bounds.overlaps(path))
+                        .filter_map(|face| face.segment_fraction(start, end)),
+                );
+            }
+        }
+    }
+
     fn first_contact(
         &self,
         bounds: Bounds,
@@ -124,10 +161,7 @@ impl Bvh {
         end: Point,
         nearest: &mut Option<(f64, Point)>,
     ) {
-        let node_bounds = match self {
-            Self::Leaf(b, _) | Self::Branch(b, _, _) => *b,
-        };
-        if !node_bounds.overlaps(bounds) {
+        if !self.bounds().overlaps(bounds) {
             return;
         }
         match self {
@@ -181,25 +215,133 @@ impl Bvh {
 }
 
 /// Static triangle surfaces against which the cloth solver sweeps vertices.
-pub(crate) struct MeshCollider(Bvh);
+pub(crate) struct MeshCollider(Vec<CollisionSurface>);
+
+struct CollisionSurface {
+    tree: Bvh,
+    closed: bool,
+}
+
+impl CollisionSurface {
+    fn new(points: &[Point], faces: &[[usize; 3]]) -> Option<Self> {
+        let mut triangles = Vec::new();
+        let mut edges: HashMap<(usize, usize), (u32, i64)> = HashMap::new();
+        for &[a, b, c] in faces {
+            let (Some(&pa), Some(&pb), Some(&pc)) = (points.get(a), points.get(b), points.get(c))
+            else {
+                continue;
+            };
+            if [pa, pb, pc]
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            {
+                continue;
+            }
+            let Some(triangle) = nondegenerate([pa, pb, pc]) else {
+                continue;
+            };
+            triangles.push(triangle);
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                let (count, direction) = edges.entry((u.min(v), u.max(v))).or_default();
+                *count += 1;
+                *direction += if u < v { 1 } else { -1 };
+            }
+        }
+        let closed = triangles.len() == faces.len() && edges.values().all(|pair| *pair == (2, 0));
+        (!triangles.is_empty()).then(|| Self {
+            tree: Bvh::new(triangles),
+            closed,
+        })
+    }
+
+    fn push_out(&self, point: &mut Point, clearance: f64, hits: &mut Vec<f64>) -> bool {
+        let bounds = self.tree.bounds();
+        if !self.closed || !bounds.contains_interior(*point) {
+            return false;
+        }
+
+        let mut inside_votes = 0;
+        let mut best_exit: Option<(usize, f64)> = None;
+        for axis in 0..3 {
+            let mut ray_end = *point;
+            ray_end[axis] = bounds.high[axis] + 1.0;
+            hits.clear();
+            self.tree
+                .ray_crossings(Bounds::segment(*point, ray_end), *point, ray_end, hits);
+            hits.sort_unstable_by(f64::total_cmp);
+            hits.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if hits.first().is_some_and(|hit| *hit < 1e-9) {
+                return false;
+            }
+            if hits.len() % 2 == 1 {
+                inside_votes += 1;
+                let dx = hits[0] * (ray_end[axis] - point[axis]);
+                if best_exit.is_none_or(|(_, best)| dx < best) {
+                    best_exit = Some((axis, dx));
+                }
+            }
+        }
+        if inside_votes < 2 {
+            return false;
+        }
+        for axis in 0..3 {
+            let mut ray_end = *point;
+            ray_end[axis] = bounds.low[axis] - 1.0;
+            let mut nearest = None;
+            self.tree.first_contact(
+                Bounds::segment(*point, ray_end),
+                *point,
+                ray_end,
+                &mut nearest,
+            );
+            if let Some((t, _)) = nearest {
+                let dx = t * (ray_end[axis] - point[axis]);
+                if best_exit.is_none_or(|(_, best)| dx.abs() < best.abs()) {
+                    best_exit = Some((axis, dx));
+                }
+            }
+        }
+        let Some((axis, dx)) = best_exit else {
+            return false;
+        };
+        point[axis] += dx + clearance.copysign(dx);
+        true
+    }
+}
 
 impl MeshCollider {
     pub(crate) fn new(
         meshes: impl IntoIterator<Item = (Vec<Point>, Vec<[usize; 3]>)>,
     ) -> Option<Self> {
-        let mut triangles = Vec::new();
-        for (points, faces) in meshes {
-            for [a, b, c] in faces {
-                let (Some(&a), Some(&b), Some(&c)) = (points.get(a), points.get(b), points.get(c))
-                else {
-                    continue;
-                };
-                if [a, b, c].iter().flatten().all(|v| v.is_finite()) {
-                    triangles.extend(nondegenerate([a, b, c]));
+        let surfaces: Vec<_> = meshes
+            .into_iter()
+            .filter_map(|(points, faces)| CollisionSurface::new(&points, &faces))
+            .collect();
+        (!surfaces.is_empty()).then_some(Self(surfaces))
+    }
+
+    pub(crate) fn separate_initial(
+        &self,
+        points: &mut [Point],
+        weights: &[f64],
+        velocities: &mut [Point],
+        clearance: f64,
+    ) -> usize {
+        let mut corrected = 0;
+        let mut hits = Vec::new();
+        for ((point, &weight), velocity) in points.iter_mut().zip(weights).zip(velocities) {
+            if weight <= 0.0 {
+                continue;
+            }
+            for surface in &self.0 {
+                if surface.push_out(point, clearance, &mut hits) {
+                    *velocity = [0.0; 3];
+                    corrected += 1;
                 }
             }
         }
-        (!triangles.is_empty()).then(|| Self(Bvh::new(triangles)))
+        corrected
     }
 
     pub(crate) fn sweep<'a>(
@@ -211,13 +353,14 @@ impl MeshCollider {
         if start == *end {
             return false;
         }
-        let bounds = Bounds {
-            low: std::array::from_fn(|i| start[i].min(end[i])),
-            high: std::array::from_fn(|i| start[i].max(end[i])),
-        };
+        let bounds = Bounds::segment(start, *end);
         let mut nearest = None;
-        for surface in surfaces {
-            surface.0.first_contact(bounds, start, *end, &mut nearest);
+        for collider in surfaces {
+            for surface in &collider.0 {
+                surface
+                    .tree
+                    .first_contact(bounds, start, *end, &mut nearest);
+            }
         }
         let Some((t, normal)) = nearest else {
             return false;
@@ -402,9 +545,29 @@ fn write_debug(path: &str, points: &[(Point, usize)]) -> std::io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn initial_separation_requires_enclosure_and_respects_frozen_vertices() {
+        let mesh = MeshCollider::new([(
+            vec![[0., 0., 0.], [4., 0., 0.], [0., 4., 0.], [0., 0., 4.]],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )])
+        .unwrap();
+        let mut points = [[0.2, 0.3, 0.4], [3.0, 3.0, 3.0], [0.1, 0.1, 0.1]];
+        let mut velocities = [[1.0; 3]; 3];
+        let count = mesh.separate_initial(&mut points, &[1.0, 1.0, 0.0], &mut velocities, 0.5);
+        assert_eq!(count, 1);
+        assert!((points[0][0] + 0.5).abs() < 1e-9);
+        assert_eq!(points[1..], [[3.0; 3], [0.1; 3]]);
+        assert_eq!(velocities, [[0.0; 3], [1.0; 3], [1.0; 3]]);
+    }
+
+    #[test]
     fn sweep_stops_at_nearest_surface_regardless_of_face_winding() {
         let plane = |y, triangle| {
-            MeshCollider::new([(vec![[-4.0, y, -4.0], [4.0, y, -4.0], [0.0, y, 4.0]], vec![triangle])]).unwrap()
+            MeshCollider::new([(
+                vec![[-4.0, y, -4.0], [4.0, y, -4.0], [0.0, y, 4.0]],
+                vec![triangle],
+            )])
+            .unwrap()
         };
         let far = plane(1.0, [0, 1, 2]);
         let near = plane(3.0, [2, 1, 0]);

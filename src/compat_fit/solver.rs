@@ -999,6 +999,13 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         ))
     };
     let using_proxy = !body.is_null();
+    let mut initial_overlap_corrections = 0;
+    if steps > 0 {
+        for collider in colliders.iter().flatten() {
+            initial_overlap_corrections +=
+                collider.separate_initial(&mut positions, &weights, &mut velocities, 0.5);
+        }
+    }
     let mut old = positions.clone();
     for _ in 0..steps {
         old.copy_from_slice(&positions);
@@ -1091,7 +1098,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         "no CLO material calibration".to_owned(),
     ];
     if use_mesh_collision {
-        limitations.push("Static avatar triangle collisions sweep cloth vertices; pre-existing penetrations and moving avatars are unavailable.".into());
+        limitations.push("Static mesh contacts sweep cloth vertices; initial penetration correction requires a closed avatar mesh. Moving avatars are unavailable.".into());
     }
     if using_proxy {
         limitations.push("The primary avatar uses an analytic collision proxy.".into());
@@ -1107,7 +1114,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
-        "mesh_collision_contacts":contacts,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
+        "mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {
