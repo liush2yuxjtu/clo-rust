@@ -1444,6 +1444,117 @@ async def compare_saved_snapshot_2d():
     }))
 
 
+async def compare_native_snapshot_views():
+    from io import BytesIO
+    from pathlib import PurePosixPath
+    from PIL import Image
+
+    fixture = Path(os.environ["CLO_SNAPSHOT_3D_FIXTURE"])
+    native_folder = os.environ["CLO_SNAPSHOT_3D_NATIVE_OUTPUT"]
+    output = os.environ.get("CLO_SNAPSHOT_3D_OUTPUTS")
+    views = ["FRONT", "back", "left", "right", "top", "bottom", "3/4-left", "3/4-right", "Three-Quarter"]
+    report = {}
+
+    async def capture(session, requested=None, label=""):
+        args = {"views": requested, "label": label} if requested is not None else {}
+        response = await successful(session, "snapshot", args)
+        expected = requested or ["front", "3/4-right"]
+        assert len(response.content) == 2 * len(expected), response.content
+        directory = None
+        result = []
+        for index, (view, caption, content) in enumerate(zip(expected, response.content[::2], response.content[1::2], strict=True)):
+            assert caption.type == "text" and caption.text.startswith(f"[{view} view] ")
+            path = PurePosixPath(caption.text.split("] ", 1)[1])
+            assert path.name.startswith(f"{(label or 'snap').replace(' ', '_')}_{view.replace('/', '')}_")
+            assert content.type == "image" and content.mimeType == "image/png"
+            raw = base64.b64decode(content.data, validate=True)
+            image = Image.open(BytesIO(raw))
+            assert image.format == "PNG"
+            directory = path.parent
+            if output and label == "Camera Matrix":
+                target = Path(output)
+                target.mkdir(parents=True, exist_ok=True)
+                (target / f"{backend}-{index}-{view.replace('/', '')}.png").write_bytes(raw)
+            rgb = image.convert("RGB")
+            channels = iter(rgb.tobytes())
+            mask = Image.frombytes("L", rgb.size, bytes(
+                255 if blue > red + 35 and blue > green + 30 else 0
+                for red, green, blue in zip(channels, channels, channels, strict=True)
+            ))
+            box = mask.getbbox()
+            result.append({"sha": hashlib.sha256(raw).hexdigest(), "size": image.size,
+                           "cloth_bounds": box, "cloth_pixels": mask.histogram()[255]})
+        return directory, result
+
+    async def run_python(session, code):
+        return (await json_result(session, "clo_run_python", {"code": code}))["value"]
+
+    async def artifact_hashes(session, directory, prefix):
+        return await run_python(session, f"import pathlib, hashlib\n"
+            f"result = sorted(hashlib.sha256(p.read_bytes()).hexdigest() for p in "
+            f"pathlib.Path({str(directory)!r}).glob({(prefix + '*.png')!r}))")
+
+    async def thumbnail(session, directory):
+        path = str(directory / "camera-retained.png")
+        return await run_python(session, f"import pathlib, hashlib\n"
+            f"export_api.ExportThumbnail3D({path!r})\n"
+            f"result = hashlib.sha256(pathlib.Path({path!r}).read_bytes()).hexdigest()")
+
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+            original = await json_result(session, "scene_info")
+            path = str(fixture if backend == "official" else fixture.resolve(strict=True))
+            await json_result(session, "scene_open", {"path": path})
+            try:
+                scene = await json_result(session, "scene_info")
+                directory, frames = await capture(session, views, "Camera Matrix")
+                _, defaults = await capture(session, [], "")
+                assert [item["sha"] for item in defaults] == [frames[0]["sha"], frames[-2]["sha"]]
+                assert frames[-1] == frames[-2]
+                assert len({row["sha"] for row in frames[:-1]}) == len(views) - 1
+                assert all(row["cloth_pixels"] > 100 for row in frames), (backend, frames)
+
+                for angle, index in (("right", 3), ("front", 0)):
+                    _, commands = await capture(session, [angle, "fit", "focus"], "Camera Commands")
+                    assert all(frame == frames[index] for frame in commands), (backend, angle, commands)
+                    for preset in (9, 7):
+                        await json_result(session, "clo_api_call", {
+                            "name": "utility_api.SetCamViewPoint", "args": [preset],
+                        })
+                        assert await thumbnail(session, directory if backend == "rust" else PurePosixPath(native_folder)) == frames[index]["sha"]
+                await capture(session, ["right"])
+                async def rejected(prefix, request, written):
+                    existing = await artifact_hashes(session, directory, prefix)
+                    invalid = await session.call_tool("snapshot", {"views": request, "label": prefix})
+                    assert invalid.isError, (backend, prefix, invalid.content)
+                    observed = await artifact_hashes(session, directory, prefix)
+                    assert observed == sorted([*existing, *written]), (backend, observed, existing)
+                retain = directory if backend == "rust" else PurePosixPath(native_folder)
+                await rejected("bad-first-camera", ["2d", "front"], [])
+                assert await thumbnail(session, retain) == frames[3]["sha"]
+                await rejected("bad-later-camera", ["front", "missing-camera", "back"], [frames[0]["sha"]])
+                assert await thumbnail(session, retain) == frames[0]["sha"]
+                assert await json_result(session, "scene_info") == scene
+                report[backend] = dict(zip(views, frames, strict=True))
+            finally:
+                if backend == "official" and original["project_path"] != "NULL":
+                    await json_result(session, "scene_open", {"path": original["project_path"]})
+
+    def aspect(frame):
+        left, top, right, bottom = frame["cloth_bounds"]
+        return (right - left) / (bottom - top)
+
+    aspect_deltas = {
+        view: abs(aspect(report["official"][view]) - aspect(report["rust"][view]))
+        for view in views
+    }
+    assert max(aspect_deltas[view] for view in ("FRONT", "back", "left", "right")) <= 0.01, aspect_deltas
+    print(json.dumps({"fixture": fixture.name, "views": report, "focus_fit_preserve_view_without_selection": True,
+                      "cloth_aspect_deltas": aspect_deltas,
+                      "invalid_first_preserves_camera": True, "invalid_later_keeps_file_and_camera": True}))
+
+
 async def compare_draft_option_semantics():
     accepted = (
         {"garment": "top", "fit": "bespoke", "length": "waist"},
@@ -5618,6 +5729,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-snapshot-2d", action="store_const", dest="comparison",
                              const=compare_saved_snapshot_2d,
                              help="capture both backends' 2D layout and verify the PNG response")
+    comparisons.add_argument("--compare-native-snapshot-views", action="store_const", dest="comparison",
+                             const=compare_native_snapshot_views,
+                             help="compare native 3D view order, cloth silhouettes and camera retention")
     comparisons.add_argument("--compare-strapped-draft-preview", action="store_const", dest="comparison",
                              const=compare_strapped_draft_preview,
                              help="compare offline strapless and strap garment draft previews")

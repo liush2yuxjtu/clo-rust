@@ -404,6 +404,22 @@ view is invalid, confirm the tool returns an error, the earlier PNG is still on
 disk, the camera stays on the last completed view, and later views never run.
 Check the same behavior when snapshots are requested by a garment build.
 
+Run `--compare-native-snapshot-views` with the official 3D pane visible.
+Set `CLO_SNAPSHOT_3D_FIXTURE` to the same
+`simulation-stage-next.zpac` file on both hosts and
+`CLO_SNAPSHOT_3D_NATIVE_OUTPUT` to a writable native directory for the
+thumbnail check. On Boat, map the bridge's returned PNG paths to the shared
+drive before the MCP image loader reads them. Set `CLO_SNAPSHOT_3D_OUTPUTS`
+to retain the nine PNGs per backend.
+
+Compare order, default and mixed-case aliases, garment visibility and the
+front, back and side silhouette aspect ratios within 0.01. Check that
+`fit` and `focus` preserve the requested direction when nothing is selected,
+including SDK presets 9 and 7. On an invalid first or later view, compare
+the destination PNG list and the subsequent thumbnail with the last valid
+view. Run `cargo test --locked edge_on_snapshot_keeps_a_one_pixel_profile`
+to verify an exact planar panel still yields an edge profile in four views.
+
 Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
 exercise two builds with different patterns. Within one MCP session,
 opening or restoring the older scene and clearing the project change the

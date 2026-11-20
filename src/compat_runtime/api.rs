@@ -1526,8 +1526,8 @@ pub(super) fn invoke(
         "utility_api.NewProject" => domain("scene_clear", &json!({"keep_avatar":false}),state).map(|_| json!(true)),
         "utility_api.ResetClothArrangement" => domain("simulation_reset", &json!({}),state).map(|result| success(&result)),
         "utility_api.SetCamViewPoint" => {
-            state["runtime"]["ui"]["view"] = arg[0].clone();
-            Ok(json!(true))
+            crate::compat_fit::set_camera_preset(state, &arg[0])?;
+            Ok(Value::Null)
         }
         "utility_api.SetCurrentColorwayIndex" => {
             let index = arg[0].as_u64().and_then(|index| usize::try_from(index).ok())

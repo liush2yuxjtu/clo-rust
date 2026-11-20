@@ -185,6 +185,29 @@ struct Camera {
     depth: Point,
 }
 
+const CAMERA_PRESETS: [&str; 10] = [
+    "bottom", "3/4-right", "front", "3/4-left", "right", "top", "left", "focus", "back", "fit",
+];
+
+pub(crate) fn set_camera_preset(state: &mut Value, preset: &Value) -> Result<(), String> {
+    let index = preset.as_u64().filter(|&index| index < CAMERA_PRESETS.len() as u64)
+        .ok_or("unsupported snapshot camera preset")?;
+    // In an unselected scene, both commands retain the current orientation.
+    if !matches!(index, 7 | 9) {
+        state["runtime"]["ui"]["view"] = json!(index);
+    }
+    Ok(())
+}
+
+fn current_camera(state: &Value) -> Result<&str, String> {
+    let current = &state["runtime"]["ui"]["view"];
+    match current.as_u64() {
+        Some(index) => CAMERA_PRESETS.get(index as usize).copied()
+            .ok_or_else(|| "unsupported snapshot camera preset".to_owned()),
+        None => Ok(current.as_str().unwrap_or("front")),
+    }
+}
+
 fn camera(view: &str) -> Result<Camera, String> {
     let name = view.to_ascii_lowercase();
     let angle = match name.as_str() {
@@ -258,15 +281,19 @@ impl Canvas {
             (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
         };
         let area = signed(a, b, c[0], c[1]);
-        if area.abs() < 1e-10 {
-            return;
-        }
         let normal = cross(sub(b, a), sub(c, a));
         let n = dot(normal, normal).sqrt().max(1e-15);
         let light = [-0.43, -0.49, 0.76];
         let factor = 0.67 + 0.33 * (dot(normal, light) / n).abs();
         let shade = |rgb: Rgb| rgb.map(|c| (f64::from(c) * factor).min(255.0) as u8);
         let flat_rgb = shade(color);
+        if area.abs() < 1e-10 {
+            // A panel viewed edge-on still has a visible one-pixel profile.
+            for (start, end) in [(a, b), (b, c), (c, a)] {
+                self.segment(start, end, flat_rgb);
+            }
+            return;
+        }
         let x0 = a[0].min(b[0]).min(c[0]).floor().clamp(0.0, (w - 1) as f64) as usize;
         let x1 = a[0].max(b[0]).max(c[0]).ceil().clamp(0.0, (w - 1) as f64) as usize;
         let y0 = a[1].min(b[1]).min(c[1]).floor().clamp(0.0, (h - 1) as f64) as usize;
@@ -305,9 +332,18 @@ impl Canvas {
             let x = (a[0] + t * (b[0] - a[0])).round() as isize;
             let y = (a[1] + t * (b[1] - a[1])).round() as isize;
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                let offset = self.channels * ((y as usize) * w + x as usize);
+                let index = (y as usize) * w + x as usize;
+                let offset = self.channels * index;
+                if self.channels == 4 {
+                    self.pixels[offset + 3] = 255;
+                } else {
+                    let depth = a[2] + t * (b[2] - a[2]);
+                    if depth < self.depth[index] {
+                        continue;
+                    }
+                    self.depth[index] = depth;
+                }
                 self.pixels[offset..offset + 3].copy_from_slice(&rgb);
-                self.pixels[offset + 3] = 255;
             }
         }
     }
@@ -440,12 +476,13 @@ fn render_canvas(drawings: &[Drawing], view: &str, flat: bool) -> Result<Canvas,
 
 fn make_image(
     drawings: &[Drawing],
-    root: &PathBuf,
+    root: &Path,
     label: &str,
     view: &str,
+    orientation: &str,
     flat: bool,
 ) -> Result<PathBuf, String> {
-    let canvas = render_canvas(drawings, view, flat)?;
+    let canvas = render_canvas(drawings, orientation, flat)?;
     let shape = if flat { "2d".to_owned() } else { view.replace('/', "") };
     let label: String = label
         .chars()
@@ -547,23 +584,7 @@ pub(crate) fn export_snapshot(path: &Path, state: &Value, flat: bool) -> Result<
     if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")) {
         return Err("snapshot export requires a .png path".into());
     }
-    let current = &state["runtime"]["ui"]["view"];
-    let view = if flat {
-        "2d"
-    } else {
-        match current.as_i64() {
-            Some(0) => "bottom",
-            Some(1) => "3/4-right",
-            Some(2) => "front",
-            Some(3) => "3/4-left",
-            Some(4) => "right",
-            Some(5) => "top",
-            Some(6) => "left",
-            Some(8) => "back",
-            Some(_) => return Err("unsupported snapshot camera preset".into()),
-            None => current.as_str().unwrap_or("front"),
-        }
-    };
+    let view = if flat { "2d" } else { current_camera(state)? };
     let drawings = scene_drawings(state, flat, &mut TextureCache::default())?;
     let canvas = render_canvas(&drawings, view, flat)?;
     let mut bytes = Vec::new();
@@ -602,11 +623,17 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
         .unwrap_or("snap");
     let mut images = Vec::new();
     for view in views {
-        if !flat {
-            camera(view)?;
-            state["runtime"]["ui"]["view"] = json!(view);
-        }
-        let path = make_image(&drawings, &root, label, view, flat)?;
+        let orientation = if flat {
+            "2d"
+        } else {
+            let lower = view.to_ascii_lowercase();
+            let canonical = if lower == "three-quarter" { "3/4-right" } else { lower.as_str() };
+            let index = CAMERA_PRESETS.iter().position(|&name| name == canonical)
+                .ok_or_else(|| format!("unknown snapshot view {view:?}"))?;
+            set_camera_preset(state, &json!(index))?;
+            current_camera(state)?
+        };
+        let path = make_image(&drawings, &root, label, view, orientation, flat)?;
         images.push(json!({"view":view,"path":path,"mime_type":"image/png"}));
     }
     let mut result = json!({"images":images});
@@ -617,6 +644,30 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
         result["path"] = result["images"][0]["path"].clone();
     }
     Ok(result)
+}
+
+#[cfg(test)]
+#[test]
+fn edge_on_snapshot_keeps_a_one_pixel_profile() {
+    let drawing = Drawing {
+        points: vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [25.0, 80.0, 0.0]],
+        faces: vec![[0, 1, 2]],
+        color: [20, 50, 220],
+        texcoords: Vec::new(),
+        texture: None,
+        strokes: Vec::new(),
+    };
+    for (view, vertical) in [("left", true), ("right", true), ("top", false), ("bottom", false)] {
+        let canvas = render_canvas(std::slice::from_ref(&drawing), view, false).unwrap();
+        let pixels: Vec<_> = canvas.pixels.chunks_exact(3).enumerate().filter_map(|(index, rgb)| {
+            let blue = i16::from(rgb[2]);
+            (blue - i16::from(rgb[0]) > 70).then_some((index % SIZE[0], index / SIZE[0]))
+        }).collect();
+        assert!(pixels.len() > 100, "{view}");
+        assert!(pixels.iter().all(|&(x, y)| {
+            if vertical { x == pixels[0].0 } else { y == pixels[0].1 }
+        }), "{view}");
+    }
 }
 
 #[cfg(test)]
