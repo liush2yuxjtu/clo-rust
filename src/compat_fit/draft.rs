@@ -96,12 +96,10 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or("dress")
         .to_lowercase();
-    if !["dress", "top", "skirt"].contains(&garment.as_str()) {
-        return Err(format!("unsupported Rust garment type {garment:?}"));
-    }
     let silhouette = normalized
         .get("silhouette")
         .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
         .unwrap_or(if garment == "dress" {
             "a-line"
         } else {
@@ -123,7 +121,7 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         ("dress", "fit-and-flare" | "fit and flare" | "peplum") => {
             (false, "fitted", 0.0, "flare", "natural")
         }
-        ("dress", "skater" | "ball gown" | "ballgown" | "princess" | "circle") => {
+        ("dress", "skater" | "ball-gown" | "ball gown" | "ballgown" | "princess" | "circle") => {
             (false, "fitted", 0.0, "full-circle", "natural")
         }
         ("dress", "mermaid") => (false, "fitted", 0.0, "mermaid", "natural"),
@@ -156,10 +154,11 @@ fn normalize(spec: &Value) -> Result<Value, String> {
         normalized.entry("skirt").or_insert(json!(skirt));
     }
     normalized.entry("fit").or_insert(json!(fit));
-    let slip = garment == "dress" && normalized["silhouette"] == "slip";
+    let slip = normalized["silhouette"] == "slip";
+    let slip_preset = garment == "dress" && slip;
     normalized
         .entry("neckline")
-        .or_insert(json!(if slip { "straight" } else { "round" }));
+        .or_insert(json!(if slip_preset { "straight" } else { "round" }));
     let back = if ["deep-v", "halter"]
         .iter()
         .any(|s| normalized["neckline"] == *s)
@@ -173,7 +172,7 @@ fn normalize(spec: &Value) -> Result<Value, String> {
     normalized.entry("sleeve_style").or_insert(json!("regular"));
     normalized.entry("waist").or_insert(json!(waist));
     normalized.entry("length").or_insert(json!(default_length));
-    normalized.entry("straps").or_insert(json!(if slip { "thin" } else { "none" }));
+    normalized.entry("straps").or_insert(json!(if slip_preset { "thin" } else { "none" }));
     let strapless_preset = garment == "dress" && matches!(normalized["silhouette"].as_str(), Some("strapless" | "tube"));
     normalized.entry("strapless").or_insert(json!(strapless_preset));
     if matches!(normalized["neckline"].as_str(), Some("straight" | "strapless"))
@@ -194,6 +193,7 @@ struct Measurements {
     bust: f64,
     waist: f64,
     hip: f64,
+    bodice_hip: f64,
     neck: f64,
     shoulder: f64,
     top_y: f64,
@@ -209,21 +209,34 @@ struct Measurements {
 }
 
 fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
-    let (bust, waist, hip) = fit_ease(spec)?;
-    let width = |key, ease| (number(body, key, 800.0) + number(&spec["ease"], key, ease)) / 4.0;
+    let (bust, waist, hip) = fit_ease(spec);
+    let width = |key, ease| (number(body, key, 800.0) + ease) / 4.0;
+    let bodice_width = |key, ease| {
+        let ease = if spec["garment"] == "skirt" {
+            ease
+        } else {
+            match spec["ease"].get(key) {
+                None => ease,
+                Some(value) => value
+                    .as_f64()
+                    .ok_or_else(|| format!("ease.{key} must be a number"))?,
+            }
+        };
+        Ok::<f64, String>(width(key, ease))
+    };
     let standard_waist = number(body, "h_waist", 1141.0);
     let underbust = number(body, "h_underbust", 1235.0);
     let waist_height = match string(spec, "waist", "natural") {
-        "natural" | "none" => standard_waist,
         "high" => standard_waist + 40.0,
         "empire" => underbust - 10.0,
         "drop" => number(body, "h_high_hip", 1011.0) + 10.0,
-        other => return Err(format!("unknown waist setting {other:?}")),
+        _ => standard_waist,
     };
     Ok(Measurements {
-        bust: width("bust", bust),
-        waist: width("waist", waist),
+        bust: bodice_width("bust", bust)?,
+        waist: bodice_width("waist", waist)?,
         hip: width("hip", hip),
+        bodice_hip: bodice_width("hip", hip)?,
         neck: number(body, "neck", 355.0) / 6.0 + 8.0,
         shoulder: number(body, "across_shoulder", 377.0) * 0.5,
         top_y: number(body, "h_hps", 1500.0),
@@ -239,15 +252,14 @@ fn measurements(body: &Value, spec: &Value) -> Result<Measurements, String> {
     })
 }
 
-fn fit_ease(spec: &Value) -> Result<(f64, f64, f64), String> {
-    Ok(match string(spec, "fit", "regular") {
+fn fit_ease(spec: &Value) -> (f64, f64, f64) {
+    match string(spec, "fit", "regular") {
         "bodycon" => (0.0, -10.0, 0.0),
         "fitted" => (40.0, 30.0, 40.0),
-        "regular" => (80.0, 70.0, 80.0),
         "loose" => (150.0, 140.0, 140.0),
         "oversized" => (260.0, 260.0, 240.0),
-        other => return Err(format!("unknown ease profile {other:?}")),
-    })
+        _ => (80.0, 70.0, 80.0),
+    }
 }
 
 fn hem_height(body: &Value, spec: &Value) -> Result<f64, String> {
@@ -444,7 +456,7 @@ fn body_panel(
     let balance = if front { 8.0 } else { -8.0 };
     let bust = m.bust + balance;
     let waist = m.waist + balance * 0.5;
-    let hip = m.hip + balance * 0.5;
+    let hip = m.bodice_hip + balance * 0.5;
     let underarm_y = m.chest_y
         + if spec["fit"] == "oversized" {
             -15.0
@@ -505,7 +517,7 @@ fn body_panel(
     let mut edges = Vec::new();
     let top_y = m.chest_y + if front { 40.0 } else { 60.0 };
     if let Some(straps) = straps {
-        let half_width = if straps == "thin" { 11.0 } else { 22.5 };
+        let half_width = if matches!(straps, "" | "thin") { 11.0 } else { 22.5 };
         let center = m.neck + 55.0;
         let inner = center - half_width;
         let outer = center + half_width;
@@ -690,14 +702,14 @@ fn drafted_number(spec: &Value, key: &str, default: f64) -> Result<f64, String> 
         None => Ok(default),
         Some(value) => value
             .as_f64()
-            .or_else(|| value.as_str()?.parse::<f64>().ok())
+            .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
             .filter(|value| value.is_finite())
             .ok_or_else(|| format!("{key} must be a finite number")),
     }
 }
 
-fn skirt_waist_width(body: &Value, spec: &Value, m: &Measurements) -> Result<f64, String> {
-    let (_, ease, _) = fit_ease(spec)?;
+fn skirt_waist_width(body: &Value, spec: &Value, m: &Measurements) -> f64 {
+    let (_, ease, _) = fit_ease(spec);
     let (girth, ease) = if m.waist_y < m.standard_waist_y - 40.0 {
         (number(body, "high_hip", 805.0), ease.max(20.0))
     } else if m.waist_y > m.underbust_y - 30.0 {
@@ -705,7 +717,7 @@ fn skirt_waist_width(body: &Value, spec: &Value, m: &Measurements) -> Result<f64
     } else {
         (number(body, "waist", 608.0), ease.max(20.0))
     };
-    Ok((girth + ease) / 4.0)
+    (girth + ease) / 4.0
 }
 
 fn circular_skirt(
@@ -1030,6 +1042,11 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
     let hem = hem_height(body, &spec)?;
     let garment = spec["garment"].as_str().unwrap();
     let has_bodice = garment != "skirt";
+    let flare = if has_bodice {
+        drafted_number(&spec, "flare", 0.0)?
+    } else {
+        0.0
+    };
     let one_piece = boolean(&spec, "one_piece", true);
     let split = has_bodice && one_piece && hem < m.standard_waist_y - 150.0;
     let has_skirt = garment == "skirt" || (has_bodice && !one_piece);
@@ -1071,7 +1088,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
         } else if spec["silhouette"] == "sheath" {
             Some(m.hip + 8.0)
         } else {
-            Some(m.hip + number(&spec, "flare", 0.0) * (m.hip_y - hem).max(0.0) * 0.5)
+            Some(m.hip + flare * (m.hip_y - hem).max(0.0) * 0.5)
         }
     } else {
         None
@@ -1157,7 +1174,7 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
         let waist = if has_bodice {
             circular_bodice_waist.unwrap_or_else(|| hem_half_width(&pieces[0]))
         } else {
-            skirt_waist_width(body, &spec, &m)?
+            skirt_waist_width(body, &spec, &m)
         };
         if let Some(fraction) = circle {
             let (skirts, joins) = circular_skirt(waist, m.waist_y, hem, fraction)?;
@@ -1244,17 +1261,22 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
         }
     }
     let material = assets::planned_material(&spec["fabric"], &spec["color"])?;
-    let steps =
-        spec["simulate_steps"]
-            .as_u64()
-            .unwrap_or(if tiered {
-                260
-            } else if hem < number(body, "h_knee", 483.0) - 100.0 {
-                160
-            } else {
-                120
-            });
-    let particle = number(&spec, "particle_distance", 20.0);
+    let steps = match spec.get("simulate_steps") {
+        Some(value) => value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .or_else(|| {
+                let number = value.as_f64()?.trunc();
+                (i64::MIN as f64..-(i64::MIN as f64))
+                    .contains(&number)
+                    .then_some(number as i64)
+            })
+            .ok_or("simulate_steps must be an integer")?,
+        None if tiered => 260,
+        None if hem < number(body, "h_knee", 483.0) - 100.0 => 160,
+        None => 120,
+    };
+    let particle = drafted_number(&spec, "particle_distance", 20.0)?;
     Ok(
         json!({"pieces":pieces,"seams":seams,"fabric":material,"simulation":{"steps":steps,"particle_distance":particle},
         "warnings":warnings,"notes":notes,"merge_pairs":merges,

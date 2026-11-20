@@ -78,6 +78,11 @@ counts and the error and state checks. This recipe exercises the draft preview
 path without requiring a live CLO scene. For a scene-backed example, run
 `--compare-saved-scene-info` with the same `.zprj` open in CLO, as described below.
 
+Run `--compare-draft-option-semantics` to compare aliases, garment and fit
+fallbacks, bodice ease, and numeric simulation options with the same standard
+measurements. Check every preview field, invalid numeric values, and the last
+garment spec in both sessions.
+
 For the acceptance tally, create one row per pinned tool, with separate fields
 for contract, Rust call, and dual-backend behavior. Fill in these fields with
 the relevant evidence for each revision:

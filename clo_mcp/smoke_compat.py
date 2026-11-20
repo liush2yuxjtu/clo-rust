@@ -758,6 +758,45 @@ async def compare_saved_snapshot_2d():
     }))
 
 
+async def compare_draft_option_semantics():
+    accepted = (
+        {"garment": "top", "fit": "bespoke", "length": "waist"},
+        {"garment": "Blouse", "length": "waist"},
+        {"silhouette": "fit-and-flare", "waist": "bespoke"},
+        {"silhouette": ""},
+        {"silhouette": "ball-gown"},
+        {"garment": "top", "silhouette": "slip"},
+        {"garment": "top", "length": "waist", "ease": {"hip": 120}},
+        {"garment": "top", "ease": {"hip": 120}},
+        {"garment": "skirt", "ease": {"hip": 120, "waist": 155}},
+        {"length": "midi", "simulate_steps": "20", "particle_distance": " 10.5 ", "flare": "0.45"},
+        {"length": "midi", "simulate_steps": 20.7, "particle_distance": 15},
+    )
+    rejected = (
+        {"particle_distance": "invalid"}, {"simulate_steps": "20.5"}, {"flare": "wide"},
+        {"garment": "top", "length": "waist", "ease": {"bust": "40"}},
+    )
+    results = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        for session in (clo, rust):
+            await inspect_contract(session)
+        for spec in accepted:
+            args = {"spec": spec, "use_scene_measurements": False}
+            reference = await json_result(clo, "garment_plan_preview", args)
+            observed = await json_result(rust, "garment_plan_preview", args)
+            assert reference.keys() == observed.keys(), spec
+            for key in reference:
+                assert reference[key] == observed[key], (spec, key, reference[key], observed[key])
+            results.append({"spec": spec, "pieces": len(observed["pieces"]),
+                            "seams": len(observed["seams"]), "simulation": observed["simulation"]})
+        for session in (clo, rust):
+            for spec in rejected:
+                assert (await session.call_tool("garment_plan_preview", {"spec": spec})).isError, spec
+            assert await json_result(session, "garment_last_spec") == {"spec": None, "pieces": []}
+    print(json.dumps({"tool": "garment_plan_preview", "case": "draft option semantics",
+                      "accepted": results, "rejected": rejected, "last_spec_unchanged": True}))
+
+
 async def compare_strapped_draft_preview():
     cases = (
         {"silhouette": "strapless", "length": "mini"},
@@ -2655,6 +2694,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-desktop-observation", action="store_const", dest="comparison",
                              const=compare_desktop_observation,
                              help="compare desktop state bounds, stale actions and screenshot payloads")
+    comparisons.add_argument("--compare-draft-option-semantics", action="store_const", dest="comparison",
+                             const=compare_draft_option_semantics,
+                             help="compare drafting fallbacks, ease and simulation parameter types")
     comparisons.add_argument("--compare-fabric-library", action="store_const", dest="comparison",
                              const=compare_fabric_library,
                         help="compare both live backends against the same CLO fabric library")
