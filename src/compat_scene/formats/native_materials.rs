@@ -91,6 +91,9 @@ fn material(record: &Fields<'_>) -> Result<Value, String> {
         entry["color"] = json!(&color[..3]);
         entry["rgba"] = json!(color);
     }
+    if let Ok(properties) = super::native_fabric::physical_properties(record) {
+        entry["info"]["physical_properties"] = properties;
+    }
     Ok(entry)
 }
 

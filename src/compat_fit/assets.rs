@@ -1,4 +1,4 @@
-use super::{array, array_mut, avt, boolean, number, pattern_index, string, texture::BaseTexture};
+use super::{array, array_mut, avt, boolean, pattern_index, string, texture::BaseTexture};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -1033,9 +1033,9 @@ pub fn fabric_set_texture(args: &Value, state: &mut Value) -> Result<Value, Stri
     Ok(json!({"ok":true}))
 }
 
-pub fn material_stiffness(state: &Value, id: &Value) -> f64 {
+pub(super) fn assigned_material<'a>(state: &'a Value, id: &Value) -> &'a Value {
     array(&state["fabrics"])
         .iter()
         .find(|m| !id.is_null() && m["index"] == *id)
-        .map_or(0.9, |m| number(m, "stiffness", 0.9))
+        .unwrap_or(&Value::Null)
 }

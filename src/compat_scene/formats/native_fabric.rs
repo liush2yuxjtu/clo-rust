@@ -38,23 +38,8 @@ fn active_material<'a>(record: &Fields<'a>) -> Result<Fields<'a>, String> {
         .ok_or_else(|| "active fabric colorway is missing".into())
 }
 
-pub(crate) fn read(path: &Path) -> Result<Value, String> {
-    let mut archive = open_archive(bounded_file(path)?, FAB)?;
-    let payload = member(&mut archive, "fab")?;
-    let record = Fields::read(&payload)?;
+pub(super) fn physical_properties(record: &Fields<'_>) -> Result<Value, String> {
     let physical = record.map(b"mapPhysical")?;
-    let name = text(&record, b"qsNameUTF8")
-        .or_else(|| text(&record, b"qsFabricNameUTF8"))
-        .or_else(|| path.file_stem()?.to_str())
-        .ok_or("native fabric name is missing")?;
-    let material = active_material(&record)?;
-    let faces = read_face_colors(&material)?;
-    let color = faces
-        .iter()
-        .find(|(kind, _)| *kind == 0)
-        .map(|(_, color)| *color)
-        .ok_or("native fabric front face is missing")?;
-    let (texture_maps, warnings) = fabric_maps(&material, &mut archive)?;
     let properties: serde_json::Map<String, Value> = [
         ("fSuK", "stretch_u"),
         ("fSvK", "stretch_v"),
@@ -70,8 +55,27 @@ pub(crate) fn read(path: &Path) -> Result<Value, String> {
     .into_iter()
     .filter_map(|(key, name)| Some((name.to_owned(), json!(float(&physical, key.as_bytes())?))))
     .collect();
-    // The CPU solver currently accepts one bounded stiffness per panel.
-    // Project the two stored axial stiffnesses to that scalar using a 20,000 reference.
+    Ok(Value::Object(properties))
+}
+
+pub(crate) fn read(path: &Path) -> Result<Value, String> {
+    let mut archive = open_archive(bounded_file(path)?, FAB)?;
+    let payload = member(&mut archive, "fab")?;
+    let record = Fields::read(&payload)?;
+    let properties = physical_properties(&record)?;
+    let name = text(&record, b"qsNameUTF8")
+        .or_else(|| text(&record, b"qsFabricNameUTF8"))
+        .or_else(|| path.file_stem()?.to_str())
+        .ok_or("native fabric name is missing")?;
+    let material = active_material(&record)?;
+    let faces = read_face_colors(&material)?;
+    let color = faces
+        .iter()
+        .find(|(kind, _)| *kind == 0)
+        .map(|(_, color)| *color)
+        .ok_or("native fabric front face is missing")?;
+    let (texture_maps, warnings) = fabric_maps(&material, &mut archive)?;
+    // Preserve the scalar for consumers of previously saved .clorust projects.
     let mut stiffness = 0.9;
     if let (Some(u), Some(v)) = (properties.get("stretch_u"), properties.get("stretch_v")) {
         let axial = (u.as_f64().unwrap_or_default() + v.as_f64().unwrap_or_default()) * 0.5;

@@ -11,6 +11,51 @@ type Point = [f64; 3];
 type Point2 = [f64; 2];
 type Edge = (usize, usize);
 
+#[derive(Clone, Copy)]
+struct ClothMaterial {
+    stretch: [f64; 3],
+    bend: [f64; 3],
+}
+
+impl ClothMaterial {
+    fn for_panel(pattern: &Value, state: &Value) -> Self {
+        if boolean(pattern, "strengthen", false) {
+            return Self {
+                stretch: [0.995; 3],
+                bend: [0.995 * 0.12; 3],
+            };
+        }
+        let fabric = assets::assigned_material(state, &pattern["fabric_index"]);
+        let fallback = number(fabric, "stiffness", 0.9).clamp(0.0, 1.0);
+        let properties = &fabric["info"]["physical_properties"];
+        // Map the stored coefficients to the bounded responses used by this solver.
+        // The reference values are Rust solver parameters, independent of CLO calibration.
+        let response = |key: &str, reference: f64| {
+            properties[key]
+                .as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map_or(fallback, |value| value / (value + reference))
+        };
+        Self {
+            stretch: ["stretch_u", "stretch_v", "shear"].map(|key| response(key, 20_000.0)),
+            bend: ["bend_u", "bend_v", "bend_bias"].map(|key| 0.12 * response(key, 2_000.0)),
+        }
+    }
+
+    fn along([u, v, bias]: [f64; 3], a: Point2, b: Point2) -> f64 {
+        let dx = b[0] - a[0];
+        let dy = b[1] - a[1];
+        let length_squared = dx * dx + dy * dy;
+        if length_squared == 0.0 || (u == v && v == bias) {
+            return u;
+        }
+        let along_u = dx * dx / length_squared;
+        let along_v = 1.0 - along_u;
+        let along_bias = 4.0 * along_u * along_v;
+        (u * along_u + v * along_v) * (1.0 - along_bias) + bias * along_bias
+    }
+}
+
 pub fn sub(a: Point, b: Point) -> Point {
     std::array::from_fn(|i| a[i] - b[i])
 }
@@ -57,7 +102,7 @@ pub struct Mesh {
     #[serde(skip)]
     sides: Vec<Vec<usize>>,
     #[serde(skip)]
-    stiffness: f64,
+    material: ClothMaterial,
     #[serde(skip)]
     frozen: bool,
     #[serde(skip)]
@@ -286,14 +331,6 @@ fn sampled_sides(indices: &[usize], corners: &[usize]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-fn panel_stiffness(pattern: &Value, state: &Value) -> f64 {
-    if boolean(pattern, "strengthen", false) {
-        0.995
-    } else {
-        assets::material_stiffness(state, &pattern["fabric_index"])
-    }
-}
-
 fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, String> {
     let (mut points, corners) = perimeter(pattern)?;
     if points.len() > 512 {
@@ -321,7 +358,7 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         texcoords: uv_coordinates(&points),
         points,
         sides,
-        stiffness: panel_stiffness(pattern, state),
+        material: ClothMaterial::for_panel(pattern, state),
         frozen: boolean(pattern, "freeze", false),
         shirring_edges,
         native_shirring_base: None,
@@ -581,7 +618,7 @@ fn native_mesh(
         texcoords: points.clone(),
         points,
         sides,
-        stiffness: panel_stiffness(pattern, state),
+        material: ClothMaterial::for_panel(pattern, state),
         frozen: boolean(pattern, "freeze", false),
         shirring_edges,
         native_shirring_base,
@@ -836,19 +873,19 @@ fn internal_constraints(mesh: &Mesh, offset: usize) -> Vec<Constraint> {
             }
         }
     }
-    let constraint = |a: usize, b: usize, stiffness: f64| Constraint {
+    let constraint = |(a, b): Edge, coefficients| Constraint {
         a: a + offset,
         b: b + offset,
         rest: distance2(mesh.points[a], mesh.points[b]).sqrt(),
-        stiffness,
+        stiffness: ClothMaterial::along(coefficients, mesh.points[a], mesh.points[b]),
     };
     edges
         .into_keys()
-        .map(|(a, b)| constraint(a, b, mesh.stiffness))
+        .map(|edge| constraint(edge, mesh.material.stretch))
         .chain(
             bending
                 .into_iter()
-                .map(|(a, b)| constraint(a, b, mesh.stiffness * 0.12)),
+                .map(|edge| constraint(edge, mesh.material.bend)),
         )
         .collect()
 }
@@ -1014,16 +1051,22 @@ fn apply_constraint(points: &mut [Point], weights: &[f64], c: &Constraint) {
 pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let start = std::time::Instant::now();
     let existing = &state["simulation"];
-    let steps = args["steps"].as_u64().unwrap_or(100);
+    let unsigned = |key: &str, default: u64| {
+        if args[key].is_null() {
+            Ok(default)
+        } else {
+            args[key]
+                .as_u64()
+                .ok_or_else(|| format!("{key} must be a nonnegative integer"))
+        }
+    };
+    let steps = unsigned("steps", 100)?;
     let distance = number(
         args,
         "particle_distance",
         number(existing, "particle_distance", 20.0),
     );
-    let quality = args["quality"]
-        .as_u64()
-        .or(existing["quality"].as_u64())
-        .unwrap_or(0);
+    let quality = unsigned("quality", existing["quality"].as_u64().unwrap_or(0))?;
     if steps > 3000 || !(3.0..=500.0).contains(&distance) || quality > 3 {
         return Err(
             "simulation accepts 0..3000 steps, particle_distance 3..500 mm, and quality 0..3"
@@ -1308,6 +1351,30 @@ pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
 #[cfg(test)]
 mod native_pose_tests {
     use super::*;
+
+    #[test]
+    fn native_material_uses_separate_axial_and_bias_coefficients() {
+        let state = json!({"fabrics":[{
+            "index": 1, "stiffness": 0.8, "info":{"physical_properties":{
+                "stretch_u":20000, "stretch_v":60000, "shear":5000,
+                "bend_u":2000, "bend_v":6000, "bend_bias":500
+            }}
+        }]});
+        let pattern = json!({"fabric_index": 1});
+        let material = ClothMaterial::for_panel(&pattern, &state);
+        let origin = [0.0, 0.0];
+        for (axis, stretch, bend) in [
+            ([100.0, 0.0], 0.5, 0.06),
+            ([0.0, 100.0], 0.75, 0.09),
+            ([100.0, 100.0], 0.2, 0.024),
+        ] {
+            assert!((ClothMaterial::along(material.stretch, origin, axis) - stretch).abs() < 1e-12);
+            assert!((ClothMaterial::along(material.bend, origin, axis) - bend).abs() < 1e-12);
+        }
+        let legacy = ClothMaterial::for_panel(&pattern, &Value::Null);
+        assert_eq!(legacy.stretch, [0.9; 3]);
+        assert_eq!(legacy.bend, [0.9 * 0.12; 3]);
+    }
 
     #[test]
     fn elastic_total_length_is_distributed_and_disabled_edges_are_excluded() {

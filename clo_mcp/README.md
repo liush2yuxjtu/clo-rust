@@ -52,8 +52,9 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 `CLO_RUST_FABRIC_DIR` 指向包含 `.zfab` 的 `Fabric` 目录，或通过
 `CLO_MCP_ASSETS` 指定其上一级。也可以直接向 `fabric_apply` 传入
 `.zfab` 文件路径。Rust 读取文件中的面料名称、正面颜色、贴图和物理参数。
-CPU 仿真目前把经纬向拉伸刚度合并成一个裁片刚度。贴图通道的显示和导出
-取决于目标格式。
+CPU 仿真按裁片局部 X/Y 轴和斜向分别使用拉伸、剪切和弯曲参数。
+`.zprj` 和 `.zpac` 中保存的面料物理参数也用于求解。旋转后的布纹角、
+密度、摩擦和 CLO 的材料标定尚未用于求解。贴图通道的显示和导出取决于目标格式。
 `simulate` 未指定新粒距时，可从保存的网格和零初速度启动 Rust CPU 求解，
 后续调用保留 Rust 计算出的速度。显式指定新粒距会重新划分网格。
 CPU 求解器会约束已识别的启用边区间缝线，并报告尚未覆盖的内部线和跨边缝线组。
