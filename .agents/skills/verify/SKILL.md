@@ -530,6 +530,17 @@ rebuild, an invalid view after a successful build, history after reopen,
 and an empty fresh MCP session. Simulation geometry needs a separate
 comparison.
 
+Run `--compare-live-build-checkpoint-avatar` with the same live bridge,
+Avatar and Fabric libraries, and Mia measurement and calibration caches.
+Set `CLO_SCENE_OPEN_PROJECT` to the avatar-free two-panel ZPRJ and
+`CLO_SCENE_OPEN_AVATAR_PROJECT` to the two-panel project with embedded Mia.
+Use a fresh shared `CLO_MCP_STATE` and unset `CLO_RUST_CHECKPOINT_DIR`.
+Build with zero simulation steps. Each writer's automatic checkpoint
+must contain the two preset panels, stored pose and Mia, including the
+case that started without an avatar. Cross-restore all four ZPRJ artifacts
+through `checkpoint_restore`. Check the original fabrics and colorways,
+all mesh coordinates, triangles and UV, and the still-current build history.
+
 Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
 exercise two builds with different patterns. Within one MCP session,
 opening or restoring the older scene and clearing the project change the
@@ -971,9 +982,13 @@ Run `--verify-build-checkpoints` for the `auto_before_build_` path in build
 and rebuild responses. Empty or appended scenes skip automatic checkpoints.
 Read back the pre-replacement geometry, materials, and saved simulation.
 Set `CLO_CHECKPOINT_FIXTURE` to a native project with sewing and saved drape
-to check that replacement removes its seam groups and a checkpoint restore
-recovers them and enables a new native save. Also check that an unavailable
-checkpoint directory leaves a successful build with a null checkpoint path.
+to check that replacement removes its seam groups and checkpoint restoration
+recovers them. The checkpoint contains an avatar loaded by the build before
+replacement. To test native resave of an avatar-free fixture, also set
+`CLO_CHECKPOINT_AVATAR_FIXTURE` to a real AVT file. The test checks safe rejection
+of native resave when the portable checkpoint instead contains a procedural
+proxy. Check that an unavailable checkpoint directory leaves a successful
+build with a null checkpoint path.
 With the official stdio command configured, run `--compare-checkpoint-listing`
 to compare order and local timestamps using disposable directories without
 starting CLO. Compare full rows on a shared fixture with tied or nearly equal

@@ -4390,6 +4390,76 @@ async def compare_live_garment_workflow():
                       "new_session_history_empty": True, "result": "pass"}))
 
 
+async def compare_live_build_checkpoint_avatar():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    avatar_free = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    embedded = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    name = "Mara_09_eye_Joint"
+    cache = root / "measurements" / f"{name}.json"
+    assert avatar_free.is_file() and embedded.is_file() and cache.is_file()
+    assert (root / "calibration" / f"{name}.json").is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    request = {"spec": {"garment": "top", "silhouette": "regular", "neckline": "crew",
+                        "sleeve": "short", "fabric": "cotton", "color": "navy", "particle_distance": 45},
+               "simulate_steps": 0, "snapshots": False}
+    reports = []
+
+    async def mesh(session, label):
+        meshes, _ = await snapshot_composed_archive(session, root / f"{label}.clorust")
+        return [{key: panel[key] for key in ("positions", "triangles", "texcoords")} for panel in meshes]
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as inspector:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for kind, fixture, existing in (("implicit", avatar_free, []), ("embedded", embedded, [name])):
+                initial_bytes = fixture.read_bytes()
+                await json_result(inspector, "scene_open", {"path": str(fixture)})
+                initial_pose = await mesh(inspector, f"{kind}-before")
+                assert len(initial_pose) == 2
+                paths = set()
+                expected = {}
+                for writer, session in backends:
+                    await json_result(session, "scene_open", {"path": str(fixture)})
+                    before = await json_result(session, "scene_info")
+                    assert before["avatars"] == existing
+                    state = await read_composed_archive(session)
+                    built = await json_result(session, "garment_build", request)
+                    assert built["avatar"] == name and built["simulation"] is None, built
+                    assert built["measurements"] == f"cached CLO measurements ({cache.name})"
+                    path = Path(built["checkpoint_before_build"])
+                    assert path.is_file() and path.parent == root / "checkpoints" and path.suffix == ".zprj", path
+                    assert path not in paths
+                    paths.add(path)
+                    after = await json_result(session, "scene_info")
+                    assert after["project_path"] == str(path) and after["pattern_count"] == 6, after
+                    expected[writer] = path, state
+                for writer, (path, state) in expected.items():
+                    for reader, session in backends:
+                        history = await json_result(session, "garment_last_spec")
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        reply = await json_result(session, "checkpoint_restore", {"name": path.stem})
+                        assert reply == {"ok": True, "path": str(path), "pattern_count": 2, "avatars": [name]}
+                        assert await read_composed_archive(session) == state, (kind, writer, reader)
+                        assert await json_result(session, "garment_last_spec") == history
+                    await json_result(inspector, "scene_open", {"path": str(path)})
+                    assert await mesh(inspector, f"{kind}-{writer}-checkpoint") == initial_pose
+                    reports.append({"avatar_origin": kind, "writer": writer, "readers": 2, "panels": 2,
+                                    "vertices": sum(len(panel["positions"]) for panel in initial_pose)})
+                assert fixture.read_bytes() == initial_bytes
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"result": "pass", "cases": reports, "cross_backend_reads": 2 * len(reports),
+                      "implicit_avatar_in_checkpoint": name, "build_history_preserved": True}))
+
+
 async def compare_live_avatar_workflow():
     fixture = os.environ["CLO_AVATAR_PROJECT_FIXTURE"]
     assert Path(fixture).is_file(), fixture
@@ -5187,13 +5257,19 @@ async def verify_build_checkpoints():
                 await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
                 return json.loads(path.read_text())["scene"]
 
-            async def check_checkpoint(result, before):
+            async def check_checkpoint(result, before, loaded_avatar=None):
                 path = Path(result["checkpoint_before_build"])
                 assert path.parent == checkpoint_dir
                 assert re.fullmatch(r"auto_before_build_\d{8}_\d{6}(?:_\d+)?\.clorust", path.name)
                 saved = json.loads(path.read_text())["scene"]
-                for field in ("patterns", "seams", "native_seam_groups", "avatar", "fabrics", "simulation"):
+                for field in ("patterns", "seams", "native_seam_groups", "fabrics", "simulation"):
                     assert saved.get(field) == before.get(field), field
+                expected_avatar = before["avatar"] or loaded_avatar
+                if expected_avatar:
+                    assert saved["avatar"] == expected_avatar
+                else:
+                    # CLO loads the default avatar before saving a pre-build checkpoint.
+                    assert saved["avatar"]["name"] == result["avatar"] == "mia"
                 listed = (await json_result(rust, "checkpoint_list"))["checkpoints"]
                 assert any(row["name"] == path.stem and row["path"] == str(path) for row in listed)
                 return path
@@ -5223,14 +5299,22 @@ async def verify_build_checkpoints():
             assert (await json_result(rust, "garment_last_spec"))["spec"] == rebuilt["spec"]
 
             native_count = None
+            native_resave = None
             if fixture := os.environ.get("CLO_CHECKPOINT_FIXTURE"):
                 await json_result(rust, "scene_open", {"path": fixture})
                 native = await save("before-native-replace")
                 native_count = len(native["native_seam_groups"])
                 assert native_count > 0 and native["simulation"]["meshes"]
-                result = await json_result(rust, "garment_build", request)
-                path = await check_checkpoint(result, native)
+                native_request = request
+                if not native["avatar"] and (avatar_file := os.environ.get("CLO_CHECKPOINT_AVATAR_FIXTURE")):
+                    assert Path(avatar_file).is_file() and Path(avatar_file).suffix.lower() == ".avt"
+                    native_request = request | {"spec": request["spec"] | {"avatar": avatar_file}}
+                result = await json_result(rust, "garment_build", native_request)
                 replaced_native = await save("replaced-native")
+                introduced = replaced_native["avatar"] if not native["avatar"] else None
+                if introduced is not None:
+                    assert introduced["name"] == result["avatar"]
+                path = await check_checkpoint(result, native, introduced)
                 assert replaced_native["native_seam_groups"] == []
                 assert len(replaced_native["patterns"]) == len(result["pieces"])
                 await json_result(rust, "checkpoint_restore", {"name": path.stem})
@@ -5238,9 +5322,18 @@ async def verify_build_checkpoints():
                 assert restored["native_seam_groups"] == native["native_seam_groups"]
                 assert restored["simulation"] == native["simulation"]
                 copy = root / "restored-native.zprj"
-                await json_result(rust, "scene_save", {"path": str(copy), "thumbnail": False})
-                opened = await json_result(rust, "scene_open", {"path": str(copy)})
-                assert opened["pattern_count"] == len(native["patterns"])
+                before_save = await json_result(rust, "scene_info")
+                reply = await rust.call_tool("scene_save", {"path": str(copy), "thumbnail": False})
+                if restored["avatar"]["source"] == "rust_procedural_proxy":
+                    assert reply.isError and not copy.exists()
+                    assert await json_result(rust, "scene_info") == before_save
+                    native_resave = "proxy rejected without changing the scene"
+                else:
+                    assert not reply.isError, reply.content
+                    opened = await json_result(rust, "scene_open", {"path": str(copy)})
+                    assert opened["pattern_count"] == len(native["patterns"])
+                    assert opened["avatars"] == before_save["avatars"]
+                    native_resave = "pass"
 
             checkpoint_dir.rename(root / "previous-checkpoints")
             checkpoint_dir.write_text("Block creation of the checkpoint directory")
@@ -5252,7 +5345,7 @@ async def verify_build_checkpoints():
                                 "checkpoint_restore"],
                       "case": "automatic checkpoints before build", "empty_and_append": "pass",
                       "replace_and_rebuild": "pass", "write_failure_best_effort": "pass",
-                      "restored_native_seam_groups": native_count}))
+                      "restored_native_seam_groups": native_count, "native_resave": native_resave}))
 
 
 async def compare_checkpoint_listing():
@@ -8215,6 +8308,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-avatar-measurements", action="store_const", dest="comparison",
                              const=compare_live_avatar_measurements,
                              help="compare live avatar mesh measurements and shared measurement cache behavior")
+    comparisons.add_argument("--compare-live-build-checkpoint-avatar", action="store_const", dest="comparison",
+                             const=compare_live_build_checkpoint_avatar,
+                             help="verify implicit and embedded avatars in native pre-build checkpoints")
     comparisons.add_argument("--compare-live-avatar-workflow", action="store_const", dest="comparison",
                              const=compare_live_avatar_workflow,
                              help="compare native avatar loads, scene names, library and arrangement on both backends")
