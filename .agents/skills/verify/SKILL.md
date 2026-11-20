@@ -99,16 +99,26 @@ evidence_dir="$(mktemp -d)"
 git rev-parse HEAD > "$evidence_dir/revision.txt"
 python -m clo_mcp.smoke_compat --verify-tool-contracts \
   > "$evidence_dir/contracts.json" 2> "$evidence_dir/contracts.log"
+printf 'contract exit: %s\n' "$?"
 python -m clo_mcp.sweep_compat \
   > "$evidence_dir/rust-tool-calls.json" 2> "$evidence_dir/rust-tool-calls.log"
+printf 'Rust sweep exit: %s\n' "$?"
 python -m clo_mcp.smoke_compat --compare-strapped-draft-preview \
   > "$evidence_dir/strapped-preview.json" 2> "$evidence_dir/strapped-preview.log"
+printf 'preview comparison exit: %s\n' "$?"
 printf 'Evidence: %s\n' "$evidence_dir"
 ```
 
 The sweep exits nonzero for missing, unexpected, or failed calls. Its success criterion
 is `expected_count = called_count = ok_count = 48` with empty `missing`,
 `unexpected`, and `errors` arrays. Use `tools.<name>` to inspect each result.
+
+```sh
+jq '{public_tool_count, reference_mcp, official_adapter, rust_adapter}' "$evidence_dir/contracts.json"
+jq '{expected_count, called_count, ok_count, missing, unexpected, errors}' "$evidence_dir/rust-tool-calls.json"
+jq '.tools.garment_plan_preview' "$evidence_dir/rust-tool-calls.json"
+jq '{cases: (.comparisons | length), invalid_spec_error, last_spec_unchanged}' "$evidence_dir/strapped-preview.json"
+```
 
 #### What to verify for each tool
 
@@ -132,6 +142,20 @@ captures and SDK callback tests with their evidence type. A dual-backend scene
 case requires a live native run. Aggregate a tool as matched only after all
 its applicable cases pass. Keep the 48-tool contract and Rust smoke totals
 separate from the behavioral count.
+
+Copy this record for each behavior case. Use `N/A` for an inapplicable
+assertion and give its reason. Keep missing applicable evidence visible.
+
+```text
+Tool and case:
+Rust commit, reference MCP version, CLO version and bridge status:
+Fixture and SHA-256:
+Exact MCP arguments and any setup calls:
+Expected result, state change or retained state, and artifact checks:
+Official observation and evidence file:
+Rust observation and evidence file:
+Comparison, numeric tolerance with units if used, and verdict:
+```
 
 #### Read the evidence and reproduce a matched case
 
