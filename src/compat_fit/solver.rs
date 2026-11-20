@@ -915,7 +915,8 @@ fn mixed_meshes(
         if let Some(saved) = saved.filter(|mesh| mesh["texcoords_units"] == "mm") {
             return native_mesh(panel, saved, state, saved["velocities"].is_null());
         }
-        let target = number(panel, "particle_distance", distance);
+        let requested = number(panel, "particle_distance", distance);
+        let target = saved.map_or(requested, |mesh| number(mesh, "rest_particle_distance", requested));
         if !(3.0..=500.0).contains(&target) {
             return Err("individual pattern particle_distance must be 3..500 mm".into());
         }
@@ -1421,6 +1422,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         .filter(|mesh| mixed_pose && mesh["texcoords_units"] == "mm")
         .map(|mesh| mesh["id"].clone())
         .collect();
+    let previous_distances: HashMap<_, _> = prior_meshes.iter()
+        .filter_map(|mesh| mesh["rest_particle_distance"].as_f64().map(|distance| (mesh["id"].clone(), distance)))
+        .collect();
     let legacy_uniform = !use_native
         && !explicit_distance
         && existing["particle_distance"].is_number()
@@ -1658,6 +1662,9 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             for mesh in meshes {
                 if mixed_native_ids.contains(&mesh["id"]) {
                     mesh["texcoords_units"] = json!("mm");
+                }
+                if let Some(distance) = previous_distances.get(&mesh["id"]) {
+                    mesh["rest_particle_distance"] = json!(distance);
                 }
             }
         }

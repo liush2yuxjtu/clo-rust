@@ -110,7 +110,7 @@ fn invalidate_geometry(state: &mut Value) {
     state["simulation"] = Value::Null;
 }
 
-fn use_partial_pose(state: &mut Value) {
+pub(crate) fn use_partial_pose(state: &mut Value) {
     let pose = &mut state["simulation"];
     let uses_mm = pose["source"] == "native_saved_pose" || pose["texcoords_units"] == "mm";
     let Some(meshes) = pose.get_mut("meshes").and_then(Value::as_array_mut) else {

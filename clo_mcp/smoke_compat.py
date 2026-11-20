@@ -2055,6 +2055,59 @@ async def verify_calibrated_build_arrangement():
                       "mismatched_cache_and_manual_override": "pass"}))
 
 
+async def verify_appended_build_keeps_drape():
+    with TemporaryDirectory(prefix="clo-appended-build-drape-") as directory:
+        root = Path(directory)
+        environment = {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+                       "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints")}
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            await json_result(rust, "avatar_load", {"name_or_path": "mia"})
+            await json_result(rust, "pattern_create", {
+                "name": "Existing", "points": [[0, 0], [140, 0], [66, 100]], "arrangement": "Front",
+            })
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 40, "quality": 1})
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            original_path, original = await save("original")
+            old_mesh, = original["simulation"]["meshes"]
+            request = {"spec": {"garment": "top", "length": "waist", "particle_distance": 90},
+                       "replace_existing": False, "snapshots": False}
+            built = await json_result(rust, "garment_build", request | {"simulate_steps": 0})
+            assert built["simulation"] is None and built["checkpoint_before_build"] is None
+            path, appended = await save("appended")
+            expected = old_mesh | {"rest_particle_distance": 40.0}
+            assert appended["simulation"]["meshes"] == [expected]
+            assert [p["particle_distance"] for p in appended["patterns"]] == [90.0] * 3
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 0})
+            _, initialized = await save("initialized")
+            assert len(initialized["simulation"]["meshes"]) == 3
+            assert initialized["simulation"]["meshes"][0] == expected
+            assert initialized["simulation"]["steps"] == 3
+            await json_result(rust, "simulate", {"steps": 1})
+            _, manually_advanced = await save("manual")
+            await json_result(rust, "scene_open", {"path": str(original_path)})
+            built = await json_result(rust, "garment_build", request | {"simulate_steps": 1})
+            assert built["simulation"]["steps"] == 1
+            _, automatic = await save("automatic")
+            assert automatic["simulation"] == manually_advanced["simulation"]
+            assert automatic["simulation"]["steps"] == 4
+            assert automatic["simulation"]["quality"] == 1
+            await json_result(rust, "simulate", {"steps": 0, "particle_distance": 90})
+            _, explicitly_remeshed = await save("remeshed")
+            assert explicitly_remeshed["simulation"]["steps"] == 0
+            assert "rest_particle_distance" not in explicitly_remeshed["simulation"]["meshes"][0]
+    print(json.dumps({"tools": ["garment_build", "scene_open", "simulate"],
+                      "case": "build beside settled cloth", "requested_distance_mm": 90,
+                      "preserved_mesh_distance_mm": 40, "continued_step": 4,
+                      "matches_manual_continuation": True, "explicit_remesh": "pass"}))
+
+
 async def verify_appended_build_report():
     with TemporaryDirectory(prefix="clo-appended-build-") as directory:
         root = Path(directory)
@@ -2440,6 +2493,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-appended-build-report", action="store_const", dest="comparison",
                              const=verify_appended_build_report,
                              help="verify public build sewing rows and append beside same-name pieces")
+    comparisons.add_argument("--verify-appended-build-keeps-drape", action="store_const", dest="comparison",
+                             const=verify_appended_build_keeps_drape,
+                             help="verify builds append to an existing simulation without resetting settled cloth")
     comparisons.add_argument("--verify-calibrated-build-arrangement", action="store_const", dest="comparison",
                              const=verify_calibrated_build_arrangement,
                              help="verify build placement using saved avatar arrangement calibration")
@@ -2489,7 +2545,7 @@ if __name__ == "__main__":
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
-                                verify_interchange_append_keeps_drape)
+                                verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

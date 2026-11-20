@@ -1417,21 +1417,40 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         material,
     )?;
     let distance = number(&draft["simulation"], "particle_distance", 20.0);
+    crate::compat_scene::use_partial_pose(&mut next);
+    let resume = next["simulation"]["source"] == "mixed_saved_pose";
     if distance > 0.0 {
+        if resume {
+            let default = number(&next["simulation"], "particle_distance", 20.0);
+            let previous: Vec<_> = array(&next["patterns"]).iter()
+                .map(|panel| (panel["id"].clone(), number(panel, "particle_distance", default)))
+                .collect();
+            for mesh in array_mut(&mut next["simulation"], "meshes") {
+                if mesh["texcoords_units"] == "mm" || mesh["rest_particle_distance"].is_number() {
+                    continue;
+                }
+                if let Some((_, existing)) = previous.iter().find(|(id, _)| *id == mesh["id"]) {
+                    if *existing != distance {
+                        mesh["rest_particle_distance"] = json!(existing);
+                    }
+                }
+            }
+        }
         for pattern in array_mut(&mut next, "patterns") {
             pattern["particle_distance"] = json!(distance);
         }
     }
-    next["simulation"] = Value::Null;
     let steps = args["simulate_steps"]
         .as_i64()
         .or_else(|| draft["simulation"]["steps"].as_i64())
         .unwrap_or(120);
     let sim = if steps > 0 {
-        let mut simulation = solver::simulate(
-            &json!({"steps":steps,"particle_distance":draft["simulation"]["particle_distance"]}),
-            &mut next,
-        )?;
+        let options = if resume {
+            json!({"steps":steps})
+        } else {
+            json!({"steps":steps,"particle_distance":draft["simulation"]["particle_distance"]})
+        };
+        let mut simulation = solver::simulate(&options, &mut next)?;
         if array(&draft["pieces"])
             .iter()
             .any(|piece| piece["layer"].as_i64().is_some_and(|layer| layer != 0))

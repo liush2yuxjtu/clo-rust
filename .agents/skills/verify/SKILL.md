@@ -190,6 +190,12 @@ same-name panels. Compare the build's `a`, `b`, and `ok` sewing rows to the
 plan, then reopen the project to verify the distinct panel IDs, actual
 fabric and seam assignments, and the particle distance set by a zero-step build.
 
+Run `--verify-appended-build-keeps-drape` to append a garment at 90 mm to
+cloth simulated at 40 mm. Reopen the zero-step build and verify that the
+new panels initialize while the previous grid and velocities are preserved.
+Compare a positive-step build to the manually resumed state, including
+the step count and quality. Check an explicit remesh separately.
+
 Run `--verify-calibrated-build-arrangement` to exercise a controlled
 `CLO_MCP_STATE/calibration/<avatar>.json` fixture. Compare the reported
 front and back arrangement points, the penalty for candidate points below
