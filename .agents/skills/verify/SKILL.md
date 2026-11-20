@@ -466,6 +466,17 @@ Reopen and resume the surviving
 simulation. Set `CLO_DISPLAY_FIXTURE` to also check archived meshes and
 native seam groups after deleting a native panel.
 
+Use `--compare-native-pattern-delete` with `CLO_PATTERN_DELETE_FIXTURE`
+set to the same disposable native project open in CLO. The fixture contains
+two panels and one seam group. Compare the exact public replies for empty,
+named, duplicate, and descending batches. A missing name aborts the batch.
+An out-of-range signed 32-bit index contributes to the reported deletion
+count without removing a panel. For overflow, check the state left by the
+descending order: a positive overflow occurs before valid indices, whereas
+a negative overflow can leave earlier deletions applied. Also check typed
+`DeletePatternPiece` responses, the unaffected seam group, and the project,
+avatar and colorways readback. The comparison reopens the original project.
+
 Run `--verify-new-panels-keep-drape` to create, copy and mirror panels
 beside settled cloth. Verify the OBJ contains both posed and newly
 placed panels, then reopen and assemble the new meshes at zero steps.

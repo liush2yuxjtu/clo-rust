@@ -1093,6 +1093,12 @@ fn pattern_ref(value: &Value) -> Result<String, String> {
         .ok_or_else(|| format!("Invalid pattern index: {value}"))
 }
 
+fn signed_pattern_index(value: &Value) -> Result<i32, String> {
+    value.as_i64().or_else(|| value.as_bool().map(i64::from))
+        .and_then(|index| i32::try_from(index).ok())
+        .ok_or_else(|| "Pattern index must be a 32-bit integer".into())
+}
+
 fn find_name(records: &[Value], name: &Value) -> Option<usize> {
     let name = name.as_str()?;
     records
@@ -1319,7 +1325,7 @@ pub(super) fn invoke(
         }
         "pattern_api.AddSeamlinePairGroup" => domain("sew", &json!({"pattern_a":pattern_ref(&arg[0])?,"line_a":arg[1],"pattern_b":pattern_ref(&arg[2])?,"line_b":arg[3],"dir_a":arg[4],"dir_b":arg[5]}),state).map(|result| success(&result)),
         "pattern_api.CreatePatternWithPoints" => domain("pattern_create", &json!({"points":arg[0]}),state).map(|result| property(&result,"index")),
-        "pattern_api.DeletePatternPiece" => domain("pattern_delete", &json!({"patterns":[pattern_ref(&arg[0])?]}),state).map(|_| json!(true)),
+        "pattern_api.DeletePatternPiece" => domain("pattern_delete", &json!({"patterns":[signed_pattern_index(&arg[0])?]}),state).map(|_| json!(true)),
         "pattern_api.GetPatternCount" => Ok(json!(patterns.len())),
         "pattern_api.GetPatternIndex" | "pattern_api.GetPatternIndexW" => {
             if !arg[0].is_string() {return Err("Pattern name must be a string".into());}
@@ -1373,9 +1379,7 @@ pub(super) fn invoke(
             Ok(json!(twice_area.abs() / 2.0))
         }
         "pattern_api.GetPatternPieceName" => {
-            let raw = arg[0].as_i64().or_else(|| arg[0].as_bool().map(i64::from));
-            let index = raw.and_then(|value| i32::try_from(value).ok())
-                .ok_or("Pattern index must be a 32-bit integer")?;
+            let index = signed_pattern_index(&arg[0])?;
             let name = usize::try_from(index).ok()
                 .and_then(|index| patterns.get(index))
                 .and_then(|pattern| pattern["name"].as_str())

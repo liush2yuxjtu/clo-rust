@@ -261,6 +261,10 @@ pub(super) fn pattern_index(state: &Value, reference: &Value) -> Result<usize, S
     let name = reference
         .as_str()
         .ok_or("pattern reference must be a name or index")?;
+    named_pattern_index(patterns, name)
+}
+
+fn named_pattern_index(patterns: &[Value], name: &str) -> Result<usize, String> {
     patterns
         .iter()
         .position(|p| p["name"] == name)
@@ -481,14 +485,41 @@ fn discard_panel_pose(state: &mut Value, id: &Value) {
     }
 }
 
+fn delete_index(patterns: &[Value], reference: &Value) -> Result<i64, String> {
+    if let Some(index) = reference.as_i64() {
+        return Ok(index);
+    }
+    let reference = reference.as_str().ok_or("pattern reference must be a name or index")?;
+    let digits = reference.trim_start_matches('-');
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        if reference.starts_with("--") {
+            return Err(format!("invalid pattern index {reference:?}"));
+        }
+        return Ok(reference.parse().unwrap_or_else(|_| {
+            if reference.starts_with('-') { i64::MIN } else { i64::MAX }
+        }));
+    }
+    named_pattern_index(patterns, reference)?
+        .try_into().map_err(|_| "pattern index is too large".into())
+}
+
 pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
     let refs = args["patterns"]
         .as_array()
         .ok_or("patterns must be an array")?;
-    let indices: BTreeSet<_> = refs
+    let patterns = array(state, "patterns");
+    let requested: BTreeSet<_> = refs
         .iter()
-        .map(|r| pattern_index(state, r))
+        .map(|reference| delete_index(patterns, reference))
         .collect::<Result<_, _>>()?;
+    // CLO sorts descending. A positive overflow fails before any valid deletion,
+    // and a negative overflow fails after valid indices have been handled.
+    let overflow = "Pattern index must be a 32-bit integer";
+    if requested.last().is_some_and(|index| *index > i64::from(i32::MAX)) {
+        return Err(overflow.into());
+    }
+    let indices: Vec<_> = requested.iter().filter_map(|&index| usize::try_from(index).ok())
+        .filter(|&index| index < patterns.len()).collect();
     let removed: Vec<_> = indices
         .iter()
         .map(|i| state["patterns"][i]["id"].clone())
@@ -508,7 +539,10 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
             }
         }
     }
-    Ok(json!({"deleted": indices.len(), "pattern_count": array(state, "patterns").len()}))
+    if requested.first().is_some_and(|index| *index < i64::from(i32::MIN)) {
+        return Err(overflow.into());
+    }
+    Ok(json!({"deleted": requested.len(), "pattern_count": array(state, "patterns").len()}))
 }
 
 pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {

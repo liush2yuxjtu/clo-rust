@@ -2769,6 +2769,94 @@ async def verify_new_panels_keep_drape():
                       "invalid_arrangement_kept_panel_and_invalidated_snapshot": True}))
 
 
+async def compare_native_pattern_delete():
+    fixture = Path(os.environ["CLO_PATTERN_DELETE_FIXTURE"]).resolve(strict=True)
+    observations = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            assert (await json_result(session, "clo_status"))["bridge"] == "up"
+            path = str(fixture)
+            if backend == "official":
+                path = (await json_result(session, "scene_info"))["project_path"]
+                assert Path(path).resolve() == fixture, "open the saved fixture in CLO first"
+            request = {"path": path, "mode": "replace"}
+            await json_result(session, "scene_open", request)
+            original = await json_result(session, "scene_info")
+            first, second = [piece["name"] for piece in original["patterns"]]
+            assert original["seam_groups"] == 1
+
+            async def observe(label, tool, arguments, expected, remaining):
+                await json_result(session, "scene_open", request)
+                result = await session.call_tool(tool, arguments)
+                if expected is None:
+                    assert result.isError, (backend, label)
+                    response = None
+                else:
+                    assert not result.isError, (backend, label, result.content)
+                    response = result.structuredContent or json.loads(result.content[0].text)
+                    assert response == expected, (backend, label, response, expected)
+                after = await json_result(session, "scene_info")
+                assert [piece["name"] for piece in after["patterns"]] == remaining
+                assert [piece["index"] for piece in after["patterns"]] == list(range(len(remaining)))
+                count = await json_result(session, "seams_list")
+                assert count["count"] == after["seam_groups"] == int(len(remaining) == 2)
+                for field in ("project", "project_path", "avatars", "colorways", "current_colorway"):
+                    assert after[field] == original[field], (backend, label, field)
+                observations.setdefault(backend, {})[label] = {
+                    "response": response, "patterns": after["patterns"], "seam_groups": count["count"],
+                    "fabrics": after["fabrics"],
+                }
+
+            try:
+                cases = (
+                    ("empty", [], 0, [first, second]),
+                    ("name", [first], 1, [second]),
+                    ("aliases", [second, "01", "1", "1"], 1, [first]),
+                    ("descending", ["0", second, first], 2, []),
+                    ("missing_name", [first, "missing MCP panel"], None, [first, second]),
+                    ("positive_out_of_range", ["200"], 1, [first, second]),
+                    ("positive_mixed", ["200", second], 2, [first]),
+                    ("negative_out_of_range", ["-1"], 1, [first, second]),
+                    ("negative_mixed", ["-1", first], 2, [second]),
+                    ("positive_overflow_first", ["2147483648", first], None, [first, second]),
+                    ("negative_overflow_last", ["-2147483649", first], None, [second]),
+                    ("plus_is_name", ["+1"], None, [first, second]),
+                    ("malformed_index", ["--1", second], None, [first, second]),
+                )
+                for label, indices, deleted, remaining in cases:
+                    expected = None if deleted is None else {"deleted": deleted, "pattern_count": len(remaining)}
+                    await observe(label, "pattern_delete", {"patterns": indices}, expected, remaining)
+                api_name = "pattern_api.DeletePatternPiece"
+                for index, remaining in ((0, [second]), (99, [first, second]), (-1, [first, second])):
+                    await observe(f"typed_{index}", "clo_api_call", {"name": api_name, "args": [index]},
+                                  {"name": api_name, "value": None}, remaining)
+
+                await json_result(session, "scene_open", request)
+                original_groups = await json_result(session, "seams_list")
+                for name, offset in (("Spare A", 250), ("Spare B", 500)):
+                    await json_result(session, "pattern_create", {
+                        "name": name, "points": [[offset, 0], [offset + 80, 0], [offset + 20, 40]],
+                    })
+                sewn = await json_result(session, "sew", {
+                    "pattern_a": "Spare A", "line_a": 0, "pattern_b": "Spare B", "line_b": 0,
+                })
+                assert sewn == {"ok": True, "seam_groups": 2}
+                assert await json_result(session, "pattern_delete", {
+                    "patterns": ["Spare A", "Spare B", "2"],
+                }) == {"deleted": 2, "pattern_count": 2}
+                assert await json_result(session, "seams_list") == original_groups
+                assert await json_result(session, "scene_info") == original
+                observations[backend]["unrelated_group"] = [{
+                    key: group[key] for key in ("index", "name", "patterns")
+                } for group in original_groups["groups"]]
+            finally:
+                await json_result(session, "scene_open", request)
+    assert observations["official"] == observations["rust"], observations
+    with fixture.open("rb") as file:
+        digest = hashlib.file_digest(file, "sha256").hexdigest()
+    print(json.dumps({"fixture": fixture.name, "sha256": digest, "cases": observations["rust"]}, ensure_ascii=False))
+
+
 async def verify_delete_keeps_drape():
     with TemporaryDirectory(prefix="clo-delete-drape-") as directory:
         root = Path(directory)
@@ -4995,6 +5083,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-sew-keeps-drape", action="store_const", dest="comparison",
                              const=verify_sew_keeps_drape,
                              help="verify newly added seams solve from the saved drape")
+    comparisons.add_argument("--compare-native-pattern-delete", action="store_const", dest="comparison",
+                             const=compare_native_pattern_delete,
+                             help="compare pattern deletion and scene readback using a live saved fixture")
     comparisons.add_argument("--verify-delete-keeps-drape", action="store_const", dest="comparison",
                              const=verify_delete_keeps_drape,
                              help="verify panel deletion removes only associated meshes and sewing")
