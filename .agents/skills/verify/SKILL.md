@@ -346,6 +346,14 @@ With the official command configured, load the same saved fixture in CLO first.
 The case reads that scene without editing it. A down bridge or a different open
 project is recorded as `BLOCKED` with exit 2, alongside the Rust observations.
 
+Run `cargo test --locked completed_api_call_past_deadline_stops_the_script`
+for a Python request whose synchronous API call finishes after the deadline.
+Check that the completed mutation remains in the scene and the interpreter
+receives no reply that would let it execute a subsequent statement. Through
+MCP stdio, also create a pattern, call Python with a rename followed by a sleep
+and a second rename, and read back the first rename after the timeout. Verify
+a new Python request can read the scene.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

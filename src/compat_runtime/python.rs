@@ -12,6 +12,8 @@ thread_local! {
     static PROCESS: RefCell<Option<Runner>> = const { RefCell::new(None) };
 }
 
+const TIME_LIMIT: &str = "CLO Rust Python script exceeded its time limit";
+
 struct Runner {
     child: Child,
     input: ChildStdin,
@@ -88,20 +90,23 @@ impl Runner {
         self.send(&json!({"code":code}))?;
         let deadline = Instant::now() + timeout;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(TIME_LIMIT)?;
             let line = self
                 .replies
                 .recv_timeout(remaining)
                 .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => {
-                        "CLO Rust Python script exceeded its time limit".to_owned()
-                    }
+                    mpsc::RecvTimeoutError::Timeout => TIME_LIMIT.to_owned(),
                     mpsc::RecvTimeoutError::Disconnected => {
                         "CLO Rust Python process exited during script execution".to_owned()
                     }
                 })??;
             let reply: Value = serde_json::from_str(&line)
                 .map_err(|error| format!("Invalid Python message: {error}"))?;
+            if Instant::now() >= deadline {
+                return Err(TIME_LIMIT.into());
+            }
             match reply["kind"].as_str() {
                 Some("api") => {
                     let name = text(&reply, "name")?;
@@ -113,13 +118,18 @@ impl Runner {
                         &mut candidate,
                         domain,
                     );
-                    self.send(&match result {
+                    let response = match result {
                         Ok(value) => {
                             *state = candidate;
                             json!({"ok":true,"value":value})
                         }
                         Err(error) => json!({"ok":false,"error":error}),
-                    })?;
+                    };
+                    // Keep completed calls, then stop the interpreter before it runs more code.
+                    if Instant::now() >= deadline {
+                        return Err(TIME_LIMIT.into());
+                    }
+                    self.send(&response)?;
                 }
                 Some("done") => {
                     return Ok(Ok(json!({"value":reply["value"],"stdout":reply["stdout"]})))
@@ -171,4 +181,38 @@ pub(super) fn run(args: &Value, state: &mut Value, domain: DomainCall) -> ToolRe
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_api_call_past_deadline_stops_the_script() {
+        fn slow_domain(name: &str, _args: &Value, state: &mut Value) -> ToolResult {
+            assert_eq!(name, "pattern_create");
+            state["patterns"] = json!([{"name":"completed"}]);
+            std::thread::sleep(Duration::from_millis(400));
+            Ok(json!({"index":0}))
+        }
+
+        let mut runner = Runner::new().unwrap();
+        let mut scene = json!({"patterns":[]});
+        runner
+            .request("1", Duration::from_secs(5), &mut scene, slow_domain)
+            .unwrap()
+            .unwrap();
+        let result = runner.request(
+            "pattern_api.CreatePatternWithPoints([(0,0),(40,0),(0,40)]); result = 'resumed after deadline'",
+            Duration::from_millis(300),
+            &mut scene,
+            slow_domain,
+        );
+        assert_eq!(result.unwrap_err(), TIME_LIMIT);
+        assert_eq!(scene["patterns"], json!([{"name":"completed"}]));
+        assert!(matches!(
+            runner.replies.recv_timeout(Duration::from_millis(500)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
 }
