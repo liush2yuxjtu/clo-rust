@@ -190,13 +190,6 @@ fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("{key} must be a string"))
 }
 
-fn number(value: &Value, key: &str) -> Result<f64, String> {
-    value[key]
-        .as_f64()
-        .filter(|v| v.is_finite())
-        .ok_or_else(|| format!("{key} must be a finite number"))
-}
-
 fn flag(value: &Value, key: &str, default: bool) -> bool {
     value[key].as_bool().unwrap_or(default)
 }

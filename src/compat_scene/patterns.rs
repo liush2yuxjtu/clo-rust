@@ -1,4 +1,4 @@
-use super::{array, flag, index, invalidate_geometry, next_id, number, string, use_partial_pose, vec_mut, Reply};
+use super::{array, flag, invalidate_geometry, next_id, string, use_partial_pose, vec_mut, Reply};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -915,7 +915,12 @@ fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<(), S
         .iter()
         .rev()
         .map(|p| reflect(*p, a, b));
-    let outline = full.iter().copied().chain(mirrored).collect();
+    let outline = pts[..=start]
+        .iter()
+        .copied()
+        .chain(mirrored)
+        .chain(pts[start + 1..].iter().copied())
+        .collect();
     set_points(pattern, outline);
     pattern["half_symmetry"] = json!(half_symmetry);
     Ok(())
@@ -938,12 +943,17 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value, on: Option<bool>
         .map_or(Some(-1), nested_integer)
         .ok_or("line must be an integer")?;
     let count = corner_offsets(&points(pattern)?).len();
-    if line < -1 || line >= count as i64 {
+    i32::try_from(line).map_err(|_| "line must be a 32-bit integer")?;
+    let valid_line = (-1..count as i64).contains(&line);
+    if !valid_line && on.is_none() {
         return Err("line index is out of range".into());
     }
     let properties = &mut pattern["line_properties"];
     let line_key = line.to_string();
     let mut set = |key: &str, value: Value| {
+        if !valid_line {
+            return;
+        }
         if line == -1 {
             if let Some(entries) = properties.as_object_mut() {
                 for (index, entry) in entries {
@@ -1043,6 +1053,32 @@ fn remove_point(pattern: &mut Value, corner: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn operation_integer(args: &Value, key: &str) -> Result<i32, String> {
+    nested_integer(&args[key])
+        .or_else(|| args[key].as_bool().map(i64::from))
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| format!("{key} must be a 32-bit integer"))
+}
+
+fn copy_name(state: &Value, name: &str) -> String {
+    let (base, next, width) = name
+        .rsplit_once('_')
+        .filter(|(_, suffix)| suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|(base, suffix)| {
+            let next = suffix.parse::<u64>().ok()?.checked_add(1)?;
+            Some((base, next, suffix.len()))
+        })
+        .unwrap_or((name, 1, 1));
+    let occupied: BTreeSet<_> = array(state, "patterns")
+        .iter()
+        .filter_map(|pattern| pattern["name"].as_str())
+        .collect();
+    (next..)
+        .map(|suffix| format!("{base}_{suffix:0width$}"))
+        .find(|candidate| !occupied.contains(candidate.as_str()))
+        .expect("the number of occupied names is finite")
+}
+
 pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &request["pattern"])?;
     let op = string(request, "op")?;
@@ -1057,10 +1093,12 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             let old_id = pattern["id"].clone();
             let id = json!(next_id(state)?);
             pattern["id"] = id.clone();
+            pattern["name"] = json!(copy_name(state, string(&pattern, "name")?));
             if op == "symmetry" {
+                let [left, _, right, _] = bounds(&pattern)?;
                 flip(&mut pattern, true)?;
-            }
-            if op == "copy" {
+                move_2d(&mut pattern, &json!({"dx": (right - left) / 2. + 100.}), true)?;
+            } else {
                 move_2d(&mut pattern, args, true)?;
             }
             let new_index = array(state, "patterns").len();
@@ -1077,25 +1115,27 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             });
         }
         "unfold" => {
-            let fold = index(args, "line")?;
+            let fold = operation_integer(args, "line")?;
             let count = corner_offsets(&points(&pattern)?).len();
+            let Some(fold) = usize::try_from(fold).ok().filter(|&fold| fold < count) else {
+                return Ok(json!({"ok": false}));
+            };
             expand(&mut pattern, fold, flag(args, "half_symmetry", true))?;
-            let first = (fold + 1) % count;
-            let mapping: Vec<_> = (0..count).map(|line| {
-                (line != fold).then(|| (line + count - first) % count)
-            }).collect();
+            let mapping: Vec<_> = (0..count)
+                .map(|line| (line != fold).then(|| line + usize::from(line > fold) * (count - 2)))
+                .collect();
             remap_outline(state, &mut pattern, &mapping);
             result = json!({"ok": true});
         }
         "layer" => {
-            pattern["layer"] = json!(args["layer"].as_i64().ok_or("layer must be an integer")?)
+            pattern["layer"] = json!(operation_integer(args, "layer")?)
         }
         "particle_distance" => {
-            let mm = number(args, "mm")?;
-            if mm <= 0. {
-                return Err("particle distance must be positive".into());
+            let mm = nested_number(&args["mm"], "mm")?.max(0.8) as f32;
+            if !mm.is_finite() {
+                return Err("particle distance exceeds the supported float range".into());
             }
-            pattern["particle_distance"] = json!(mm);
+            pattern["particle_distance"] = json!(f64::from(mm));
         }
         "freeze" | "hide" | "strengthen" => pattern[op] = json!(flag(args, "on", true)),
         "elastic" => {
@@ -1107,8 +1147,17 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             line_properties(&mut pattern, op, args, Some(args.get("on").is_none_or(option_truth)))?;
         }
         "delete_line" | "delete_point" => {
-            let corner = index(args, if op == "delete_line" { "line" } else { "point" })?;
+            let target = operation_integer(args, if op == "delete_line" { "line" } else { "point" })?;
             let count = corner_offsets(&points(&pattern)?).len();
+            let Some(corner) = usize::try_from(target).ok().filter(|&target| target < count) else {
+                return Ok(result);
+            };
+            // The native deletion operates on whole shapes for outline lines,
+            // and deleting a triangle corner would leave no valid outline.
+            if op == "delete_line" || count == 3 {
+                delete(&json!({"patterns": [i]}), state)?;
+                return Ok(result);
+            }
             remove_point(&mut pattern, corner)?;
             let before = (corner + count - 1) % count;
             let mapping: Vec<_> = (0..count).map(|line| {

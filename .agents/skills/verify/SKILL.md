@@ -453,17 +453,29 @@ without the cache, and a manually changed arrangement takes precedence.
 The standard-measurement preview stays independent of calibration.
 
 Run `--verify-outline-edit-remaps` to exercise repeated relative moves and
-line/point deletion and unfolding in a portable scene. Reopen each edited
+point deletion and unfolding in a portable scene. Reopen each edited
 scene and verify that unaffected sewing uses the new line index, the
 elastic and shirring settings follow the surviving lines, and a seam
 spanning a removed line is discarded. Check that an invalid edit leaves
 the surviving sewing unchanged.
 
 Run `--verify-symmetry-sewing` with both values of `with_sewing`.
-Reopen the mirrored panel and verify that whole-edge sewing, partial
-internal sewing and self-sewing reference the expected panel IDs.
-Check reflected internal rest coordinates and confirm that both
-internal seam groups reach the Rust solver after reopening.
+Check that self-sewing is copied to the mirrored panel when requested while
+sewing to another panel remains on the original. Reopen and verify panel
+IDs, reflected internal rest coordinates and preserved native seam groups.
+
+Use `--compare-live-pattern-ops` with a live bridge and
+`CLO_PATTERN_OPS_FIXTURE` pointing to the shared two-panel
+`multi-colorway-colored.zprj`. Start each request on the same scene. Compare
+the response, panel order, names, fabric, layer, particle distance, seam
+members and ordered outline coordinates. Check copied names and positions,
+self-sewing, numeric strings, default and invalid arguments, the order
+after unfolding, and no changes after rejected requests. Deleting an outline
+line removes the whole piece. Deleting a triangle corner also removes the
+piece. An out-of-range deletion returns success with the scene unchanged.
+Invalid unfold indices return `ok=false`. Coordinate tolerance is 0.001 mm
+for the native single-precision geometry. Verify curved folds, internal-line
+deletion and post-simulation behavior separately.
 
 Run `--verify-display-edits-keep-drape` to verify that 2D movement,
 3D visibility and strengthening preserve an existing pose and velocities.

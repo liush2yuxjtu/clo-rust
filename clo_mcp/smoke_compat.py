@@ -3545,6 +3545,112 @@ async def verify_sew_keeps_drape():
                       "native_group_count_before_after": native_counts, "api_order_and_memberships_match": True}))
 
 
+async def compare_live_pattern_ops():
+    fixture = Path(os.environ["CLO_PATTERN_OPS_FIXTURE"])
+    assert fixture.is_file(), fixture
+    outline = [[20, 100], [90, 100], [120, 178], [45, 202]]
+    cases = (
+        ("rename", {"name": "服装 A"}, False, False),
+        ("move_2d", {"dx": "25.5", "dy": -11}, False, False),
+        ("move_2d", {"x": "20", "y": -23}, False, False),
+        ("move_2d", {"x": 20}, False, True),
+        ("flip", {}, True, False),
+        ("flip", {"horizontal": False, "each": False}, True, False),
+        ("copy", {}, False, False),
+        ("copy", {"dx": 35, "dy": -18}, True, False),
+        ("symmetry", {"with_sewing": False}, True, False),
+        ("symmetry", {}, False, False),
+        ("unfold", {"line": 0}, True, False),
+        ("unfold", {"line": "2", "half_symmetry": False}, True, False),
+        ("unfold", {"line": -1}, True, False),
+        ("unfold", {"line": 99}, True, False),
+        ("layer", {"layer": "3"}, False, False),
+        ("layer", {"layer": -2}, False, False),
+        ("particle_distance", {"mm": "9.33"}, False, False),
+        ("particle_distance", {"mm": 0}, False, False),
+        ("particle_distance", {"mm": -10}, False, False),
+        ("particle_distance", {"mm": 10000}, False, False),
+        ("elastic", {"line": 99, "strength": 20}, False, False),
+        ("delete_line", {"line": 1}, True, False),
+        ("delete_line", {"line": 99}, True, False),
+        ("delete_point", {"point": 1}, True, False),
+        ("delete_point", {"point": 1}, False, False),
+        ("delete_point", {"point": 99}, True, False),
+        ("unknown", {}, False, True),
+    )
+    tolerance = 0.001
+
+    async def read(session):
+        listing = await json_result(session, "pattern_list")
+        panels = []
+        for i in range(listing["count"]):
+            panel = await json_result(session, "pattern_info", {"pattern": str(i)})
+            source = panel["input_info"]["Pattern InputInformation"][0]
+            points = [(point["Point positionX"], point["Point positionY"]) for point in source["PointList"]
+                      if "Point index" in point]
+            properties = {key: panel[key] for key in
+                          ("name", "fabric_index", "layer", "particle_distance", "seam_groups")}
+            coordinates = [*panel["pos_2d"], float(panel["bbox"]["Width"]), float(panel["bbox"]["Height"])]
+            coordinates.extend(coordinate for point in points for coordinate in point)
+            panels.append((properties, coordinates))
+        seams = await json_result(session, "seams_list")
+        return panels, [group["patterns"] for group in seams["groups"]]
+
+    def same(clo, rust):
+        assert clo[1] == rust[1] and len(clo[0]) == len(rust[0]), (clo, rust)
+        for (a, x), (b, y) in zip(clo[0], rust[0], strict=True):
+            assert a == b, (a, b)
+            assert len(x) == len(y) and all(abs(i - j) <= tolerance for i, j in zip(x, y, strict=True)), (x, y)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        evidence = []
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+            for op, args, add_panel, expected_error in cases:
+                trial = {"pattern": "Trial_01" if add_panel else "Front", "op": op, "args": args}
+                before, after, replies = [], [], []
+                for session in (clo, rust):
+                    await json_result(session, "scene_open", {"path": str(fixture)})
+                    if add_panel:
+                        await json_result(session, "pattern_create", {"name": "Trial_01", "points": outline})
+                    before.append(await read(session))
+                    if expected_error:
+                        rejected = await session.call_tool("pattern_ops", trial)
+                        assert rejected.isError, trial
+                        replies.append("error")
+                    else:
+                        replies.append(await json_result(session, "pattern_ops", trial))
+                    after.append(await read(session))
+                    if expected_error or replies[-1].get("ok") is False:
+                        assert before[-1] == after[-1], trial
+                assert replies[0] == replies[1], (trial, replies)
+                same(*before)
+                same(*after)
+                evidence.append({"op": op, "args": args, "response": replies[0],
+                                 "panels_after": [p[0]["name"] for p in after[0][0]], "seams_after": after[0][1]})
+
+            for session in (clo, rust):
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                await json_result(session, "pattern_create", {"name": "Other", "points": [[0, 0], [45, 0], [60, 60], [8, 80]]})
+                await json_result(session, "sew", {"pattern_a": "Other", "line_a": 0,
+                                                  "pattern_b": "Other", "line_b": 1})
+                for expected in ("Other_1", "Other_2"):
+                    await json_result(session, "pattern_ops", {"pattern": "Other", "op": "symmetry"})
+                    panel = await json_result(session, "pattern_info", {"pattern": expected})
+                    assert panel["pos_2d"] == [160.0, 40.0]
+                assert (await read(session))[1] == [["Other"], ["Other_1"], ["Other_2"]]
+        finally:
+            if original["project_path"]:
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "pattern_ops", "cases": evidence, "repeated_self_seam_symmetry": True,
+                      "geometry_tolerance_mm": tolerance, "result": "pass"}, ensure_ascii=False))
+
+
 async def verify_display_edits_keep_drape():
     with TemporaryDirectory(prefix="clo-display-edits-") as directory:
         root = Path(directory)
@@ -4357,27 +4463,20 @@ async def verify_symmetry_sewing():
                 assert mirrored["inner_seam_rest"] == [[[[85, 12], [70, 35]]]]
                 assert scene["seams"][:2] == initial["seams"]
                 assert scene["native_seam_groups"][:2] == initial["native_seam_groups"]
+                assert scene["native_seam_groups"] == initial["native_seam_groups"]
                 if with_sewing:
-                    full, partial = scene["native_seam_groups"][2:]
-                    assert full["id"] == 3 and partial["id"] == 4
-                    for copied, source in zip((full, partial), initial["native_seam_groups"], strict=True):
-                        expected = json.loads(json.dumps(source["segments"]))
-                        expected[0][0]["pattern_id"] = mirrored["id"]
-                        assert copied["segments"] == expected
-                    copied_seam, self_seam = scene["seams"][2:]
-                    assert copied_seam["pattern_a"] == mirrored["id"] and copied_seam["native_group"] == full["id"]
-                    assert copied_seam["pattern_b"] == b
+                    self_seam, = scene["seams"][2:]
                     assert self_seam["pattern_a"] == self_seam["pattern_b"] == mirrored["id"]
                 else:
-                    assert len(scene["seams"]) == len(scene["native_seam_groups"]) == 2
+                    assert scene["seams"] == initial["seams"]
                 await json_result(rust, "scene_open", {"path": str(path)})
-                assert (await json_result(rust, "seams_list"))["count"] == (6 if with_sewing else 3)
+                assert (await json_result(rust, "seams_list"))["count"] == (4 if with_sewing else 3)
                 if with_sewing:
                     simulated = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 50})
-                    assert simulated["native_inner_seam_groups"] == 2
+                    assert simulated["native_inner_seam_groups"] == 1
     print(json.dumps({"tools": ["pattern_ops", "seams_list", "scene_open", "simulate"],
                       "case": "symmetry with sewing", "with_sewing_false_groups": 3,
-                      "with_sewing_true_groups": 6, "solver_inner_seam_groups": 2,
+                      "with_sewing_true_groups": 4, "solver_inner_seam_groups": 1,
                       "reopen_and_remap": "pass"}))
 
 
@@ -4487,7 +4586,6 @@ async def verify_outline_edit_remaps():
             report = []
             for op, args, line, shirring in (
                 ("delete_point", {"point": 1}, 2, 3),
-                ("delete_line", {"line": 1}, 2, 3),
                 ("unfold", {"line": 4, "half_symmetry": False}, 3, None),
             ):
                 await json_result(rust, "scene_open", {"path": str(fixture)})
@@ -4509,9 +4607,10 @@ async def verify_outline_edit_remaps():
                 assert properties["-1"]["elastic"]["strength"] == 0.5
                 shirred = [int(n) for n, p in properties.items() if p.get("shirring", {}).get("on")]
                 assert shirred == ([] if shirring is None else [shirring])
-                invalid = await rust.call_tool("pattern_ops", {"pattern": "Front", "op": "delete_point",
-                                                               "args": {"point": 99}})
-                assert invalid.isError and await json_result(rust, "seams_list") == groups
+                invalid = await json_result(rust, "pattern_ops", {"pattern": "Front", "op": "delete_point",
+                                                                  "args": {"point": 99}})
+                assert invalid == {"index": 0, "op": "delete_point", "ok": True}
+                assert await json_result(rust, "seams_list") == groups
                 report.append({"operation": op, "retained_line": line, "native_groups": groups["count"]})
     print(json.dumps({"tools": ["pattern_edit_points", "pattern_ops", "seams_list", "scene_open"],
                       "case": "outline-edit seam remap", "edits": report, "repeated_relative_move": "pass"}))
@@ -6091,6 +6190,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-symmetry-sewing", action="store_const", dest="comparison",
                              const=verify_symmetry_sewing,
                              help="verify symmetry duplicates native sewing and mirrored rest geometry")
+    comparisons.add_argument("--compare-live-pattern-ops", action="store_const", dest="comparison",
+                             const=compare_live_pattern_ops,
+                             help="compare public pattern operations with native CLO and read back the affected state")
     comparisons.add_argument("--verify-display-edits-keep-drape", action="store_const", dest="comparison",
                              const=verify_display_edits_keep_drape,
                              help="verify layout, visibility and strength edits preserve saved drape")

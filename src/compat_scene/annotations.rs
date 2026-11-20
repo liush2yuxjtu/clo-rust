@@ -229,10 +229,13 @@ where
 pub(super) fn duplicate_sewing(state: &mut Value, old: &Value, new: &Value) -> Result<(), String> {
     let map_panel = |id: &Value| Ok(if id == old { new.clone() } else { id.clone() });
     let groups = array(state, "native_seam_groups").iter()
-        .filter(|group| members(group).contains(&old));
+        .filter(|group| {
+            let panels = members(group);
+            !panels.is_empty() && panels.iter().all(|id| *id == old)
+        });
     let (groups, mapping) = remap(state, groups, map_panel)?;
     let joins = array(state, "seams").iter()
-        .filter(|seam| seam["pattern_a"] == *old || seam["pattern_b"] == *old)
+        .filter(|seam| seam["pattern_a"] == *old && seam["pattern_b"] == *old)
         .cloned()
         .map(|mut seam| {
             for key in ["pattern_a", "pattern_b"] {
