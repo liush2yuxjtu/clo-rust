@@ -350,15 +350,48 @@ async def compare_saved_fabric_list():
                       "catalog_fields_compared": compared, "current": rust["current"]}))
 
 
-async def main(compare_library=False, compare_avatars=False, compare_fabrics=False):
-    if compare_library:
-        await compare_fabric_library()
-        return
-    if compare_avatars:
-        await compare_avatar_library()
-        return
-    if compare_fabrics:
-        await compare_saved_fabric_list()
+async def compare_saved_pattern_settings():
+    async def read(session):
+        listed = await json_result(session, "pattern_list")
+        count = listed["count"]
+        assert count > 0
+        sample = min(8, count)
+        indices = [i * (count - 1) // max(1, sample - 1) for i in range(sample)]
+        panels = [await json_result(session, "pattern_info", {"pattern": str(i)}) for i in indices]
+        missing = await session.call_tool("pattern_info", {"pattern": "__clo_verify_missing_panel__"})
+        assert missing.isError
+        return listed, panels
+
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        project = Path((await json_result(session, "scene_info"))["project_path"])
+        official, reference_panels = await read(session)
+    assert project.is_file() and project.suffix.lower() in {".zprj", ".zpac"}, project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust, rust_panels = await read(session)
+
+    def project_fields(rows, keys):
+        return [{key: row[key] for key in keys} for row in rows]
+
+    metadata = ("index", "name", "fabric_index", "arrangement")
+    assert official["count"] == rust["count"]
+    assert project_fields(official["patterns"], metadata) == project_fields(rust["patterns"], metadata)
+    metadata += ("layer", "particle_distance")
+    assert project_fields(reference_panels, metadata) == project_fields(rust_panels, metadata)
+    print(json.dumps({
+        "tools": ["pattern_list", "pattern_info"],
+        "panels": rust["count"],
+        "settings_samples": len(rust_panels),
+        "missing_panel_error": "pass",
+        "seam_groups": {"official": official["seam_groups"], "rust": rust["seam_groups"]},
+    }))
+
+
+async def main(comparison=None):
+    if comparison is not None:
+        await comparison()
         return
     await smoke_rust()
     if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
@@ -368,13 +401,19 @@ async def main(compare_library=False, compare_avatars=False, compare_fabrics=Fal
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
-    comparisons.add_argument("--compare-fabric-library", action="store_true",
+    comparisons.add_argument("--compare-fabric-library", action="store_const", dest="comparison",
+                             const=compare_fabric_library,
                         help="compare both live backends against the same CLO fabric library")
-    comparisons.add_argument("--compare-avatar-library", action="store_true",
+    comparisons.add_argument("--compare-avatar-library", action="store_const", dest="comparison",
+                             const=compare_avatar_library,
                              help="compare both live backends against the same CLO avatar library")
-    comparisons.add_argument("--compare-saved-fabric-list", action="store_true",
+    comparisons.add_argument("--compare-saved-fabric-list", action="store_const", dest="comparison",
+                             const=compare_saved_fabric_list,
                              help="compare live fabric metadata against the same saved CLO project in Rust")
+    comparisons.add_argument("--compare-saved-pattern-settings", action="store_const", dest="comparison",
+                             const=compare_saved_pattern_settings,
+                             help="compare live pattern settings against the same saved CLO project in Rust")
     args = parser.parse_args()
-    if (args.compare_fabric_library or args.compare_avatar_library or args.compare_saved_fabric_list) and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+    if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
-    asyncio.run(main(args.compare_fabric_library, args.compare_avatar_library, args.compare_saved_fabric_list))
+    asyncio.run(main(args.comparison))

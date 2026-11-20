@@ -282,6 +282,7 @@ fn arrangement_details(state: &Value, name: &str) -> Value {
     match arrangement(state, name) {
         Ok((_, choice)) if choice.is_object() => choice.clone(),
         Ok((_, _)) => json!({"ArrangementName": name}),
+        Err(_) if !name.is_empty() => json!({"ArrangementName":name}),
         Err(_) => Value::Null,
     }
 }
@@ -344,6 +345,13 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
     }));
     let limits = bounds(pattern)?;
     let [left, bottom, right, top] = limits;
+    let arrangement = if pattern["saved_arrangement"].is_object()
+        && pattern["saved_arrangement"]["ArrangementName"] == pattern["arrangement"]
+    {
+        pattern["saved_arrangement"].clone()
+    } else {
+        arrangement_details(state, pattern["arrangement"].as_str().unwrap_or(""))
+    };
     Ok(json!({
         "index": i, "name": pattern["name"], "bbox": bbox(limits), "pos_2d": centre(limits),
         "line_info": {"lines": lines, "lineCount": lines.len(), "patternName": pattern["name"],
@@ -352,7 +360,7 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
         "input_info": {"Pattern InputInformation": [{"Pattern index": i.to_string(), "Pattern name": pattern["name"],
             "PointList": records, "LineList": line_list, "Children Information": [{"Children shape count": "0"}]}]},
         "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0),
-        "arrangement": arrangement_details(state, pattern["arrangement"].as_str().unwrap_or("")),
+        "arrangement": arrangement,
         "seam_groups": group_indices(state, pattern), "layer": pattern["layer"].as_i64().unwrap_or(0),
         "particle_distance": pattern["particle_distance"].as_f64().unwrap_or(20.0)
     }))
@@ -420,6 +428,10 @@ pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
     arrangement(state, name)?;
     let details = arrangement_details(state, name);
     state["patterns"][i]["arrangement"] = json!(name);
+    state["patterns"][i]
+        .as_object_mut()
+        .expect("pattern record")
+        .remove("saved_arrangement");
     invalidate_geometry(state);
     Ok(json!({"index": i, "arrangement": details}))
 }

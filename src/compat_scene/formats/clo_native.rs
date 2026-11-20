@@ -368,6 +368,7 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
             "id": i + 1, "name": panel.name, "points": points, "sampled_polyline": true, "arrangement": "", "fabric_index": 0
         }));
     }
+    let panel_settings_error = super::native_pose::restore_panel_settings(pac, &mut patterns).err();
     let sewing = super::native_seams::read(pac, &edge_counts)?;
     let (fabrics, fabric_error) = match super::native_materials::read(pac, &patterns) {
         Ok(materials) => {
@@ -388,7 +389,8 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         "full_edge_seams_restored": sewing.constraints.len(),
         "unreadable_seam_records": sewing.unreadable,
         "saved_pose_meshes": pose.len(), "saved_pose_unavailable": pose_error,
-        "fabric_records": fabrics.len(), "fabric_records_unavailable": fabric_error
+        "fabric_records": fabrics.len(), "fabric_records_unavailable": fabric_error,
+        "panel_settings_unavailable": panel_settings_error
     });
     Ok(json!({
         "patterns": patterns, "seams": sewing.constraints,

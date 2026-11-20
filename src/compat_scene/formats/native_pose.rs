@@ -202,6 +202,68 @@ pub(super) fn panel_records<'a>(
     Ok(result)
 }
 
+pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result<(), String> {
+    let root = Fields::read(pac)?;
+    for (record, panel) in panel_records(&root, panels)?.iter().zip(panels) {
+        if let Some(mm) = float(record, b"fEdgeLength").filter(|mm| *mm > 0.0) {
+            panel["particle_distance"] = json!(mm);
+        }
+        if let Ok(dynamics) = record.map(b"mapPatternDynamics") {
+            if let Some(bytes) = dynamics
+                .get(b"iLayer", 4)
+                .ok()
+                .and_then(|value| value.try_into().ok())
+            {
+                panel["layer"] = json!(i32::from_le_bytes(bytes));
+            }
+        }
+        if let Ok(arrangement) = record.map(b"mapArrange") {
+            if let Some(settings) = arrangement_settings(&arrangement) {
+                panel["arrangement"] = settings["ArrangementName"].clone();
+                panel["saved_arrangement"] = settings;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn float(record: &Fields<'_>, key: &[u8]) -> Option<f32> {
+    let value = f32::from_le_bytes(record.get(key, 6).ok()?.try_into().ok()?);
+    value.is_finite().then_some(value)
+}
+
+fn arrangement_settings(record: &Fields<'_>) -> Option<Value> {
+    let name = std::str::from_utf8(record.get(b"qsNameUTF8", BYTE_TYPE).ok()?).ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    let mut settings = json!({"ArrangementName": name});
+    if record.get(b"enType", 4).ok() == Some(&1i32.to_le_bytes()) {
+        settings["ArrangementType"] = json!("Curved");
+        for (key, field, scale, origin) in [
+            (
+                b"fNormalizedArcLength".as_slice(),
+                "ArrangementOffsetX",
+                100.0,
+                50.0,
+            ),
+            (
+                b"fNormalizedHeight".as_slice(),
+                "ArrangementOffsetY",
+                100.0,
+                50.0,
+            ),
+            (b"fOffset".as_slice(), "ArrangementOffsetZ", 0.5, 50.0),
+            (b"fAngle".as_slice(), "ArrangementOrientation", 1.0, 180.0),
+        ] {
+            if let Some(value) = float(record, key) {
+                settings[field] = json!((value * scale + origin).to_string());
+            }
+        }
+    }
+    Some(settings)
+}
+
 pub(super) fn read(pac: &[u8], panels: &[Value]) -> Result<Vec<Value>, String> {
     panel_records(&Fields::read(pac)?, panels)?
         .iter()

@@ -71,6 +71,12 @@ The case reads the official `fabric_list`, opens the saved project in Rust,
 sets the same current fabric in the disposable Rust session, and compares names,
 indices, selection readback and each public catalog field reported by CLO.
 
+Use `--compare-saved-pattern-settings` with a saved project and no unsaved
+pattern edits in CLO. The case compares names, indices, materials and arrangement
+names for every panel, checks detailed arrangement, layer and particle distance
+for up to eight panels, and exercises a missing panel. The reported seam-group
+counts are separate observations. The case does not assert line geometry or sewing parity.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.
