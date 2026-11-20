@@ -4011,6 +4011,89 @@ async def verify_native_colorway_textures():
     print(json.dumps({"case": "native multi-colorway base textures", "formats": checked}))
 
 
+async def verify_native_texture_transforms():
+    reference = Path(os.environ["CLO_NATIVE_TEXTURE_TRANSFORM_EXPORTS"]).resolve(strict=True)
+    tolerance = 2e-5
+    raw_millimetre_tolerance = 5e-5
+
+    def gltf_uv(path):
+        model, binary = read_gltf_export(path)
+        coordinates = {"accessor": []}
+        for mesh in model["meshes"]:
+            for primitive in mesh["primitives"]:
+                attributes = primitive["attributes"]
+                assert {name for name in attributes if name.startswith("TEXCOORD_")} == {"TEXCOORD_0"}
+                accessor = model["accessors"][attributes["TEXCOORD_0"]]
+                view = model["bufferViews"][accessor["bufferView"]]
+                start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+                points = [
+                    struct.unpack_from("<2f", binary, start + i * view.get("byteStride", 8))
+                    for i in range(accessor["count"])
+                ]
+                coordinates["accessor"].extend(points)
+                material = model["materials"][primitive["material"]]
+                base = material["pbrMetallicRoughness"].get("baseColorTexture")
+                for kind, texture in (("base", base), ("normal", material.get("normalTexture"))):
+                    if texture is None:
+                        continue
+                    transform = texture["extensions"]["KHR_texture_transform"]
+                    assert set(transform) <= {"scale", "offset"}
+                    coordinates.setdefault(kind + "_scale", []).append(transform["scale"])
+                    if "offset" in transform:
+                        coordinates.setdefault(kind + "_offset", []).append(transform["offset"])
+                    su, sv = transform["scale"]
+                    x, y = transform.get("offset", [0, 0])
+                    coordinates.setdefault(kind, []).extend((u * su + x, v * sv + y) for u, v in points)
+        return coordinates
+
+    with TemporaryDirectory(prefix="clo-texture-transforms-") as directory:
+        root = Path(directory)
+
+        async def read_uv(path):
+            if path.suffix in (".glb", ".gltf"):
+                return gltf_uv(path)
+            if path.suffix == ".obj":
+                return {"accessor": [
+                    tuple(map(float, line.split()[1:3]))
+                    for line in path.read_text().splitlines() if line.startswith("vt ")
+                ]}
+            async with open_backend("rust") as reader:
+                await json_result(reader, "scene_open", {"path": str(path)})
+                saved = root / "fbx-readback.clorust"
+                await json_result(reader, "scene_save", {"path": str(saved), "thumbnail": False})
+                scene = json.loads(saved.read_text())["scene"]
+                return {"accessor": [uv for mesh in scene["imported_meshes"] for uv in mesh["texcoords"]]}
+
+        checked = {}
+        async with open_backend("rust") as session:
+            for case in ("base", "rotate", "offset", "mixed", "dual", "normal-only"):
+                stem = f"uv-probe-{case}"
+                fixture = reference / (stem + ".zpac")
+                await json_result(session, "scene_open", {"path": str(fixture), "mode": "replace"})
+                before = await json_result(session, "scene_info")
+                checked[case] = {}
+                for extension in ("glb", "gltf", "obj", "fbx"):
+                    output = root / f"{stem}.{extension}"
+                    await json_result(session, "scene_export", {"path": str(output), "colorways": False})
+                    native = await read_uv(reference / output.name)
+                    rust = await read_uv(output)
+                    assert native.keys() == rust.keys(), (case, extension, native.keys(), rust.keys())
+                    for key, expected in native.items():
+                        actual = rust[key]
+                        limit = raw_millimetre_tolerance if key == "accessor" and extension in ("glb", "gltf") else tolerance
+                        # Exporters can deduplicate or order UVs differently. Check both directions.
+                        for points, targets in ((actual, expected), (expected, actual)):
+                            assert points and targets, (case, extension, key)
+                            for u, v in points:
+                                assert any(abs(u - x) < limit and abs(v - y) < limit
+                                           for x, y in targets), (case, extension, key, (u, v))
+                    checked[case][extension] = len(rust["accessor"])
+                assert await json_result(session, "scene_info") == before
+    print(json.dumps({"case": "native planar texture transforms", "uv_tolerance": tolerance,
+                      "raw_mm_tolerance": raw_millimetre_tolerance,
+                      "coordinate_counts": checked, "scene_unchanged": True}))
+
+
 async def verify_native_colorway_normals():
     from io import BytesIO
     from PIL import Image
@@ -4677,6 +4760,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-colorway-normals", action="store_const", dest="comparison",
                              const=verify_native_colorway_normals,
                              help="compare exported normal maps with the Boat reference")
+    comparisons.add_argument("--verify-native-texture-transforms", action="store_const", dest="comparison",
+                             const=verify_native_texture_transforms,
+                             help="compare planar texture rotations and offsets with Boat exports")
     comparisons.add_argument("--verify-native-colorway-refresh", action="store_const", dest="comparison",
                              const=verify_native_colorway_refresh,
                              help="verify colorway exports after native save and refresh")
@@ -4692,6 +4778,7 @@ if __name__ == "__main__":
                                 verify_native_append, verify_mixed_native_append, verify_reordered_native_archives,
                                 verify_native_colorway_exports, verify_native_colorway_textures,
                                 verify_native_colorway_normals, verify_native_colorway_refresh,
+                                verify_native_texture_transforms,
                                 verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_scene_open_ui_state, verify_scene_clear_state, verify_garment_session_history,

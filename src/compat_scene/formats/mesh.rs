@@ -502,8 +502,13 @@ fn gltf_export(
                     };
                     images.push(image);
                     let mut reference = json!({"index": textures.len()});
-                    if let Some(scale) = texture_scale(fabric, kind).filter(|_| mesh.rest_mm_uv) {
-                        reference["extensions"] = json!({"KHR_texture_transform": {"scale": scale}});
+                    if let Some(mapping) = texture_mapping(fabric, kind).filter(|_| mesh.rest_mm_uv) {
+                        let mut transform = json!({"scale": mapping.scale});
+                        if mapping.translation != [0.0; 2] {
+                            let [u, v] = mapping.rotate(mapping.translation);
+                            transform["offset"] = json!([-u * mapping.scale[0], -v * mapping.scale[1]]);
+                        }
+                        reference["extensions"] = json!({"KHR_texture_transform": transform});
                         texture_transform = true;
                     }
                     textures.push(json!({"source": images.len() - 1}));
@@ -692,23 +697,51 @@ fn texture_map<'a>(fabric: &'a Value, kind: &str) -> Option<&'a str> {
     fabric["texture_maps"][kind].as_str().filter(|path| !path.is_empty())
 }
 
-fn texture_scale(fabric: &Value, kind: &str) -> Option<[f64; 2]> {
+struct TextureMapping {
+    scale: [f64; 2],
+    angle: f64,
+    translation: [f64; 2],
+}
+
+impl TextureMapping {
+    fn rotate(&self, [u, v]: [f64; 2]) -> [f64; 2] {
+        let (sin, cos) = self.angle.sin_cos();
+        [u * cos - v * sin, u * sin + v * cos]
+    }
+}
+
+fn texture_mapping(fabric: &Value, kind: &str) -> Option<TextureMapping> {
     texture_map(fabric, kind)?;
     let size = fabric["native_texture_sizes_mm"].get(kind)
         .or_else(|| (kind == "base").then(|| &fabric["native_base_texture_size_mm"]))?;
-    let scale: [f64; 2] = serde_json::from_value(size.clone()).ok()?;
-    scale.iter().all(|n| n.is_finite() && *n > 0.0).then(|| scale.map(f64::recip))
+    let size: [f64; 2] = serde_json::from_value(size.clone()).ok()?;
+    if !size.iter().all(|n| n.is_finite() && *n > 0.0) {
+        return None;
+    }
+    let transform = &fabric["native_texture_transforms"][kind];
+    let angle = transform["angle_degrees"].as_f64().unwrap_or_default().to_radians();
+    let [x, y] = serde_json::from_value(transform["translation_mm"].clone()).unwrap_or_default();
+    Some(TextureMapping { scale: size.map(f64::recip), angle, translation: [x, -y] })
 }
 
-fn export_uvs<'a>(meshes: &'a [Mesh], fabrics: &[Value], use_gltf: bool) -> Cow<'a, [Mesh]> {
+fn export_uvs<'a>(meshes: &'a [Mesh], fabrics: &[Value], format: &str) -> Cow<'a, [Mesh]> {
     if !meshes.iter().any(|mesh| mesh.rest_mm_uv) {
         return Cow::Borrowed(meshes);
     }
+    let use_gltf = matches!(format, "glb" | "gltf");
     let mut prepared = meshes.to_vec();
     for mesh in prepared.iter_mut().filter(|mesh| mesh.rest_mm_uv) {
-        let scale = fabrics.iter().find(|fabric| fabric["index"] == mesh.fabric_index)
-            .and_then(|fabric| texture_scale(fabric, "base").or_else(|| texture_scale(fabric, "normal")));
-        if let Some([su, sv]) = scale.filter(|_| !mesh.texcoords.is_empty()) {
+        let mapping = fabrics.iter().find(|fabric| fabric["index"] == mesh.fabric_index)
+            .and_then(|fabric| texture_mapping(fabric, "base").or_else(|| {
+                let mut normal = texture_mapping(fabric, "normal")?;
+                // With only a normal map, glTF and FBX retain rest coordinates.
+                // glTF still emits the normal map's own scale and offset.
+                if format != "obj" {
+                    normal = TextureMapping { scale: [1.0, 1.0], angle: 0.0, translation: [0.0; 2] };
+                }
+                Some(normal)
+            }));
+        if let Some(mapping) = mapping.filter(|_| !mesh.texcoords.is_empty()) {
             let center = std::array::from_fn::<_, 2, _>(|axis| {
                 let values = mesh.texcoords.iter().map(|point| point[axis]);
                 let (lo, hi) = values.fold((f64::INFINITY, f64::NEG_INFINITY),
@@ -717,7 +750,14 @@ fn export_uvs<'a>(meshes: &'a [Mesh], fabrics: &[Value], use_gltf: bool) -> Cow<
             });
             for point in &mut mesh.texcoords {
                 let (u, v) = (point[0] - center[0], center[1] - point[1]);
-                *point = if use_gltf { [u, v] } else { [u * su, 1.0 + v * sv] };
+                *point = if use_gltf {
+                    // CLO shares the base rotation across the UV accessor, with per-map scale and offset.
+                    mapping.rotate([u, v])
+                } else {
+                    let [x, y] = mapping.translation;
+                    let [s, t] = mapping.rotate([u - x, v - y]);
+                    [s * mapping.scale[0], 1.0 + t * mapping.scale[1]]
+                };
             }
         } else {
             mesh.rest_mm_uv = false;
@@ -735,7 +775,7 @@ fn write_mesh_files(
     fabrics: &[Value],
     named_sidecars: bool,
 ) -> Result<Vec<PathBuf>, String> {
-    let meshes = export_uvs(meshes, fabrics, matches!(format, "glb" | "gltf"));
+    let meshes = export_uvs(meshes, fabrics, format);
     let mut files = vec![path.to_owned()];
     match format {
         "fbx" => fbx_export::export(path, &meshes, garment_count, fabrics, named_sidecars)?,

@@ -84,20 +84,25 @@ fn texture_label<'a>(texture: &Fields<'a>) -> Option<&'a str> {
     Path::new(original.rsplit(['/', '\\']).next()?).file_stem()?.to_str()
 }
 
-fn texture_size_mm(texture: &Fields<'_>) -> Option<[f64; 2]> {
-    // The recorded straight, untranslated mapping uses a physical repeat size in millimetres.
-    if integer(texture, b"enMappingType") != Ok(0)
-        || texture.get(b"fSignedAngle", 6).ok()? != 0f32.to_le_bytes()
-        || texture.get(b"v2Translation", 10).ok()? != [0; 8]
-    {
-        return None;
-    }
-    let bytes = texture.get(b"v2PhysicalSize", 10).ok()?;
-    let size = [
+fn texture_vector(texture: &Fields<'_>, key: &[u8]) -> Option<[f64; 2]> {
+    let bytes = texture.get(key, 10).ok()?;
+    let values = [
         f64::from(f32::from_le_bytes(bytes.get(..4)?.try_into().ok()?)),
         f64::from(f32::from_le_bytes(bytes.get(4..)?.try_into().ok()?)),
     ];
-    size.iter().all(|value| value.is_finite() && *value > 0.0).then_some(size)
+    values.iter().all(|value| value.is_finite()).then_some(values)
+}
+
+fn texture_mapping(texture: &Fields<'_>) -> Option<([f64; 2], f64, [f64; 2])> {
+    if integer(texture, b"enMappingType") != Ok(0) {
+        return None;
+    }
+    let size = texture_vector(texture, b"v2PhysicalSize")?;
+    let raw = texture.get(b"fSignedAngle", 6).ok()?.try_into().ok()?;
+    let angle = f64::from(f32::from_le_bytes(raw));
+    let translation = texture_vector(texture, b"v2Translation")?;
+    (angle.is_finite() && size.iter().all(|value| *value > 0.0))
+        .then_some((size, angle, translation))
 }
 
 pub(super) fn front_desaturated(material: &Fields<'_>) -> Result<bool, String> {
@@ -262,8 +267,12 @@ pub(super) fn hydrate<R: Read + Seek>(
             if let Some(label) = texture_label(&texture) {
                 entry["native_texture_names"][key] = json!(label);
             }
-            if let Some(size) = texture_size_mm(&texture) {
+            if let Some((size, angle, translation)) = texture_mapping(&texture) {
                 entry["native_texture_sizes_mm"][key] = json!(size);
+                if angle != 0.0 || translation != [0.0; 2] {
+                    entry["native_texture_transforms"][key] =
+                        json!({"angle_degrees": angle, "translation_mm": translation});
+                }
             }
         }
         Ok(())

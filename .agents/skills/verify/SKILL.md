@@ -534,6 +534,27 @@ repeat scale. Set `CLO_NATIVE_PBR_EXPORTS` to the capture with roughness and
 opacity as well to compare OBJ sidecar names and pixels, and FBX opacity
 texture binding.
 
+#### Compare native planar texture transforms
+
+In official CLO, open the same two-panel ZPAC fresh for each case. Set the
+active colorway to 0. Use `utility_api.GetMaterialTextureTransformations`
+and `SetMaterialTextureTransformations` with fabric 0, colorway 0 and front
+material options. Export GLB, glTF with its BIN, OBJ, and FBX through
+`scene_export` with `colorways: false`. Save the ZPAC for each export set.
+The [capture settings and archive hashes](../../../docs/verification/clo-mcp-acceptance.md#boat-原生平面贴图映射)
+identify the reference files.
+
+```sh
+CLO_NATIVE_TEXTURE_TRANSFORM_EXPORTS=/absolute/path/to/capture \
+  python -m clo_mcp.smoke_compat --verify-native-texture-transforms
+```
+
+The Rust replay opens each captured archive and calls `scene_export` with the
+same options. Compare OBJ UVs directly and reopen FBX for its UVs. For GLB and
+glTF, compare the shared accessor, per-map scale and offset, and effective UV
+coordinates. The raw glTF millimetre tolerance is 0.00005. The UV tolerance
+after mapping is 0.00002. Check the scene state after the exports.
+
 Run `--verify-native-colorway-refresh` with the paired ZPRJ and ZPAC fixtures.
 A native save makes subsequent GLB and glTF exports use the active colorway,
 even when the call requests all colorways. Verify the unsuffixed primary file

@@ -51,6 +51,31 @@ CLO 2026.1.382 通过官方 MCP 在空白工程创建了 Front、Back 和一组�
 | `multi-colorway-normal.zpac` | `75f365f8067a1237e569ff9f50376c72ba932917278c213d3717ed37ae51af2c` |
 | `multi-colorway-pbr.zpac` | `308f79ed51f55790d3f237ddf6cb36343ebd7786a09f16edc67d7d6d33fa9840` |
 
+## Boat 原生平面贴图映射
+
+CLO 2026.1.382 在同一双裁片工程设置正面贴图变换，通过公开 MCP 的
+`scene_export(colorways=false)` 分别输出 GLB、glTF、OBJ 和 FBX，再保存 ZPAC。
+Rust 打开各 ZPAC，经同一工具重新导出。每种格式的 52 条 UV 都有对应值。
+有效 UV 容差为 0.00002，GLB／glTF 原始 UV 容差为 0.00005 mm。
+四种格式导出后，场景信息保持原值。
+
+| `uv-probe-<case>` | 角度、位移 X／Y、宽／高（度和 mm） | ZPAC SHA-256 |
+| --- | --- | --- |
+| `base` | 基础 0°，0／0，24／16 | `af580e414859d007c19dfecfda1f8cd62be8d29f6418078d21bd32fa12a6ea5f` |
+| `rotate` | 基础 31°，0／0，24／16 | `454390b8f7de1383157e3ec1bde574cd527ebc739035443c1d03860423933aff` |
+| `offset` | 基础 0°，3.25／−1.75，24／16 | `72ff3450d62a1b9ebf42b2c123843ace94fb2284ed56f9a0c3bd0db0440f0e7e` |
+| `mixed` | 基础 −23°，3.25／−1.75，24／16 | `6174fecbb5d489a67f7017fcc3acca1943d951a829ce8c50a54e5fc21f0f538b` |
+| `dual` | 基础 31°，3.25／−1.75，24／16；法线 −12°，−1／4，12／18 | `62048ad2de3a722839192e83b6d433f120e02aa64144a36fb45a77d95517543d` |
+| `normal-only` | 清除基础图；法线 −12°，−1／4，12／18 | `180dd8476515c08d0dd0ba755af0aae9a4999a421f400a1b6ca26c19fb54af77` |
+
+前四例用 `multi-colorway-textured.zpac`，后两例用
+`multi-colorway-normal.zpac`。GLB／glTF 的基础图和法线图共享 UV 坐标，
+基础图决定共享坐标的旋转，每张图分别写入比例和偏移。仅有法线图时，
+共享坐标保持原方向。OBJ 将活动贴图的变换写入 UV。FBX 将基础贴图的
+变换写入 UV，只有法线贴图时使用原始纸样坐标。
+此批对照覆盖原生归档已有的正面平面映射。
+复跑见 [Verify 技能](../../.agents/skills/verify/SKILL.md#compare-native-planar-texture-transforms)。
+
 ## 48 项逐项记录
 
 「本轮」和「历史」表示已有双端证据的具体场景。「待验」列的是仍需要实测的行为。桌面可访问性查询可独立执行，截图需要屏幕上有 CLO 窗口。
@@ -67,7 +92,7 @@ CLO 2026.1.382 通过官方 MCP 在空白工程创建了 Front、Back 和一组�
 | `scene_clear` | Rust 两种清场、材料索引重置和旧 UI 快照拒绝，最后规格仍可读 | 双端 `keep_avatar`、材料和缝组读回 |
 | `scene_open` | Rust 实测原生工程与 DXF 追加。默认打开纸样 JSON、OBJ、FBX 和 AVT 保留已有场景；参考回调确认这些格式的调用不传替换参数。成功打开作废旧快照。Boat 的两个原生文件在字段顺序变化时均成功恢复边界、缝组和保存姿态 | 双端现场追加、损坏文件，以及更多工程布局 |
 | `scene_save` | Rust 工程保存重开，目标是目录时拒绝并保留其中的文件、原工程标识和场景。切换后写出的 ZPRJ 与两份 ZPAC 经官方 CLO 重开通过 | 更多原生修改、缩略图和原生 SDK 失败路径 |
-| `scene_export` | 双配色工程的 OBJ、FBX、GLB、glTF 文件与附属文件顺序匹配官方返回，Rust 回读两套颜色。双配色基础贴图的像素和 UV 边界已与官方文件对照。DXF、纸样 JSON 的 Rust 输出与 3D 标志无关，失败保留已有文件和场景 | 双端单位、贴图、人台、复杂配色结果和纸样 JSON 导出条件 |
+| `scene_export` | 双配色工程的 OBJ、FBX、GLB、glTF 文件与附属文件顺序匹配官方返回，Rust 回读两套颜色。基础贴图像素和 UV 边界，以及六例正面平面贴图变换已与官方文件对照。DXF、纸样 JSON 的 Rust 输出与 3D 标志无关，失败保留已有文件和场景 | 双端单位、其他贴图映射、人台、复杂配色结果和纸样 JSON 导出条件 |
 | `snapshot` | Rust 默认视角、别名与 PNG，末视角与 API 缩略图逐字节一致。首项无效保持原相机，后续视角无效仍保留此前 PNG 和相机位置。与官方桥接受控回调的处理顺序一致 | 双端正侧背面、视角顺序和错误后的相机、原生渲染 |
 | `snapshot_2d` | Rust 图像调用，脚本和高层工具 PNG 一致 | 双端有效图像及图中纸样轮廓 |
 | `avatar_list` | 历史 6 个库文件、12 个别名及场景读回对照 | 新版本同一人台库和追加后的清单 |
