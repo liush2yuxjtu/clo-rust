@@ -991,10 +991,10 @@ pub fn fabric_library(args: &Value) -> Value {
 }
 
 pub fn fabric_list(state: &Value) -> Value {
-    let fabrics: Vec<_> = array(&state["fabrics"])
-        .iter()
+    let fabrics: Vec<_> = crate::compat_scene::fabric_catalog(state)
         .take(crate::compat_scene::assigned_fabric_count(state))
-        .map(|value| {
+        .enumerate()
+        .map(|(index, value)| {
             let material = &value["info"];
             let catalog = &material["catalog"];
             let properties = &material["physical_properties"];
@@ -1008,7 +1008,7 @@ pub fn fabric_list(state: &Value) -> Value {
             let weight = properties["density"].as_f64()
                 .map(|density| format!("{:.0} g/m2", density * 1_000_000.0)).unwrap_or_default();
             json!({
-                "index":value["index"],"name":value["name"],"info":{
+                "index":index,"name":value["name"],"info":{
                     "Classification": string(catalog, "Classification", string(material, "fabric_type", "None")),
                     "Color": string(catalog, "Color", &hex),
                     "ColorCode": format!("#{}", hex.to_ascii_lowercase()),
@@ -1022,7 +1022,7 @@ pub fn fabric_list(state: &Value) -> Value {
             })
         })
         .collect();
-    let current = state["current_fabric"].as_u64().unwrap_or(0);
+    let current = crate::compat_scene::current_fabric_catalog_index(state);
     json!({"fabrics":fabrics,"current":current})
 }
 
@@ -1226,7 +1226,13 @@ pub fn fabric_apply(args: &Value, state: &mut Value) -> Result<Value, String> {
 }
 
 pub(super) fn fabric_add(args: &Value, state: &mut Value) -> Result<Value, String> {
-    let (material, _, _) = load_material(string(args, "fabric", ""))?;
+    let (mut material, _, file) = load_material(string(args, "fabric", ""))?;
+    let native_name = file.as_deref().filter(|path| {
+        path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"))
+    }).and_then(|path| path.file_stem()?.to_str());
+    if let Some(name) = native_name {
+        material["name"] = json!(name);
+    }
     let preserve_default = array(&state["patterns"]).iter().any(|pattern| {
         pattern["fabric_index"].as_u64().unwrap_or(0) == 0
     });

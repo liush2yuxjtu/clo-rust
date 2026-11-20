@@ -76,6 +76,21 @@ fn fabric_fingerprint(state: &Value) -> u64 {
     hash.finish()
 }
 
+fn assigned_fabric_fingerprint(state: &Value) -> u64 {
+    let mut hash = DefaultHasher::new();
+    state["current_colorway"].hash(&mut hash);
+    for fabric in super::super::assigned_fabrics(state) {
+        fabric.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+fn has_material_edits(source: &Value) -> bool {
+    ["recolored", "retextured", "colorway_recolors", "colorway_textures"]
+        .iter()
+        .any(|key| !super::super::array(source, key).is_empty())
+}
+
 fn hash_editable_material(
     fabric: &Value, colorway: bool, texture_edit: bool, hash: &mut DefaultHasher,
 ) {
@@ -197,6 +212,7 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "project": project,
                 "garment": garment_fingerprint(state),
                 "fabrics": fabric_fingerprint(state),
+                "assigned_fabrics": assigned_fabric_fingerprint(state),
                 "colorways": colorway_fingerprints(state),
                 "colorway_recolors": [],
                 "colorway_textures": [],
@@ -218,11 +234,10 @@ pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &P
 
 pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool) -> Option<Vec<Value>> {
     let source = &state[SOURCE];
-    if source["empty_append"] == true
-        || source["garment"].as_u64()? != garment_fingerprint(state)
-        || source["fabrics"].as_u64()? != fabric_fingerprint(state)
-        || ["recolored", "retextured", "colorway_recolors", "colorway_textures"]
-            .iter().any(|key| !super::super::array(source, key).is_empty())
+    if source["garment"].as_u64()? != garment_fingerprint(state)
+        || (source["fabrics"].as_u64()? != fabric_fingerprint(state)
+            && source["assigned_fabrics"].as_u64() != Some(assigned_fabric_fingerprint(state)))
+        || has_material_edits(source)
     {
         return None;
     }
@@ -248,11 +263,13 @@ pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Ve
     let path = source["path"].as_str().map(std::path::PathBuf::from);
     let project = source["project"] == true;
     let old_stamp = source["stamp"].clone();
+    let empty_append = source["empty_append"] == true;
     if let Some(path) = path {
         remember(state, &path, project);
         if state[SOURCE].is_object() {
             state[SOURCE]["stamp"] = old_stamp;
             state[SOURCE]["appended"] = json!(parts);
+            state[SOURCE]["empty_append"] = json!(empty_append);
         }
     }
 }
@@ -649,7 +666,11 @@ pub(in crate::compat_scene) fn save(
     if state[SOURCE]["empty_append"] == true {
         remember_empty_append(state, path, false);
     } else if !super::super::array(&state[SOURCE], "appended").is_empty() {
-        remember(state, path, false);
+        // The saved garment has compact indices. Keep the original parts
+        // when their indices differ from the live fabric catalog.
+        if super::super::assigned_fabric_count(state) == super::super::array(state, "fabrics").len() {
+            remember(state, path, false);
+        }
     } else if (state[SOURCE]["project"] == true) == project {
         remember(state, path, project);
     }
@@ -674,17 +695,17 @@ pub(in crate::compat_scene) fn encode(
     }
     let switched = state["current_colorway"] != source["current_colorway"];
     let changed_material = source["fabrics"].as_u64() != Some(fabric_fingerprint(state));
+    let only_unused_changed = changed_material && !has_material_edits(source)
+        && source["assigned_fabrics"].as_u64() == Some(assigned_fabric_fingerprint(state));
     let recolors: HashSet<[usize; 2]> = serde_json::from_value(source["colorway_recolors"].clone())
         .map_err(|_| "invalid native colorway recolor targets")?;
     let texture_edits: Vec<ColorwayTextureEdit> = serde_json::from_value(source["colorway_textures"].clone())
         .map_err(|_| "invalid native colorway texture targets")?;
     let write_colorways = switched || !recolors.is_empty() || !texture_edits.is_empty();
     let can_save_materials = if empty_append || !parts.is_empty() {
-        !write_colorways && !changed_material
-            && super::super::array(source, "recolored").is_empty()
-            && super::super::array(source, "retextured").is_empty()
+        !write_colorways && (!changed_material || only_unused_changed) && !has_material_edits(source)
     } else {
-        !write_colorways && !changed_material
+        !write_colorways && (!changed_material || only_unused_changed)
             || super::super::array(source, "recolored").is_empty()
                 && super::super::array(source, "retextured").is_empty()
                 && verify_colorway_materials(state, source, &recolors, &texture_edits)
@@ -698,7 +719,13 @@ pub(in crate::compat_scene) fn encode(
     let original = read_source(source)?;
     let garment = garment_archive(original.clone(), source_project)?;
     let mut garment_archive = open_archive(Cursor::new(garment.as_slice()), ZPAC)?;
-    let pac = member(&mut garment_archive, "pac")?;
+    let mut pac = member(&mut garment_archive, "pac")?;
+    if empty_append {
+        // The destination's empty-scene fabric is not part of the exported
+        // garment. Its palette is retained when adding each source part.
+        let name = state["colorways"][0].as_str().ok_or("native ZPAC has no active colorway name")?;
+        pac = native_materials::default_append_colorway(&pac, name)?;
+    }
     let (pac, appended_assets) = if parts.is_empty() {
         (pac, TextureAssets::default())
     } else {
@@ -709,14 +736,8 @@ pub(in crate::compat_scene) fn encode(
             .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
     };
     let renamed = renamed_pac(&pac, state)?;
-    let (edited, assets) = if !parts.is_empty() {
+    let (edited, assets) = if !parts.is_empty() || empty_append {
         (Some(renamed.unwrap_or(pac)), appended_assets)
-    } else if empty_append {
-        // Garment export omits the receiver's unused default material. The
-        // appended source already has the desired compact fabric indices.
-        let name = state["colorways"][0].as_str().ok_or("native ZPAC has no active colorway name")?;
-        let pac = native_materials::default_append_colorway(renamed.as_deref().unwrap_or(&pac), name)?;
-        (Some(pac), TextureAssets::default())
     } else if write_colorways {
         let index = state["current_colorway"]
             .as_u64()

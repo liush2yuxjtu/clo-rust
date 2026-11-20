@@ -1288,14 +1288,15 @@ pub(super) fn invoke(
         "fabric_api.AddFabric" => {
             domain("__clo_fabric_add", &json!({"fabric":arg[0]}), state)
         }
-        "fabric_api.GetCurrentFabricIndex" => Ok(json!(current_fabric(state))),
+        "fabric_api.GetCurrentFabricIndex" => Ok(json!(crate::compat_scene::current_fabric_catalog_index(state))),
         "fabric_api.GetFabricCount" => Ok(json!(if arg[0] == false {
             fabrics.len()
         } else {
             crate::compat_scene::assigned_fabric_count(state)
         })),
         "fabric_api.GetFabricInformation" | "fabric_api.GetFabricName" => {
-            let fabric = &fabrics[index(&arg[0], fabrics.len(), "fabric")?];
+            let slot = index(&arg[0], fabrics.len(), "fabric")?;
+            let fabric = crate::compat_scene::fabric_catalog(state).nth(slot).ok_or("missing fabric catalog entry")?;
             let key = if name == "fabric_api.GetFabricName" { "name" } else { "info" };
             Ok(property(fabric, key))
         }
@@ -1318,8 +1319,10 @@ pub(super) fn invoke(
             color_channels(color.unwrap_or(&fabric["color"]))
         }
         "fabric_api.SetCurrentFabricIndex" => {
-            let index = index(&arg[0],fabrics.len(),"fabric")?;
-            state["current_fabric"] = json!(index);
+            let slot = index(&arg[0], fabrics.len(), "fabric")?;
+            let id = crate::compat_scene::fabric_catalog(state).nth(slot)
+                .and_then(|fabric| fabric["index"].as_u64()).ok_or("missing fabric catalog entry")?;
+            state["current_fabric"] = json!(id);
             Ok(json!(true))
         }
         "fabric_api.SetFabricName" => {

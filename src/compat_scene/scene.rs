@@ -71,11 +71,10 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
         .map(|(i, pattern)| patterns::summary(pattern, i))
         .collect();
     // The bridge enumerates the first N fabric indices, where N is the used count.
-    let fabrics: Vec<_> = array(state, "fabrics")
-        .iter()
+    let fabrics: Vec<_> = super::fabric_catalog(state)
         .take(assigned_fabric_count(state))
         .enumerate()
-        .map(|(i, f)| json!({"index": f["index"].as_u64().unwrap_or(i as u64), "name": f["name"]}))
+        .map(|(i, f)| json!({"index": i, "name": f["name"]}))
         .collect();
     Ok(json!({
         "project": state["project"].as_str().unwrap_or("NULL"),
@@ -275,6 +274,9 @@ fn prepare_archived_fabrics(
                 .checked_add(index as u64)
                 .ok_or("native material-index limit exceeded")?);
             super::remap_appended_colorways(fabric, state, loaded);
+            if loaded["colorways"].is_array() {
+                fabric["appended_catalog"] = json!(true);
+            }
         }
         for field in ["patterns", "imported_meshes"] {
             for piece in vec_mut(loaded, field) {
@@ -569,14 +571,14 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             let empty_receiver = append
                 && prior_count == 0
                 && array(state, "imported_meshes").is_empty()
-                && state["fabrics"] == json!([default_fabric()])
                 && state["colorways"] == json!([DEFAULT_COLORWAY])
-                && array(&loaded, "fabrics").len() == 1;
+                && !array(&loaded, "fabrics").is_empty();
             let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if append {
                 vec_mut(state, "fabrics").extend(fabrics);
+                state["current_fabric"] = json!(0);
             } else {
                 state["fabrics"] = json!(fabrics);
                 state["current_fabric"] = json!(0);

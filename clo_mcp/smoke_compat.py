@@ -6256,7 +6256,8 @@ async def compare_live_composed_zpac():
             colors.append(row)
         return {"patterns": scene["patterns"], "colorways": scene["colorways"],
                 "current_colorway": scene["current_colorway"], "materials": total,
-                "fabric_rgba_f32": colors, "fabrics": fabrics, "seams": seams}
+                "fabric_rgba_f32": colors, "fabrics": fabrics, "seams": seams,
+                "catalog_names": [await api(session, "fabric_api.GetFabricName", slot) for slot in range(total)]}
 
     cases = (("empty", None, garment, [1, 1], [0, 0], 1, 0),
              ("empty_project", None, project, [1, 1], [0, 0], 1, 0),
@@ -6278,10 +6279,18 @@ async def compare_live_composed_zpac():
                               ("short_source", project, sources["short"], 1),
                               ("short_receiver", sources["short"], garment, 0),
                               ("long_receiver", sources["long"], garment, 2)))
-    cases += palette_cases
+    unused = os.environ.get("CLO_COMPOSED_UNUSED_FABRIC")
+    unused_cases = (
+        ("empty_double", None, garment, [1, 1, 2, 2], same_indices, 2, 0),
+        ("unused_between", project, garment, [0, 0, 2, 2], same_indices, 2, 1),
+        ("unused_after", project, garment, same_indices, same_indices, 2, 1),
+        ("empty_unused_between", None, garment, [1, 1, 3, 3], same_indices, 2, 0),
+    ) if unused else ()
+    cases += palette_cases + unused_cases
     if selected:
         cases = tuple(case for case in cases if case[0] == selected
-                      or selected == "palette" and case in palette_cases)
+                      or selected == "palette" and case in palette_cases
+                      or selected == "unused" and case in unused_cases)
         assert cases, f"unknown composed ZPAC case {selected}"
     reports = []
     async with open_backend("official") as clo, open_backend("rust") as rust:
@@ -6311,7 +6320,17 @@ async def compare_live_composed_zpac():
                     await json_result(session, "scene_clear", {"keep_avatar": False})
                     if initial:
                         await json_result(session, "scene_open", {"path": str(initial)})
+                    if label in ("empty_double", "empty_unused_between"):
+                        await json_result(session, "scene_open", {"path": str(garment), "mode": "append"})
+                    if label in ("unused_between", "empty_unused_between"):
+                        assert await api(session, "fabric_api.AddFabric", unused) == (1 if initial else 2)
+                        assert await api(session, "fabric_api.GetCurrentFabricIndex") == 1
                     await json_result(session, "scene_open", {"path": str(source), "mode": "append"})
+                    if label == "unused_after":
+                        assert await api(session, "fabric_api.AddFabric", unused) == 2
+                        assert await api(session, "fabric_api.GetCurrentFabricIndex") == 1
+                    else:
+                        assert await api(session, "fabric_api.GetCurrentFabricIndex") == 0
                     composed = await read(session)
                     assert [piece["fabric_index"] for piece in composed["patterns"]] == before
                     if expected_import is None:
@@ -6325,6 +6344,11 @@ async def compare_live_composed_zpac():
                         continue
                     reply = response.structuredContent or json.loads(response.content[0].text)
                     assert reply["path"] == str(archives[backend]) and archives[backend].is_file()
+                    if any(label == case[0] for case in unused_cases):
+                        repeated = archives[backend].with_stem(archives[backend].stem + "-again")
+                        assert not repeated.exists()
+                        await json_result(session, "scene_export", {"path": str(repeated)})
+                        assert repeated.is_file() and await read(session) == composed
                     for reader, target in (("official", clo), ("rust", rust)):
                         await json_result(target, "scene_open", {"path": str(archives[backend])})
                         reopened = await read(target)

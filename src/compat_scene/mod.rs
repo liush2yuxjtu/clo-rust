@@ -14,6 +14,19 @@ pub(crate) use formats::write as write_artifact;
 pub(crate) use scene::{assigned_fabric_count, assigned_fabrics, avatar_names, checkpoint_before_build, clear_patterns, default_fabric, empty_project};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 
+pub(crate) fn fabric_catalog(state: &Value) -> impl Iterator<Item = &Value> {
+    let fabrics = array(state, "fabrics");
+    // CLO lists its primary fabrics before appended garment groups. Pattern
+    // assignments retain the separate stored fabric indices.
+    fabrics.iter().filter(|fabric| fabric["appended_catalog"] != true)
+        .chain(fabrics.iter().filter(|fabric| fabric["appended_catalog"] == true))
+}
+
+pub(crate) fn current_fabric_catalog_index(state: &Value) -> usize {
+    let selected = state["current_fabric"].as_u64().unwrap_or(0);
+    fabric_catalog(state).position(|fabric| fabric["index"] == selected).unwrap_or(0)
+}
+
 fn appended_colorway(index: usize, source_count: usize) -> usize {
     // CLO fills receiver slots by position, reusing the first source style
     // chip when the receiver has more colorways.
@@ -93,6 +106,9 @@ pub(crate) fn set_current_colorway(state: &mut Value, index: usize) -> Result<()
             *variants["values"].get_mut(previous)
                 .ok_or("archived material for current colorway is missing")? = active;
             material["index"] = fabric["index"].clone();
+            if fabric["appended_catalog"] == true {
+                material["appended_catalog"] = json!(true);
+            }
             material["native_colorway_materials"] = variants;
             Ok(material)
         }).collect::<Result<Vec<_>, String>>()?;

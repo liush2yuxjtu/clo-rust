@@ -989,6 +989,14 @@ slots use the first source style chip. Recolor the imported material in
 The three-argument color query uses the ordinal in the assigned-material
 list. After appending into a fresh scene, query ordinal 0 and verify the
 appended fabric's color while the garment still uses catalog index 1.
+Set `CLO_COMPOSED_UNUSED_FABRIC` to a native ZFAB fixture, then run with
+`CLO_COMPOSED_ZPAC_CASE=unused` for four cases with unused materials.
+Compare both the stored panel assignments and the complete fabric catalog
+before exporting. The catalog lists primary materials before appended
+garment groups. Read the selected catalog row after adding a ZFAB and
+after appending. Export twice and check the live state retained its indices.
+Reopen each first output in both backends. Require compact assignments and
+the same two used materials, stored meshes and sewing endpoints.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.
