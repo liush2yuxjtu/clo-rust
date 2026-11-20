@@ -27,6 +27,68 @@ For MCP changes, install `clo_mcp/requirements.txt` in a Python 3.11+ virtual en
 
 For release-download, checksum, or cache changes, use an existing release with the required assets and run `CLO_RUST_RELEASE=<tag> python -m clo_mcp.smoke_release` with GitHub CLI access. The smoke test exercises the actual published download, checksum verification, cache hit, seam audit, and replay through stdio. For new releases, build and test on each target platform, run the binary's `--version`, compute its SHA-256 checksum, and confirm the published tag and assets. Run the release-download smoke test against the published tag.
 
+### Verify the 48 public CLO MCP tools
+
+The public acceptance list is [`clo_mcp/clo_tool_contract.json`](../../../clo_mcp/clo_tool_contract.json).
+Verify it through MCP stdio with matching requests sent to `CLO_MCP_BACKEND=official`
+and `CLO_MCP_BACKEND=rust`. A tool is behaviorally matched only when its relevant
+inputs, results, state changes, and error cases pass the dual-backend comparison.
+
+From the repository root, use a Python 3.11+ environment with `clo_mcp/requirements.txt`
+installed and build the Rust release binary with `cargo build --release --locked`.
+Run the synthetic fixture smoke test with the asset overrides empty:
+
+```sh
+CLO_RUST_BINARY="$PWD/target/release/pattern-native" \
+  CLO_RUST_AVATAR_DIR='' CLO_RUST_FABRIC_DIR='' \
+  python -m clo_mcp.smoke_compat
+```
+
+Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
+to include the official backend smoke. Run it with the CLO 3D bridge connected.
+`tools/list` is checked against the contract, including input and output schemas.
+The Rust fixtures also exercise selected scene, image, export, failure, and session flows.
+
+The first repeatable live comparison checks the full fabric catalog, a mixed-case filter,
+an empty result, and an invalid filter type. Use the same CLO asset library on both
+backends. Use the exact `folder` spelling returned by the official backend.
+
+```sh
+CLO_MCP_OFFICIAL_COMMAND='["/path/to/clo3d-mcp/.venv/bin/python","-m","clo3d_mcp.server"]' \
+  CLO_RUST_BINARY="$PWD/target/release/pattern-native" \
+  CLO_RUST_FABRIC_DIR='/path/to/CLO Assets/Fabric' \
+  python -m clo_mcp.smoke_compat --compare-fabric-library
+```
+
+Use `open_backend()`, `inspect_contract()`, and `json_result()` from
+`clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
+backends. Use disposable projects on the CLO 3D side for state-changing cases.
+Read state before the call and after the call, including after a rejected operation.
+For saved or exported artifacts, independently reopen and inspect geometry, units,
+material assignments, image content, or whichever properties the claim depends on.
+
+| Tools | Cases to compare |
+| --- | --- |
+| `clo_status`, `clo_launch`, `clo_stop_bridge` | Readiness, repeat launch, stopped-tool error, restart and scene readback |
+| `clo_api_search`, `clo_api_doc`, `clo_api_catalog`, `clo_api_describe`, `clo_api_call`, `clo_api_release`, `clo_run_python` | Discover callable functions used by CLO MCP workflows, inspect types, invoke read and write cases, release handles and query after Python errors or completed effects |
+| `scene_info`, `scene_clear`, `scene_open`, `scene_save`, `scene_export`, `checkpoint_save`, `checkpoint_restore`, `checkpoint_list` | Replace and append, keep-avatar behavior, missing or corrupt input, output format and reopen, checkpoint ordering and restore |
+| `snapshot`, `snapshot_2d`, `clo_control_guide`, `clo_ui_state`, `clo_ui_action`, `clo_ui_screenshot` | View and selection inputs, content blocks and image geometry, supported actions, readback and error cases |
+| `avatar_list`, `avatar_load`, `avatar_measurements`, `arrangement_points` | Library and alias resolution, append and replace, named arrangement points, measurements and units, missing inputs |
+| `pattern_list`, `pattern_info`, `pattern_create`, `pattern_delete`, `pattern_set_arrangement`, `pattern_edit_points`, `pattern_ops`, `sew`, `seams_list` | Identifiers and line indices, editable geometry, arrangement, sewing direction and group membership, rejected edits |
+| `fabric_library`, `fabric_list`, `fabric_apply`, `fabric_set_color`, `fabric_set_texture` | Filter, aliases, filenames and paths, selected-piece assignment, list and export readback, invalid paths and indices |
+| `simulate`, `simulation_reset` | Steps, quality and particle distance, saved pose continuation and reset, seams and contacts, invalid arguments |
+| `garment_plan_preview`, `garment_build`, `garment_rebuild`, `garment_last_spec` | Draft parameters, pieces and seams, build/rebuild state and artifacts, validation and previous spec |
+
+Record the tool, case, Git SHA, CLO version, fixture identity, request, raw results
+and errors, state before and after, artifact checks, and verdict. Document which
+fields may differ between runtimes, such as timings and temp paths, and define any
+numeric tolerances before evaluating results. Keep full evidence in the local Board
+and summarize confirmed results in the progress Page. A Rust-only result or matching
+registration stays separate from behavioral PASS. Mark an unavailable comparison
+BLOCKED and an observed mismatch FAIL. Claim full compatibility after all 48
+public tools have passing behavioral evidence. The validation scope is the CLO MCP
+workflows and tool contracts.
+
 ### Verdict
 
 - **PASS** when the required tests pass and the changed behavior works at the caller boundary.

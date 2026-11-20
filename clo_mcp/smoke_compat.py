@@ -1,5 +1,6 @@
 """Exercise the common MCP entry point on Rust and, when configured, CLO 3D."""
 
+import argparse
 import asyncio
 import base64
 import json
@@ -274,11 +275,46 @@ async def smoke_official():
     print("Official MCP: 48 contracts and 11 diagnostics listed. Live CLO status, preview and input error passed")
 
 
-async def main():
+async def compare_fabric_library():
+    results = {}
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            await inspect_contract(session)
+            results[backend] = [
+                await json_result(session, "fabric_library", arguments)
+                for arguments in ({}, {"filter": "dEnIm"}, {"filter": "__clo_verify_missing_fabric__"})
+            ]
+            invalid = await session.call_tool("fabric_library", {"filter": []})
+            assert invalid.isError, f"{backend} accepted a non-string fabric filter"
+    official, rust = results["official"], results["rust"]
+    for index, label in enumerate(("all", "mixed-case filter", "no match")):
+        assert official[index] == rust[index], f"fabric_library mismatch for {label}"
+    assert official[0]["fabrics"] and official[1]["fabrics"]
+    assert official[2]["fabrics"] == []
+    print(json.dumps({
+        "tool": "fabric_library",
+        "backends": ["official", "rust"],
+        "catalog_size": len(official[0]["fabrics"]),
+        "mixed_case_matches": official[1]["fabrics"],
+        "empty_match": "pass",
+        "invalid_filter_type": "pass",
+    }, ensure_ascii=False))
+
+
+async def main(compare_library=False):
+    if compare_library:
+        await compare_fabric_library()
+        return
     await smoke_rust()
     if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         await smoke_official()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--compare-fabric-library", action="store_true",
+                        help="compare both live backends against the same CLO fabric library")
+    args = parser.parse_args()
+    if args.compare_fabric_library and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+        parser.error("--compare-fabric-library requires CLO_MCP_OFFICIAL_COMMAND")
+    asyncio.run(main(args.compare_fabric_library))
