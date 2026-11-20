@@ -478,11 +478,10 @@ fn join_archive(mut prefix: Vec<u8>, archive: &[u8]) -> Result<Vec<u8>, String> 
     Ok(prefix)
 }
 
-fn replace_member(
+fn rewrite_archive(
     input: &[u8],
     header: &[u8],
-    suffix: &[u8],
-    replacement: &[u8],
+    replacement: Option<(&[u8], &[u8])>,
     mut assets: TextureAssets,
 ) -> Result<Vec<u8>, String> {
     let (prefix, _) = split_archive(input)?;
@@ -529,14 +528,14 @@ fn replace_member(
             None
         };
         let name = file.name_raw();
-        let body = if name.len() >= suffix.len()
-            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        {
+        let body = if let Some((_, bytes)) = replacement.filter(|(suffix, _)| {
+            name.len() >= suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        }) {
             if replaced {
                 return Err("multiple native archive members match the replacement".into());
             }
             replaced = true;
-            Some(replacement)
+            Some(bytes)
         } else {
             asset.as_deref().or(manifest.as_deref())
         };
@@ -551,7 +550,7 @@ fn replace_member(
             zip.raw_copy_file(file).map_err(|error| error.to_string())?;
         }
     }
-    if !replaced || !assets.replaced.is_empty() {
+    if (replacement.is_some() && !replaced) || !assets.replaced.is_empty() {
         return Err("native archive is missing a member being replaced".into());
     }
     for (name, data) in assets.added {
@@ -616,7 +615,7 @@ fn project_preview(input: Vec<u8>, thumbnail: bool, state: &Value) -> Result<Vec
     }
 }
 
-fn archive_members<const N: usize>(members: [(&str, &[u8]); N]) -> Result<Vec<u8>, String> {
+fn archive_members<'a>(members: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Vec<u8>, String> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, bytes) in members {
@@ -643,7 +642,7 @@ fn author_scene(source: &Value) -> bool {
         || (source["authored"] == true && super::super::array(source, "appended").is_empty())
 }
 
-fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Result<Vec<u8>, String> {
+fn native_project(garment: Option<&[u8]>, state: &Value, thumbnail: bool) -> Result<Vec<u8>, String> {
     const WORKSPACE: &str = "garment.osw";
     const GARMENT: &str = "garment.zpac";
     let zero = 0u32.to_le_bytes();
@@ -651,6 +650,7 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
     let version = 13u32.to_le_bytes();
     let one = 1f32.to_le_bytes();
     let null = b"NULL";
+    let cloth_path = garment.map_or(null.as_slice(), |_| GARMENT.as_bytes());
     let scene_properties = encode_map(&[
         (b"qsScenePropFileName", BYTE_TYPE, null),
         (b"qsScenePropFileNameUTF8", BYTE_TYPE, null),
@@ -673,11 +673,11 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
         (b"listAvatarFilePath", LIST_TYPE, &zero),
         (b"uiVersion", 5, &version),
         (b"uiAvatarLink", 5, &linked),
-        (b"qsClothFilePathUTF8", BYTE_TYPE, GARMENT.as_bytes()),
+        (b"qsClothFilePathUTF8", BYTE_TYPE, cloth_path),
         (b"qsPointCacheShapeName", BYTE_TYPE, null),
         (b"uiClothLink", 5, &linked),
         (b"uiAvatarCount", 5, &zero),
-        (b"qsClothFilePath", BYTE_TYPE, GARMENT.as_bytes()),
+        (b"qsClothFilePath", BYTE_TYPE, cloth_path),
         (b"uiScenePropLink", 5, &linked),
         (b"uiScenePropCount", 5, &zero),
         (b"mapSceneProperty", MAP_TYPE, &scene_properties),
@@ -689,11 +689,15 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
         (b"qsPointCacheShapeNameUTF8", BYTE_TYPE, null),
         (b"mapAnimationParam", MAP_TYPE, &animation),
     ])?;
-    let manifest = serde_json::to_vec(&json!({WORKSPACE: WORKSPACE, GARMENT: GARMENT}))
-        .map_err(|error| error.to_string())?;
-    let archive = archive_members([
-        (WORKSPACE, workspace.as_slice()), (GARMENT, garment), ("clofiles.json", &manifest),
-    ])?;
+    let mut manifest = serde_json::Map::from_iter([(WORKSPACE.into(), json!(WORKSPACE))]);
+    let mut members = vec![(WORKSPACE, workspace.as_slice())];
+    if let Some(garment) = garment {
+        manifest.insert(GARMENT.into(), json!(GARMENT));
+        members.push((GARMENT, garment));
+    }
+    let manifest = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+    members.push(("clofiles.json", &manifest));
+    let archive = archive_members(members)?;
 
     let primary = crate::compat_fit::native_primary_preview(state)?;
     let primary_size = u32::try_from(primary.len()).map_err(|_| "native project thumbnail too large")?;
@@ -711,7 +715,7 @@ fn project_from_garment(garment: &[u8], state: &Value, thumbnail: bool) -> Resul
         return Ok(outer);
     }
     let avatars = project_avatar_edits(&outer, state)?;
-    replace_member(&outer, ZPRJ, b".zpac", garment, avatars)
+    rewrite_archive(&outer, ZPRJ, None, avatars)
 }
 
 fn source_path(source: &Value) -> Result<&Path, String> {
@@ -786,7 +790,7 @@ fn project_avatar_edits(input: &[u8], state: &Value) -> Result<TextureAssets, St
             let mut archive = open_archive(Cursor::new(&data), AVT)?;
             let dan = member(&mut archive, "dan")?;
             if let Some(updated) = identities.separate(&dan)? {
-                data = replace_member(&data, AVT, b".dan", &updated, TextureAssets::default())?;
+                data = rewrite_archive(&data, AVT, Some((b".dan", &updated)), TextureAssets::default())?;
             }
         }
         bytes += data.len() as u64;
@@ -964,7 +968,7 @@ pub(in crate::compat_scene) fn save(
 
 pub(in crate::compat_scene) fn remember_project_save(state: &mut Value, path: &Path) {
     let source = &state[SOURCE];
-    let authored = author_scene(source);
+    let authored = author_scene(source) || super::super::array(state, "patterns").is_empty();
     let compacted = source["compacted_fabrics"] == true
         || (source["empty_append"] == true || !super::super::array(source, "appended").is_empty())
             && super::super::assigned_fabric_count(state) != super::super::array(state, "fabrics").len();
@@ -983,10 +987,19 @@ pub(in crate::compat_scene) fn encode(
     project: bool,
     thumbnail: bool,
 ) -> Result<Vec<u8>, String> {
+    if project && super::super::array(state, "patterns").is_empty()
+        && super::super::array(state, "imported_meshes").is_empty()
+    {
+        let output = native_project(None, state, thumbnail)?;
+        if output.len() as u64 > ARCHIVE_LIMIT {
+            return Err("native output archive exceeds 512 MiB".into());
+        }
+        return Ok(output);
+    }
     let source = &state[SOURCE];
     if author_scene(source) {
         let garment = authored_garment(state)?;
-        let output = if project { project_from_garment(&garment, state, thumbnail)? } else { garment };
+        let output = if project { native_project(Some(&garment), state, thumbnail)? } else { garment };
         if output.len() as u64 > ARCHIVE_LIMIT {
             return Err("native output archive exceeds 512 MiB".into());
         }
@@ -1086,11 +1099,11 @@ pub(in crate::compat_scene) fn encode(
     };
     let has_edits = edited.is_some();
     let garment = match edited {
-        Some(bytes) => replace_member(&garment, ZPAC, b".pac", &bytes, assets)?,
+        Some(bytes) => rewrite_archive(&garment, ZPAC, Some((b".pac", &bytes)), assets)?,
         None => garment,
     };
     let output = if project && (!source_project || empty_append) {
-        project_from_garment(&garment, state, thumbnail)?
+        native_project(Some(&garment), state, thumbnail)?
     } else if project {
         let avatar_changed = source["avatars"].as_u64() != Some(avatar_fingerprint(state));
         let avatar_assets = if avatar_changed {
@@ -1099,7 +1112,7 @@ pub(in crate::compat_scene) fn encode(
             TextureAssets::default()
         };
         let project_bytes = if has_edits || avatar_changed {
-            replace_member(&original, ZPRJ, b".zpac", &garment, avatar_assets)?
+            rewrite_archive(&original, ZPRJ, Some((b".zpac", &garment)), avatar_assets)?
         } else {
             original
         };

@@ -1033,6 +1033,18 @@ mesh positions, topology and UV after reopening it in Rust. Missing files
 return an MCP error and preserve the scene. Compare the response and the
 scene, panel and seam readback on both backends.
 
+Run `--compare-live-empty-native-save` with a live bridge, a fresh shared
+`CLO_MCP_STATE`, and `CLO_SCENE_OPEN_AVATAR_PROJECT` pointing to the project with
+a saved avatar. Unset `CLO_RUST_CHECKPOINT_DIR`. Use an empty scene and a scene
+cleared with the avatar retained. For ZPAC save and export, check the returned
+path, parent directory, absent output or preserved existing bytes, and
+unchanged scene. Acknowledge the official no-pattern dialog when prompted.
+For ZPRJ save with and without thumbnails and for named checkpoints, test
+both writers and both readers. Confirm the archive contains an OSW workspace,
+the requested avatars, and no embedded ZPAC. On reopen check zero panels and
+seams, the avatar names, default colorway and one default fabric.
+Verify a new Rust panel can be saved after an empty project save.
+
 Run `--compare-live-recovered-zpac-save` with a live bridge, a fresh shared
 `CLO_MCP_STATE`, `CLO_SCENE_OPEN_GARMENT` pointing to the saved-pose ZPAC, and
 `CLO_SCENE_OPEN_PROJECT` pointing to the two-panel ZPRJ. Unset

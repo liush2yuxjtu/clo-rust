@@ -5725,6 +5725,9 @@ async def compare_shared_checkpoint_folder():
             assert (await json_result(rust, "scene_info"))["project_path"] == str(corrupt)
 
             await json_result(rust, "scene_clear", {"keep_avatar": False})
+            mesh = Path(scratch) / "portable-only.obj"
+            mesh.write_text("v 0 0 0\nv 50 0 0\nv 0 50 0\nf 1 2 3\n")
+            await json_result(rust, "scene_open", {"path": str(mesh)})
             auto_portable = await json_result(rust, "checkpoint_save")
             auto_portable_path = Path(auto_portable["path"])
             assert auto_portable_path.suffix == ".clorust"
@@ -7420,6 +7423,111 @@ async def compare_live_resumed_native_save():
     print(json.dumps({"cases": results, "remesh_rejected_without_changes": True, "result": "pass"}))
 
 
+async def compare_live_empty_native_save():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    fixture = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    assert root.is_dir() and fixture.is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+    fixtures = ("empty", "avatar-only")
+    observations = {}
+    outputs = []
+
+    async def open_fixture(session, shape):
+        await json_result(session, "scene_clear", {"keep_avatar": False})
+        if shape == "avatar-only":
+            await json_result(session, "scene_open", {"path": str(fixture)})
+            await json_result(session, "scene_clear", {"keep_avatar": True})
+        state = await json_result(session, "scene_info")
+        assert state["pattern_count"] == state["seam_groups"] == 0, state
+        assert bool(state["avatars"]) == (shape == "avatar-only"), state
+        return state
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        original_path = original["project_path"]
+        restorable = bool(original_path and Path(original_path).is_file())
+        assert restorable or not (original["patterns"] or original["avatars"]), original
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for writer, session in backends:
+                no_ops = []
+                for shape in fixtures:
+                    for tool in ("scene_save", "scene_export"):
+                        for existing in (False, True):
+                            before = await open_fixture(session, shape)
+                            path = root / f"{writer}-{shape}-{tool}-{existing}" / "no-pattern.zpac"
+                            sentinel = b"existing garment file placeholder"
+                            if existing:
+                                path.parent.mkdir()
+                                path.write_bytes(sentinel)
+                            if writer == "official":
+                                print(f"Native empty ZPAC {shape} {tool}; acknowledge no-pattern dialog if shown.",
+                                      file=sys.stderr, flush=True)
+                            response = await json_result(session, tool, {"path": str(path)})
+                            assert response == {"path": str(path)}, (writer, shape, tool, response)
+                            assert path.parent.is_dir()
+                            assert path.is_file() == existing
+                            if existing:
+                                assert path.read_bytes() == sentinel
+                            assert await json_result(session, "scene_info") == before
+                            no_ops.append((shape, tool, existing))
+                    for mode in ("save", "thumbnail", "checkpoint"):
+                        before = await open_fixture(session, shape)
+                        label = f"{writer}-{shape}-{mode}"
+                        if mode == "checkpoint":
+                            record = await json_result(session, "checkpoint_save", {"name": label})
+                            path = root / "checkpoints" / f"{label}.zprj"
+                            assert record == {"name": label, "path": str(path)}
+                        else:
+                            path = root / f"{label}.zprj"
+                            assert await json_result(session, "scene_save", {
+                                "path": str(path), "thumbnail": mode == "thumbnail",
+                            }) == {"path": str(path)}
+                        after = await json_result(session, "scene_info")
+                        assert after == before | {"project": label, "project_path": str(path)}, (label, after)
+                        with zipfile.ZipFile(path) as archive:
+                            assert archive.testzip() is None
+                            names = archive.namelist()
+                            assert sum(name.endswith(".osw") for name in names) == 1
+                            assert not any(name.endswith(".zpac") for name in names)
+                            assert sum(name.endswith(".avt") for name in names) == len(before["avatars"])
+                        outputs.append((writer, shape, mode, label, path, before["avatars"]))
+                observations[writer] = no_ops
+            for writer, shape, mode, label, path, avatars in outputs:
+                for reader, session in backends:
+                    await json_result(session, "scene_open", {"path": str(fixture)})
+                    tool = "checkpoint_restore" if mode == "checkpoint" else "scene_open"
+                    args = {"name": label} if mode == "checkpoint" else {"path": str(path)}
+                    assert await json_result(session, tool, args) == {
+                        "ok": True, "path": str(path), "pattern_count": 0, "avatars": avatars,
+                    }, (writer, reader, label)
+                    scene = await json_result(session, "scene_info")
+                    assert (scene["project_path"], scene["pattern_count"], scene["seam_groups"], scene["avatars"],
+                            scene["colorways"], scene["current_colorway"]) == (
+                                str(path), 0, 0, avatars, ["Default Colorway"], 0,
+                            ), (writer, reader, label, scene)
+                    assert (await composed_archive_api(session, "fabric_api.GetFabricCount", False)) == 1
+
+            await open_fixture(rust, "empty")
+            blank = root / "before-draft.zprj"
+            await json_result(rust, "scene_save", {"path": str(blank), "thumbnail": False})
+            await json_result(rust, "pattern_create", {"name": "New Panel", "points": [[0, 0], [120, 0], [0, 100]]})
+            draft = root / "after-draft.zprj"
+            await json_result(rust, "scene_save", {"path": str(draft), "thumbnail": False})
+            await json_result(clo, "scene_open", {"path": str(draft)})
+            assert [row["name"] for row in (await json_result(clo, "scene_info"))["patterns"]] == ["New Panel"]
+        finally:
+            if restorable:
+                await json_result(clo, "scene_open", {"path": original_path})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert observations["official"] == observations["rust"]
+    print(json.dumps({"result": "pass", "zpac_comparisons": len(observations["rust"]),
+                      "project_and_checkpoint_outputs": len(outputs), "cross_backend_reads": 2 * len(outputs),
+                      "new_draft_after_empty_save": True}))
+
+
 async def compare_live_recovered_zpac_save():
     root = Path(os.environ["CLO_MCP_STATE"])
     project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
@@ -8185,6 +8293,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-resumed-native-save", action="store_const", dest="comparison",
                              const=compare_live_resumed_native_save,
                              help="resume native ZPRJ and ZPAC and cross-open the position-only updates")
+    comparisons.add_argument("--compare-live-empty-native-save", action="store_const", dest="comparison",
+                             const=compare_live_empty_native_save,
+                             help="verify empty and avatar-only ZPAC, ZPRJ and native checkpoint behavior")
     comparisons.add_argument("--compare-live-recovered-zpac-save", action="store_const", dest="comparison",
                              const=compare_live_recovered_zpac_save,
                              help="cross-open native saves and checkpoints made from a recovered ZPAC")

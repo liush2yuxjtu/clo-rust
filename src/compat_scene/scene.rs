@@ -711,6 +711,12 @@ pub(super) fn save(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     match extension(path).as_str() {
         "json" | "clorust" => saved(path, state)?,
+        "zpac" if array(state, "patterns").is_empty() => {
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+            }
+            return Ok(json!({"path": path}));
+        }
         ext @ ("zprj" | "zpac") => {
             formats::native_save::save(path, state, ext == "zprj", flag(args, "thumbnail", true))?;
             state["runtime"]["gltf_export_active_only"] = json!(true);
