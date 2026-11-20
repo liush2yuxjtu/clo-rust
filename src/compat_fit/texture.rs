@@ -8,6 +8,24 @@ const MAX_DIMENSION: u32 = 4096;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const DECODE_BYTES: usize = 96 * 1024 * 1024;
 
+// First histogram rank for each successive output level from 199 through 245.
+// Measured over a uniform 256-level ramp exported by CLO 2026.1.382.
+const CLO_DESATURATION_THRESHOLDS: [u8; 47] = [
+    2, 5, 7, 10, 13, 15, 18, 22, 25, 28, 31, 35, 38, 41, 46, 49, 53, 58, 63, 66,
+    71, 76, 81, 86, 91, 96, 100, 107, 112, 119, 124, 130, 137, 143, 150, 156, 165,
+    171, 179, 186, 194, 202, 211, 221, 229, 239, 247,
+];
+
+fn lightness(pixel: &[u8]) -> usize {
+    if let [r, g, b, ..] = pixel {
+        let low = (*r).min(*g).min(*b);
+        let high = (*r).max(*g).max(*b);
+        (usize::from(low) + usize::from(high)) / 2
+    } else {
+        usize::from(pixel[0])
+    }
+}
+
 pub struct BaseTexture {
     width: usize,
     height: usize,
@@ -133,12 +151,24 @@ impl BaseTexture {
     }
 
     pub fn desaturate(&mut self) {
-        if self.channels >= 3 {
-            for pixel in self.pixels.chunks_exact_mut(self.channels) {
-                let [r, g, b] = [pixel[0], pixel[1], pixel[2]].map(u32::from);
-                let luminance = ((2126 * r + 7152 * g + 722 * b + 5000) / 10_000) as u8;
-                pixel[..3].fill(luminance);
-            }
+        if self.desaturated {
+            return;
+        }
+        let mut histogram = [0u64; 256];
+        for pixel in self.pixels.chunks_exact(self.channels) {
+            histogram[lightness(pixel)] += 1;
+        }
+        let count = (self.width * self.height) as u64;
+        let mut cumulative = 0;
+        let tones = histogram.map(|frequency| {
+            cumulative += frequency;
+            let rank = (cumulative * 255 / count) as u8;
+            198 + CLO_DESATURATION_THRESHOLDS.partition_point(|&cutoff| cutoff <= rank) as u8
+        });
+        let color_channels = if self.channels < 3 { 1 } else { 3 };
+        for pixel in self.pixels.chunks_exact_mut(self.channels) {
+            let gray = tones[lightness(pixel)];
+            pixel[..color_channels].fill(gray);
         }
         self.desaturated = true;
     }

@@ -416,10 +416,52 @@ async def verify_fabric_recolor_opacity():
                     await json_result(rust, "scene_open", {"path": str(path)})
                     assert Path((await maps(index))["opacity"]).read_bytes() == image.read_bytes()
                     native[label]["later_replacement_kept"] = True
+            references = os.environ.get("CLO_DESATURATION_REFERENCE_DIR")
+            reference_pixels = await compare_desaturation_pixels(rust, root, Path(references)) if references else {}
     print(json.dumps({"tool": "fabric_set_color", "case": "recolor opacity policy", "portable_reopen": True,
                       "opaque_map_cleared": True, "sheer_map_preserved": True, "native": native,
                       "face_rgba_readback": True, "invalid_recolor_kept_materials": True,
-                      "base_texture_retained_and_desaturated": True, "glb_base_texture_retained": True}))
+                      "base_texture_retained_and_desaturated": True, "glb_base_texture_retained": True,
+                      "official_desaturation_pixels": reference_pixels}))
+
+
+async def compare_desaturation_pixels(rust, root, reference):
+    from io import BytesIO
+    from PIL import Image
+
+    def rgba(path):
+        model, data = read_gltf_export(path)
+        primitive = model["meshes"][0]["primitives"][0]
+        pbr = model["materials"][primitive["material"]]["pbrMetallicRoughness"]
+        texture = model["textures"][pbr["baseColorTexture"]["index"]]
+        image = model["images"][texture["source"]]
+        view = model["bufferViews"][image["bufferView"]]
+        start = view.get("byteOffset", 0)
+        with Image.open(BytesIO(data[start:start + view["byteLength"]])) as decoded:
+            return decoded.size, decoded.convert("RGBA").tobytes()
+
+    await json_result(rust, "scene_clear", {"keep_avatar": False})
+    await json_result(rust, "pattern_create", {
+        "name": "Desaturation Panel", "points": [[0, 0], [100, 0], [0, 100]],
+    })
+    applied = await json_result(rust, "fabric_apply", {"fabric": "cotton"})
+    index = applied["fabric"]["index"]
+    cases = [("palette", "shared-desat-palette.png", "shared-desat-after.glb")]
+    cases.extend((case, f"desat-{case}.png", f"desat-probe-{case}-after.glb")
+                 for case in ("ramp", "alpha", "varied", "gray", "single", "long-ramp"))
+    pixels = {}
+    for case, source, expected in cases:
+        texture = (reference / source).resolve(strict=True)
+        await json_result(rust, "fabric_set_texture", {
+            "fabric_index": index, "map": "base", "image_path": str(texture),
+        })
+        await json_result(rust, "fabric_set_color", {"fabric_index": index, "color": "#27b46c"})
+        output = root / f"desaturated-{case}.glb"
+        await json_result(rust, "scene_export", {"path": str(output)})
+        size, actual = rgba(output)
+        assert (size, actual) == rgba(reference / expected), case
+        pixels[case] = size[0] * size[1]
+    return pixels
 
 
 async def verify_fabric_texture_clear():

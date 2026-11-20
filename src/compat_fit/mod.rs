@@ -374,7 +374,9 @@ mod texture_tests {
         );
         assert_eq!(state["fabrics"][0]["base_texture_desaturated"], true);
         let ([left, right], _) = capture(&mut state, true);
-        assert!(left[0] > 200 && left[1] < 40 && left[2] < 30);
-        assert!(right[0] > 130 && right[0] < left[0] && right[1] < 30 && right[2] < 20);
+        assert_eq!(left, [226, 32, 16]);
+        // Equal lightness puts both green texels at rank 255. Only the opaque texel
+        // multiplies the tint by the CLO grayscale value of 245 before flat-view shading.
+        assert_eq!(right, [217, 31, 15]);
     }
 }

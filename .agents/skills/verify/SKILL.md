@@ -47,6 +47,13 @@ Check each of faces 0, 1, and 2 through
 Compare six-digit hex, shorthand hex, and a compound color name, and check that
 invalid hex and invalid fabric indices leave the material list intact.
 
+Set `CLO_DESATURATION_REFERENCE_DIR` to the official GLB capture directory
+and install Pillow to verify the decoded base image after direct Rust export.
+The palette pair is `shared-desat-palette.png` and `shared-desat-after.glb`.
+For `ramp`, `alpha`, `varied`, `gray`, `single`, and `long-ramp`, use
+`desat-<case>.png` and `desat-probe-<case>-after.glb`. Compare decoded RGBA
+pixels exactly, including alpha.
+
 Run `--verify-fabric-assignment-workflow` to register a fabric through
 `AddFabric`, then assign it to one panel through Python and apply a different
 fabric to another panel. Use both its name and its numeric index as a string
