@@ -499,6 +499,17 @@ a simulated mesh. A native attempt with three coincident points may open a
 remeshing dialog on the dedicated desktop, so verify its eventual reply in a
 manual case.
 
+Use `--compare-native-pattern-point-edits` with `CLO_PATTERN_EDIT_FIXTURE`
+set to the same disposable archive on both hosts. Use the fixture with
+`Front`, `EndpointControls` (Bézier), and `EndpointSpline` (spline).
+Keep the starting native project available to reopen when the case ends.
+Compare absolute, relative, repeated, zero-offset, and partially committed
+moves. Check invalid point indices leave the scene unchanged. Compare brief
+and detailed lists and the full edited pattern records, including baseline
+points and lengths. Use 0.01 mm for numeric geometry and compare indices,
+arrangement labels, and orientation exactly. Preserve both readbacks and
+use the exit status to determine the verdict.
+
 Run `--verify-native-two-corner-archives` with
 `CLO_NATIVE_TWO_CORNER_FIXTURES` set to the native capture directory. It
 contains `two-corner-curve.zprj`, `two-corner-curve.zpac`, the official GLB,

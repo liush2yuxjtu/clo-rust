@@ -331,9 +331,10 @@ pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result
                 panel["saved_arrangement"] = settings;
             }
         }
-        if let Some((metrics, limits)) = outline_metrics(record, panel) {
+        if let Some((metrics, limits, controls)) = outline_metrics(record, panel) {
             panel["native_outline_metrics"] = json!(metrics);
             panel["native_outline_bounds"] = json!(limits);
+            panel["native_outline_controls"] = json!(controls);
         }
         if let Some(children) = child_shapes(record) {
             panel["native_children"] = json!(children);
@@ -427,7 +428,7 @@ fn line_metrics(edge: &[Point], straight: bool) -> Option<Value> {
     length.is_finite().then(|| json!({"length": length, "straight": straight}))
 }
 
-fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f64; 4])> {
+fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f64; 4], Vec<Value>)> {
     let shape = record.map(b"mapShape2D").ok()?;
     let transform = shape_transform(&shape)?;
     let vertices = shape_vertices(&shape)?;
@@ -441,6 +442,7 @@ fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f
         (actual.x - expected.x).hypot(actual.y - expected.y) <= 0.05
     };
     let mut metrics = Vec::with_capacity(lines.len());
+    let mut controls = Vec::with_capacity(lines.len());
     let mut limits = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
     for (i, line) in lines.iter().enumerate() {
         let (edge, straight) = line_shape(line, &vertices)?;
@@ -448,6 +450,14 @@ fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f
             || !matches(*edge.last()?, corners[(i + 1) % corners.len()])
         {
             return None;
+        }
+        controls.push(corners[i].record());
+        for point in &edge[1..edge.len() - 1] {
+            let point = transform.position(*point);
+            if !point.x.is_finite() || !point.y.is_finite() {
+                return None;
+            }
+            controls.push(point.record());
         }
         let mut sampled = curve(&edge, false);
         let [left, bottom, right, top] =
@@ -462,7 +472,7 @@ fn outline_metrics(record: &Fields<'_>, panel: &Value) -> Option<(Vec<Value>, [f
         }
         metrics.push(json!({"length": length, "straight": straight}));
     }
-    limits.iter().all(|n| n.is_finite()).then_some((metrics, limits))
+    limits.iter().all(|n| n.is_finite()).then_some((metrics, limits, controls))
 }
 
 fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Value> {
@@ -498,7 +508,10 @@ fn child_shape(shape: &Fields<'_>, parent: Transform2D, kind: &str) -> Option<Va
 }
 
 fn child_shapes(record: &Fields<'_>) -> Option<Vec<Value>> {
-    let parent = shape_transform(&record.map(b"mapShape2D").ok()?)?;
+    let outer = record.map(b"mapShape2D").ok()?;
+    let parent = shape_transform(&outer)?;
+    let vertices = shape_vertices(&outer)?;
+    let corners: Vec<_> = vertices.into_iter().map(|point| parent.position(point)).collect();
     let interiors = map_list(record.get(b"listInnerShape", LIST_TYPE).ok()?, LIMIT).ok()?;
     let baselines = map_list(record.get(b"listDummyShape", LIST_TYPE).ok()?, LIMIT).ok()?;
     let mut children = Vec::with_capacity(interiors.len() + baselines.len());
@@ -509,7 +522,18 @@ fn child_shapes(record: &Fields<'_>) -> Option<Vec<Value>> {
         if baseline.get(b"enDummyType", 4).ok()? != 1i32.to_le_bytes() {
             return None;
         }
-        children.push(child_shape(&baseline.map(b"mapShape2D").ok()?, parent, "Base Line")?);
+        let mut child = child_shape(&baseline.map(b"mapShape2D").ok()?, parent, "Base Line")?;
+        if baseline.get(b"bSeamAllowanceShape", 1).ok() == Some(&[1])
+            && child["points"].as_array().is_some_and(|points| {
+                points.len() == corners.len() && points.iter().zip(&corners).all(|(a, b)| {
+                    a[0].as_f64().zip(a[1].as_f64())
+                        .is_some_and(|(x, y)| (x - b.x).hypot(y - b.y) <= 0.001)
+                })
+            })
+        {
+            child["outline_copy"] = json!(true);
+        }
+        children.push(child);
     }
     Some(children)
 }

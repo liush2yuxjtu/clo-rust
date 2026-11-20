@@ -281,9 +281,10 @@ fn lines(pattern: &Value) -> Result<Vec<Value>, String> {
         };
         let vx = (end.x - start.x).abs();
         let vy = (end.y - start.y).abs();
-        let orientation = if vx >= 2. * vy {
+        let angular_limit = 20_f64.to_radians().tan();
+        let orientation = if vy < vx * angular_limit {
             "horizontal"
-        } else if vy >= 2. * vx {
+        } else if vx < vy * angular_limit {
             "vertical"
         } else {
             "diagonal"
@@ -348,6 +349,11 @@ fn arrangement<'a>(state: &'a Value, name: &str) -> Result<(usize, &'a Value), S
 }
 
 fn arrangement_details(state: &Value, name: &str) -> Value {
+    if name.is_empty() || name == "Arrangement Point" {
+        let mut settings = json!({"ArrangementName": "Arrangement Point"});
+        super::append_curved_arrangement_fields(&mut settings, [Some(0.0); 4]);
+        return settings;
+    }
     if let Some(record) = array(&state["avatar"], "arrangement_records").iter()
         .find(|record| record["ArrangementName"] == name)
     {
@@ -366,8 +372,10 @@ fn arrangement_details(state: &Value, name: &str) -> Value {
 }
 
 pub(super) fn summary(pattern: &Value, i: usize) -> Value {
+    let arrangement = pattern["arrangement"].as_str().filter(|name| !name.is_empty())
+        .unwrap_or("Arrangement Point");
     json!({
-        "index": i, "name": pattern["name"], "arrangement": pattern["arrangement"].as_str().unwrap_or(""),
+        "index": i, "name": pattern["name"], "arrangement": arrangement,
         "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0)
     })
 }
@@ -419,13 +427,20 @@ fn input_line(index: usize, length: &Value, straight: bool) -> Value {
     json!({"Line index": index.to_string(), "Line length": length, "Line type": kind})
 }
 
-fn input_children(pattern: &Value) -> Result<Vec<Value>, String> {
-    let Some(children) = pattern["native_children"].as_array() else {
-        return Ok(vec![json!({"Children shape count": "0"})]);
-    };
+fn input_children(pattern: &Value, outline_points: &[Value], outline_lines: &[Value]) -> Result<Vec<Value>, String> {
+    let outline_copy = json!({"type": "Base Line", "outline_copy": true});
+    let children = pattern["native_children"].as_array().map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(&outline_copy));
     // CLO includes the parent shape in this count.
     let mut records = vec![json!({"Children shape count": (children.len() + 1).to_string()})];
     for (index, child) in children.iter().enumerate() {
+        if child["outline_copy"] == true && pattern["native_outline_metrics"].is_null() {
+            records.push(json!({
+                "Shape index": index.to_string(), "Shape name": pattern["name"],
+                "Shape type": child["type"], "PointList": outline_points, "LineList": outline_lines,
+            }));
+            continue;
+        }
         let points = array(child, "points")
             .iter()
             .map(Point::from_json)
@@ -488,8 +503,8 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
         "line_info": {"lines": lines, "lineCount": lines.len(), "patternName": pattern["name"],
             "patternIndex": i, "status": "success", "boundingBox": {"minX": left, "minY": bottom,
                 "maxX": right, "maxY": top, "width": right - left, "height": top - bottom}},
-        "input_info": {"Pattern InputInformation": [{"Pattern index": i.to_string(), "Pattern name": pattern["name"],
-            "PointList": records, "LineList": line_list, "Children Information": input_children(pattern)?}]},
+        "input_info": {"Pattern InputInformation": [{"Pattern index": "0", "Pattern name": pattern["name"],
+            "PointList": records, "LineList": line_list, "Children Information": input_children(pattern, &records, &line_list)?}]},
         "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0),
         "arrangement": arrangement,
         "seam_groups": group_indices(state, pattern), "layer": pattern["layer"].as_i64().unwrap_or(0),
@@ -663,9 +678,61 @@ fn nested_number(value: &Value, key: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("{key} must be a finite number"))
 }
 
+fn move_edge_controls(
+    points: &mut [Point], start: usize, end: usize, delta: [f64; 2], move_start: bool,
+    sampled: bool,
+) {
+    let edge_indices: Vec<_> = (start..points.len())
+        .chain(0..start)
+        .take_while(|&index| index != end)
+        .chain(std::iter::once(end))
+        .collect();
+    if edge_indices.len() <= 2 {
+        return;
+    }
+    let controls = &edge_indices[1..edge_indices.len() - 1];
+    let translate = |point: &mut Point, weight: f64| {
+        point.x += weight * delta[0];
+        point.y += weight * delta[1];
+    };
+    if !sampled && controls.iter().all(|&index| points[index].kind == 3) {
+        let adjacent = if move_start { controls[0] } else { controls[controls.len() - 1] };
+        translate(&mut points[adjacent], 1.0);
+        return;
+    }
+
+    // The native spline distributes the endpoint displacement by sampled arc length.
+    let edge: Vec<_> = edge_indices.iter().map(|&index| points[index]).collect();
+    let samples = curve(&edge, sampled);
+    let distances: Vec<_> = std::iter::once(0.0).chain(samples.windows(2).scan(0.0, |sum, pair| {
+        *sum += pair[0].distance(pair[1]);
+        Some(*sum)
+    })).collect();
+    let length = distances.last().copied().unwrap_or_default();
+    if length <= 0.0 || !length.is_finite() {
+        return;
+    }
+    let mut knot = 0;
+    for &index in controls {
+        let p = points[index];
+        if let Some(step) = samples[knot..].iter().position(|s| s.x == p.x && s.y == p.y) {
+            knot += step;
+            let fraction = distances[knot] / length;
+            let weight = if move_start { 1.0 - fraction } else { fraction };
+            translate(&mut points[index], weight);
+        }
+    }
+}
+
 pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &args["pattern"])?;
-    let mut points = points(&state["patterns"][i])?;
+    let pattern = &state["patterns"][i];
+    let native_controls = pattern["native_outline_controls"].as_array();
+    let sampled = native_controls.is_none() && flag(pattern, "sampled_polyline", false);
+    let mut points = match native_controls {
+        Some(controls) => controls.iter().map(Point::from_json).collect::<Result<_, _>>()?,
+        None => points(pattern)?,
+    };
     let original = points.clone();
     let corners = corner_offsets(&points);
     let [dx, dy] = offset(&state["patterns"][i]);
@@ -694,6 +761,13 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
         if ![x, y, local_x, local_y].into_iter().all(f64::is_finite) {
             return Err("point coordinates overflow".into());
         }
+        let delta = [local_x - points[position].x, local_y - points[position].y];
+        if delta != [0.0; 2] {
+            let previous = corners[(cursor + corners.len() - 1) % corners.len()];
+            let next = corners[(cursor + 1) % corners.len()];
+            move_edge_controls(&mut points, previous, position, delta, false, sampled);
+            move_edge_controls(&mut points, position, next, delta, true, sampled);
+        }
         points[position] = Point {
             x: local_x,
             y: local_y,
@@ -703,6 +777,9 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
         Ok(())
     });
     if points != original {
+        if native_controls.is_some() {
+            state["patterns"][i]["sampled_polyline"] = json!(false);
+        }
         set_points(&mut state["patterns"][i], points);
         let id = state["patterns"][i]["id"].clone();
         discard_panel_pose(state, &id);
@@ -717,6 +794,7 @@ fn set_points(pattern: &mut Value, points: Vec<Point>) {
     let record = pattern.as_object_mut().expect("pattern object");
     record.remove("native_outline_metrics");
     record.remove("native_outline_bounds");
+    record.remove("native_outline_controls");
 }
 
 fn reflect(p: Point, a: Point, b: Point) -> Point {

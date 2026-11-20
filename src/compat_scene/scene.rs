@@ -59,13 +59,7 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
     let pieces: Vec<_> = array(state, "patterns")
         .iter()
         .enumerate()
-        .map(|(i, pattern)| {
-            let mut piece = patterns::summary(pattern, i);
-            if piece["arrangement"] == "" {
-                piece["arrangement"] = json!("Arrangement Point");
-            }
-            piece
-        })
+        .map(|(i, pattern)| patterns::summary(pattern, i))
         .collect();
     // The bridge enumerates the first N fabric indices, where N is the used count.
     let fabrics: Vec<_> = array(state, "fabrics")

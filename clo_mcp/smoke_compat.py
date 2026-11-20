@@ -2881,6 +2881,92 @@ async def compare_native_pattern_creation():
                       "two_corner_rust_portable_mesh": True}, ensure_ascii=False))
 
 
+async def compare_native_pattern_point_edits():
+    fixture = Path(os.environ["CLO_PATTERN_EDIT_FIXTURE"])
+    observations = {}
+
+    async def read(session, pattern):
+        info = await json_result(session, "pattern_info", {"pattern": pattern})
+        brief = await json_result(session, "pattern_list")
+        detailed = await json_result(session, "pattern_list", {"detail": True})
+        index = info["index"]
+        brief_row, detail_row = brief["patterns"][index], detailed["patterns"][index]
+        assert "lines" not in brief_row and "seam_groups" not in brief_row
+        assert {key: detail_row[key] for key in brief_row} == brief_row
+        assert detailed["count"] == brief["count"]
+        return {"info": info, "listing": detailed}
+
+    def compare(expected, observed, path):
+        if isinstance(expected, dict):
+            assert expected.keys() == observed.keys(), path
+            for key in expected:
+                compare(expected[key], observed[key], (*path, key))
+        elif isinstance(expected, list):
+            for index, (left, right) in enumerate(zip(expected, observed, strict=True)):
+                compare(left, right, (*path, index))
+        elif type(expected) in (int, float) or path[-1] in ("Width", "Height"):
+            assert abs(float(expected) - float(observed)) <= 0.01, (path, expected, observed)
+        else:
+            assert expected == observed, (path, expected, observed)
+
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            current = await json_result(session, "scene_info")
+            path = str(fixture if backend == "official" else fixture.resolve(strict=True))
+            await json_result(session, "scene_open", {"path": path})
+            cases = {}
+            try:
+                piece = await json_result(session, "pattern_create", {
+                    "name": "EditProbe", "points": [[500, 0], [620, 0], [610, 100], [500, 90]],
+                })
+                pattern = str(piece["index"])
+                start = await read(session, pattern)
+                zero = await json_result(session, "pattern_edit_points", {
+                    "pattern": "EditProbe", "moves": [{"point": "0", "x": "ignored", "dy": "0"}],
+                })
+                assert zero == {"index": piece["index"], "moved": [{"point": 0, "x": 500, "y": 0}]}
+                assert await read(session, pattern) == start
+                moves = [{"point": " 1 ", "x": "ignored", "dx": "40"},
+                         {"point": 2.9, "x": "625.5", "y": "100"}, {"point": 1, "dx": 50}]
+                reply = await json_result(session, "pattern_edit_points", {"pattern": "EditProbe", "moves": moves})
+                assert reply == {"index": piece["index"], "moved": [
+                    {"point": 1, "x": 660, "y": 0}, {"point": 2, "x": 625.5, "y": 100},
+                    {"point": 1, "x": 670, "y": 0},
+                ]}
+                cases["new_panel_moved"] = await read(session, pattern)
+                partial = await session.call_tool("pattern_edit_points", {
+                    "pattern": pattern, "moves": [{"point": 0, "dx": 15}, {"point": 1, "dy": "invalid"}],
+                })
+                assert partial.isError
+                cases["partial_batch"] = await read(session, pattern)
+                assert cases["partial_batch"]["info"]["line_info"]["lines"][0]["start"] == {"x": 515, "y": 0}
+                for invalid in ("20", "-1", "bad"):
+                    result = await session.call_tool("pattern_edit_points", {
+                        "pattern": pattern, "moves": [{"point": invalid, "dx": 3, "dy": 4}],
+                    })
+                    assert result.isError
+                assert await read(session, pattern) == cases["partial_batch"]
+
+                for name, moves in (
+                    ("Front", [{"point": 1, "dx": 15, "dy": 10}]),
+                    ("EndpointControls", [{"point": 1, "x": 644, "y": 30}, {"point": 0, "x": 505, "y": -9}]),
+                    ("EndpointSpline", [{"point": 1, "x": 944, "y": 30}, {"point": 0, "x": 805, "y": -9}]),
+                ):
+                    cases[name] = {
+                        "reply": await json_result(session, "pattern_edit_points", {"pattern": name, "moves": moves}),
+                        "state": await read(session, name),
+                    }
+                observations[backend] = cases
+            finally:
+                if backend == "official":
+                    await json_result(session, "scene_open", {"path": current["project_path"]})
+    print(json.dumps({"tools": ["pattern_edit_points", "pattern_info", "pattern_list"],
+                      "fixture": fixture.name, "tolerance_mm": 0.01,
+                      "zero_offset_preserved_state": True, "rejected_point_indices": 3,
+                      "cases": observations}))
+    compare(observations["official"], observations["rust"], ("point_edits",))
+
+
 async def compare_native_pattern_delete():
     fixture = Path(os.environ["CLO_PATTERN_DELETE_FIXTURE"]).resolve(strict=True)
     observations = {}
@@ -5309,6 +5395,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-native-pattern-creation", action="store_const", dest="comparison",
                              const=compare_native_pattern_creation,
                              help="compare native pattern creation and arrangement states")
+    comparisons.add_argument("--compare-native-pattern-point-edits", action="store_const", dest="comparison",
+                             const=compare_native_pattern_point_edits,
+                             help="compare point edits and post-edit pattern readback on live CLO and Rust")
     comparisons.add_argument("--compare-native-pattern-delete", action="store_const", dest="comparison",
                              const=compare_native_pattern_delete,
                              help="compare pattern deletion and scene readback using a live saved fixture")
