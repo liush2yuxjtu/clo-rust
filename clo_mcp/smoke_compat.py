@@ -1355,6 +1355,72 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_sew_keeps_drape():
+    with TemporaryDirectory(prefix="clo-sew-drape-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            await json_result(rust, "pattern_create", {
+                "name": "Front", "points": [[0, 0], [100, 0], [45, 70]],
+            })
+            await json_result(rust, "pattern_create", {
+                "name": "Back", "points": [[160, 0], [260, 0], [205, 70]],
+            })
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+            _, before = await save("before")
+            seam = {"pattern_a": "Front", "line_a": 0, "pattern_b": "Back", "line_b": 0,
+                    "dir_a": True, "dir_b": False}
+            joined = await json_result(rust, "sew", seam)
+            assert joined == {"ok": True, "seam_groups": 1}
+            duplicate = await json_result(rust, "sew", {
+                "pattern_a": "Back", "line_a": 0, "pattern_b": "Front", "line_b": 0,
+            })
+            assert duplicate == {"ok": False, "seam_groups": 1}
+            invalid = await json_result(rust, "sew", seam | {"line_a": 99})
+            assert invalid == duplicate
+            path, stitched = await save("stitched")
+            assert stitched["simulation"] == before["simulation"]
+            await json_result(rust, "scene_open", {"path": str(path)})
+            constraints = await json_result(rust, "simulate", {"steps": 0})
+            assert constraints["stitch_count"] > 0
+            _, zero = await save("zero")
+            assert zero["simulation"] == before["simulation"]
+            await json_result(rust, "simulate", {"steps": 1})
+            _, solved = await save("solved")
+            assert solved["simulation"]["steps"] == 4
+            assert solved["simulation"]["meshes"] != before["simulation"]["meshes"]
+
+            native_meshes = None
+            if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                _, source = await save("native")
+                native_meshes = len(source["simulation"]["meshes"])
+                assert native_meshes > 0 and source["simulation"]["source"] == "native_saved_pose"
+                initial_seams = (await json_result(rust, "seams_list"))["count"]
+                for i in range(1, len(source["patterns"])):
+                    result = await json_result(rust, "sew", seam | {"pattern_a": "0", "pattern_b": str(i)})
+                    if result["ok"]:
+                        break
+                else:
+                    raise AssertionError("fixture had no new boundary seam")
+                path, native = await save("native-stitched")
+                assert native["simulation"] == source["simulation"]
+                await json_result(rust, "scene_open", {"path": str(path)})
+                assert (await json_result(rust, "seams_list"))["count"] == initial_seams + 1
+                _, reopened = await save("native-reopened")
+                assert reopened["simulation"] == source["simulation"]
+    print(json.dumps({"tools": ["sew", "seams_list", "scene_open", "simulate"],
+                      "case": "sewing an existing drape", "new_stitch_constraints": constraints["stitch_count"],
+                      "continued_step": 4, "pose_and_velocities": "unchanged",
+                      "duplicate_and_out_of_range": "pass", "native_pose_meshes_preserved": native_meshes}))
+
+
 async def verify_display_edits_keep_drape():
     with TemporaryDirectory(prefix="clo-display-edits-") as directory:
         root = Path(directory)
@@ -2040,6 +2106,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-display-edits-keep-drape", action="store_const", dest="comparison",
                              const=verify_display_edits_keep_drape,
                              help="verify layout, visibility and strength edits preserve saved drape")
+    comparisons.add_argument("--verify-sew-keeps-drape", action="store_const", dest="comparison",
+                             const=verify_sew_keeps_drape,
+                             help="verify newly added seams solve from the saved drape")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2056,7 +2125,7 @@ if __name__ == "__main__":
                                 verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
-                                verify_display_edits_keep_drape)
+                                verify_display_edits_keep_drape, verify_sew_keeps_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

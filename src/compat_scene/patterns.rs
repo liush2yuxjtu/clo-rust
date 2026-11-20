@@ -878,7 +878,8 @@ pub(super) fn sew(args: &Value, state: &mut Value) -> Reply {
         "name": format!("Seamline Pair Group {}", count + 1)
     });
     vec_mut(state, "seams").push(seam);
-    invalidate_geometry(state);
+    // Sewing adds constraints without changing the fabric mesh. The next
+    // simulation assembles the new stitches against the current drape.
     Ok(json!({"ok": true, "seam_groups": count + 1}))
 }
 

@@ -218,6 +218,13 @@ step count after reopening. Use a geometric flip as the reset control.
 Set `CLO_DISPLAY_FIXTURE` to a native project with saved drape to also
 verify absolute placement and visibility changes on archived meshes.
 
+Run `--verify-sew-keeps-drape` to add sewing to a settled scene, reopen
+it, and assemble the additional stitch constraints at zero steps.
+Check that the saved positions and velocities match the pre-sewing
+scene, then advance one simulation step. Verify duplicate and
+out-of-range seam rejection. Set `CLO_DISPLAY_FIXTURE` to check
+sewing and reopening with a native pose archive as well.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.
