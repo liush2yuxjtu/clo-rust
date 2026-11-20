@@ -39,14 +39,37 @@ fn rgba(bytes: &[u8]) -> Result<[f64; 4], String> {
 
 fn face_colors(record: &Fields<'_>) -> Result<Vec<(i32, [f64; 4])>, String> {
     let material = record.map(b"mapMaterial2D")?;
-    super::native_pose::map_list(material.get(b"listFaceMaterial", LIST_TYPE)?, 64)?
+    read_face_colors(&material)
+}
+
+pub(super) fn read_face_colors(material: &Fields<'_>) -> Result<Vec<(i32, [f64; 4])>, String> {
+    let (faces, legacy_front) = face_records(material)?;
+    faces
         .iter()
-        .map(|face| {
-            let kind = integer(face.get(b"enMaterialFaceType", INT_TYPE)?)?;
+        .enumerate()
+        .map(|(index, face)| {
+            let kind = face_type(face, index, legacy_front)?;
             let color = rgba(face.map(b"mapBaseColor")?.get(b"v4Color", VEC4_TYPE)?)?;
             Ok((kind, color))
         })
         .collect()
+}
+
+pub(super) fn face_records<'a>(material: &Fields<'a>) -> Result<(Vec<Fields<'a>>, bool), String> {
+    let faces = super::native_pose::map_list(material.get(b"listFaceMaterial", LIST_TYPE)?, 64)?;
+    let legacy_front = faces.len() == 1 && faces[0].get(b"enMaterialFaceType", INT_TYPE).is_err();
+    Ok((faces, legacy_front))
+}
+
+pub(super) fn face_type(
+    face: &Fields<'_>,
+    index: usize,
+    legacy_front: bool,
+) -> Result<i32, String> {
+    if legacy_front && index == 0 {
+        return Ok(0);
+    }
+    integer(face.get(b"enMaterialFaceType", INT_TYPE)?)
 }
 
 fn material(record: &Fields<'_>) -> Result<Value, String> {

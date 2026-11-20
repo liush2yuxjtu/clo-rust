@@ -107,6 +107,61 @@ const MATERIALS: &[Preset] = &[
     },
 ];
 
+// Keyword-to-file mappings exposed by the CLO MCP fabric tools.
+#[rustfmt::skip]
+const LIBRARY_KEYWORDS: &[(&[&str], &str)] = &[
+    (&["satin", "silk", "charmeuse", "duchess"], "V2_Woven_Satin_1"),
+    (&["chiffon"], "V2_Woven_Chiffon_1"),
+    (&["georgette"], "V2_Woven_Georgette_1"),
+    (&["crepe", "cdc", "crepe de chine"], "V2_Woven_Crepe_CDC_1"),
+    (&["organza"], "V2_Woven_Organza_1"),
+    (&["taffeta"], "V2_Woven_Taffeta_1"),
+    (&["tulle", "mesh", "net"], "V2_Cut_Sew_Knit_Mesh_Tulle_1"),
+    (&["lace"], "V2_Cut_Sew_Knit_Lace_1"),
+    (&["velvet", "velveteen"], "V2_Woven_Velvet_Velveteen_1"),
+    (&["velour"], "V2_Cut_Sew_Knit_Velour_1"),
+    (&["jersey", "t-shirt", "tee", "knit", "stretch"], "V2_Cut_Sew_Knit_Jersey_1"),
+    (&["ity", "matte jersey", "slinky"], "V2_Cut_Sew_Knit_ITY_MatteJersey_1"),
+    (&["ponte", "double knit"], "V2_Cut_Sew_Knit_Ponte_1"),
+    (&["scuba", "neoprene"], "V2_Cut_Sew_Knit_Neoprene_Scuba_1"),
+    (&["rib", "ribbed"], "V2_Cut_Sew_Knit_Rib_1"),
+    (&["crepe knit"], "V2_Cut_Sew_Knit_CrepeKnit_1"),
+    (&["denim", "jean"], "V2_Woven_Denim_1"),
+    (&["chambray", "oxford"], "V2_Woven_Chambray_Oxford_1"),
+    (&["poplin", "cotton", "shirting"], "V2_Woven_Poplin_1"),
+    (&["linen", "plain weave"], "V2_Woven_Plain_1"),
+    (&["twill", "gabardine"], "V2_Woven_Twill_1"),
+    (&["canvas", "duck"], "V2_Woven_Canvas_1"),
+    (&["wool", "suiting", "tweed"], "V2_Woven_Tweed_1"),
+    (&["melton", "boiled wool", "coating"], "V2_Woven_Melton_Boiled_1"),
+    (&["flannel"], "V2_Woven_Flannel_1"),
+    (&["voile", "lawn"], "V2_Woven_Voile_1"),
+    (&["gauze", "double gauze", "muslin"], "V2_Woven_Gauze_DoubleGauze_1"),
+    (&["challis", "rayon", "viscose"], "V2_Woven_Challis_1"),
+    (&["seersucker"], "V2_Woven_Seersucker_1"),
+    (&["corduroy", "cord"], "V2_Woven_Corduroy_1"),
+    (&["jacquard", "brocade", "damask"], "V2_Woven_Jacquard_Brocade_1"),
+    (&["boucle"], "V2_Woven_Boucle_1"),
+    (&["plaid", "tartan", "check"], "V2_Woven_Plaid_1"),
+    (&["eyelet", "broderie"], "V2_Woven_Eyelet_1"),
+    (&["dobby"], "V2_Woven_Dobby_1"),
+    (&["leather"], "V2_Leather_Full_Grain"),
+    (&["vegan leather", "pleather", "pu"], "V2_Animal_Alternatives_VeganLeather_1"),
+    (&["suede"], "V2_Animal_Alternatives_VeganSuede_1"),
+    (&["fur"], "V2_Animal_Alternatives_VeganFur_1"),
+    (&["fleece"], "V2_Cut_Sew_Knit_Fleece_1"),
+    (&["french terry", "sweatshirt"], "V2_Cut_Sew_Knit_FrenchTerry_1"),
+    (&["pique", "polo"], "V2_Cut_Sew_Knit_Pique_1"),
+    (&["interlock"], "V2_Cut_Sew_Knit_DoubleKnit_Interlock_1"),
+    (&["ripstop", "nylon"], "V2_Woven_Ripstop_1"),
+    (&["crochet"], "V2_Cut_Sew_Knit_Crochet_1"),
+    (&["pointelle"], "V2_Cut_Sew_Knit_Pointelle_1"),
+    (&["waffle"], "V2_Cut_Sew_Knit_Waffle_1"),
+    (&["sherpa"], "V2_Cut_Sew_Knit_Sherpa_1"),
+    (&["ottoman"], "V2_Woven_Ottoman_1"),
+    (&["dewspo", "sportswear"], "V2_Woven_Dewspo_1"),
+];
+
 pub fn default_body() -> Value {
     json!({
         "height":1755.0,"bust":814.0,"underbust":662.0,"waist":608.0,"high_hip":805.0,
@@ -236,20 +291,43 @@ fn avatar_lookup(reference: &str, alias: Option<&str>) -> Option<PathBuf> {
     })
 }
 
-fn files(root: &str, types: &[&str]) -> Vec<PathBuf> {
-    fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|ext| types.iter().any(|kind| kind.eq_ignore_ascii_case(ext)))
-        })
-        .collect()
+fn fabric_paths(root: &Path) -> Vec<PathBuf> {
+    fn visit(root: &Path, remaining: &mut usize, depth: usize, paths: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+        {
+            if *remaining == 0 {
+                break;
+            }
+            *remaining -= 1;
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && depth > 0 {
+                visit(&path, remaining, depth - 1, paths);
+            } else if kind.is_file()
+                && path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("zfab") || ext.eq_ignore_ascii_case("json")
+                })
+            {
+                paths.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    visit(root, &mut 20_000, 16, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn fabric_root() -> Option<PathBuf> {
+    match std::env::var_os("CLO_RUST_FABRIC_DIR") {
+        Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
+        None => std::env::var_os("CLO_MCP_ASSETS").map(|dir| PathBuf::from(dir).join("Fabric")),
+    }
 }
 
 pub fn avatar_from_path(path: &Path) -> Result<Value, String> {
@@ -544,17 +622,103 @@ pub fn arrangement_points(state: &Value) -> Result<Value, String> {
     Ok(json!({"count":points.len(),"names":points}))
 }
 
+fn library_keyword(reference: &str) -> (&'static str, &'static str) {
+    let lower = reference.to_ascii_lowercase();
+    let mut best = ("V2_Woven_Crepe_CDC_1", "default (crepe)");
+    let mut length = 0;
+    for (keys, stem) in LIBRARY_KEYWORDS {
+        for key in *keys {
+            if key.len() > length && lower.contains(key) {
+                best = (stem, key);
+                length = key.len();
+            }
+        }
+    }
+    best
+}
+
+fn native_fabric_path(reference: &str) -> Result<Option<(PathBuf, &'static str)>, String> {
+    let path = Path::new(reference);
+    let explicit = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"));
+    if explicit && path.is_file() {
+        return Ok(Some((path.to_path_buf(), "path")));
+    }
+    if explicit && path.components().count() > 1 {
+        return Err(format!(
+            "no fabric file matching {reference:?}; see fabric_library"
+        ));
+    }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        return Ok(None);
+    }
+    let mut files = fabric_root()
+        .as_deref()
+        .map(fabric_paths)
+        .unwrap_or_default();
+    files.retain(|path| {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"))
+    });
+    let find = |name: &str| {
+        files
+            .iter()
+            .find(|path| {
+                [path.file_name(), path.file_stem()]
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+    };
+    if let Some(path) = find(reference) {
+        return Ok(Some((path, "path")));
+    }
+    if explicit {
+        return Err(format!(
+            "no fabric file matching {reference:?}; see fabric_library"
+        ));
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let (stem, matched) = library_keyword(reference);
+    let partial = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        (!name.is_empty())
+            .then(|| {
+                files
+                    .iter()
+                    .find(|p| {
+                        p.file_stem().is_some_and(|stem| {
+                            stem.to_string_lossy().to_ascii_lowercase().contains(&name)
+                        })
+                    })
+                    .cloned()
+            })
+            .flatten()
+    };
+    let found = find(stem)
+        .or_else(|| partial(stem))
+        .or_else(|| partial(reference))
+        .map(|path| (path, matched));
+    found.map(Some).ok_or_else(|| {
+        format!("no fabric file for {reference:?} (matched {matched}); see fabric_library")
+    })
+}
+
 fn material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String> {
     let reference = reference.trim();
     let path = Path::new(reference);
-    if path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"))
-    {
-        return Err(
-            "native Rust does not decode CLO .zfab files; supply a Rust material JSON preset"
-                .into(),
-        );
+    if let Some((path, matched)) = native_fabric_path(reference)? {
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        let data = crate::compat_scene::read_native_fabric(&path)
+            .map_err(|error| format!("cannot load fabric {}: {error}", path.display()))?;
+        return Ok((data, matched.to_owned(), Some(path)));
     }
     if path
         .extension()
@@ -563,9 +727,8 @@ fn material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String>
         let path = if path.is_file() {
             path.to_path_buf()
         } else {
-            std::env::var("CLO_RUST_FABRIC_DIR")
-                .ok()
-                .map(|dir| PathBuf::from(dir).join(path))
+            fabric_root()
+                .map(|dir| dir.join(path))
                 .filter(|path| path.is_file())
                 .ok_or_else(|| format!("no material file matching {reference:?}"))?
         };
@@ -601,6 +764,16 @@ fn material(reference: &str) -> Result<(Value, String, Option<PathBuf>), String>
 }
 
 pub fn selected_material(reference: &str) -> Result<Value, String> {
+    if let Some((path, matched)) = native_fabric_path(reference.trim())? {
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        let (stem, _) = library_keyword(reference);
+        let library_stem = if matched == "path" {
+            reference.trim()
+        } else {
+            stem
+        };
+        return Ok(json!({"library_stem":library_stem,"matched":matched,"path":path}));
+    }
     let (material, matched, file) = material(reference)?;
     let library_stem = match matched.as_str() {
         "default (crepe)" | "crepe" | "crepe de chine" | "cdc" => "V2_Woven_Crepe_CDC_1",
@@ -614,16 +787,18 @@ pub fn selected_material(reference: &str) -> Result<Value, String> {
 
 pub fn fabric_library(args: &Value) -> Value {
     let query = string(args, "filter", "").to_ascii_lowercase();
-    let root = std::env::var("CLO_RUST_FABRIC_DIR").ok();
-    let custom = root
-        .as_deref()
-        .map(|p| files(p, &["json"]))
-        .unwrap_or_default();
+    let root = fabric_root();
+    let custom = root.as_deref().map(fabric_paths).unwrap_or_default();
+    let native = custom.iter().any(|p| {
+        p.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zfab"))
+    });
     let mut fabric_names: Vec<_> = MATERIALS
         .iter()
         .filter(|p| {
-            p.name.to_ascii_lowercase().contains(&query)
-                || p.aliases.iter().any(|s| s.contains(&query))
+            !native
+                && (p.name.to_ascii_lowercase().contains(&query)
+                    || p.aliases.iter().any(|s| s.contains(&query)))
         })
         .map(|preset| preset.name.to_owned())
         .collect();
@@ -635,8 +810,13 @@ pub fn fabric_library(args: &Value) -> Value {
             .map(str::to_owned),
     );
     fabric_names.sort();
-    let mut keywords: Vec<_> = MATERIALS.iter().flat_map(|p| p.aliases).copied().collect();
+    let mut keywords: Vec<_> = LIBRARY_KEYWORDS
+        .iter()
+        .flat_map(|(keys, _)| *keys)
+        .copied()
+        .collect();
     keywords.sort_unstable();
+    keywords.dedup();
     json!({"folder":root,"fabrics":fabric_names,"keywords":keywords})
 }
 
@@ -737,7 +917,9 @@ fn texture(path: &str, kind: &str) -> Result<PathBuf, String> {
     let webp = count >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP";
     if kind == "base" {
         if !png && !jpeg {
-            return Err("the native base-color renderer requires a static PNG or JPEG texture".into());
+            return Err(
+                "the native base-color renderer requires a static PNG or JPEG texture".into(),
+            );
         }
         BaseTexture::load(&path)
             .map_err(|error| format!("invalid base texture {}: {error}", path.display()))?;
@@ -771,11 +953,25 @@ pub fn fabric_apply(args: &Value, state: &mut Value) -> Result<Value, String> {
         .transpose()?;
     if let Some(rgb) = rgb {
         material["color"] = json!(rgb);
+        material["rgba"] = json!([rgb[0], rgb[1], rgb[2], 1.0]);
+        if let Some(maps) = material["texture_maps"].as_object_mut() {
+            maps.remove("base");
+        }
     }
     if let Some(path) = &base_texture {
         material["texture_maps"]["base"] = json!(path);
     }
+    let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
+        pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&i)
+    });
     let fabrics = array_mut(state, "fabrics");
+    if fabrics.is_empty() && preserve_default {
+        fabrics.push(json!({
+            "index": 0, "name": "Fabric 1", "stiffness": 0.9,
+            "color": [0.85, 0.85, 0.85], "texture_maps": {},
+            "info": {"source": "rust_default"}
+        }));
+    }
     let index = fabrics
         .iter()
         .filter_map(|f| f["index"].as_u64())

@@ -5,6 +5,8 @@ mod scene;
 
 use serde_json::{json, Value};
 
+pub(crate) use formats::native_fabric::read as read_native_fabric;
+
 pub(crate) fn read_native_archive_member(
     path: &std::path::Path,
     header: &[u8; 16],

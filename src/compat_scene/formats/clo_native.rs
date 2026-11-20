@@ -146,7 +146,7 @@ pub(in crate::compat_scene) fn read_project_avatar_dan(
     Ok(Some((name, member(&mut archive, "dan")?)))
 }
 
-fn bounded_file(path: &Path) -> Result<std::io::BufReader<File>, String> {
+pub(super) fn bounded_file(path: &Path) -> Result<std::io::BufReader<File>, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     if size > ARCHIVE_LIMIT {

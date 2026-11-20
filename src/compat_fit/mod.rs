@@ -176,6 +176,24 @@ mod tests {
         );
         assert_eq!(color["result"]["ok"], json!([true, true, true]));
     }
+
+    #[test]
+    fn first_fabric_assignment_preserves_the_unselected_panels_default() {
+        let mut state = json!({"fabrics":[],"patterns":[
+            {"id":0,"name":"Front","fabric_index":0},
+            {"id":1,"name":"Back","fabric_index":0}
+        ]});
+        let applied = invoke(
+            "fabric_apply",
+            json!({"fabric":"cotton","patterns":["Front"]}),
+            &mut state,
+        );
+        let fabric = applied["fabric"]["index"].clone();
+        assert_eq!(state["patterns"][0]["fabric_index"], fabric);
+        assert_eq!(state["patterns"][1]["fabric_index"], 0);
+        assert_ne!(fabric, 0);
+        assert_eq!(state["fabrics"][0]["index"], 0);
+    }
 }
 
 #[cfg(test)]

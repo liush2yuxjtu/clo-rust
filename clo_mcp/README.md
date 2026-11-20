@@ -48,6 +48,12 @@ codex mcp add clo-rust -- "$PWD/.venv/bin/python" "$PWD/clo_mcp/stdio.py"
 及明确的缺项。MCP 的 GLB 导出使用 CLO 实测的毫米坐标。
 `avatar_load` 和 `scene_open` 可读取 `.avt` 的静态网格和排布点。可用 `CLO_RUST_AVATAR_DIR`
 指定本地人台库。骨骼动作和原生量体校准尚未包含。
+`fabric_library` 和 `fabric_apply` 可以读取本地 CLO 面料库。将
+`CLO_RUST_FABRIC_DIR` 指向包含 `.zfab` 的 `Fabric` 目录，或通过
+`CLO_MCP_ASSETS` 指定其上一级。也可以直接向 `fabric_apply` 传入
+`.zfab` 文件路径。Rust 读取文件中的面料名称、正面颜色、贴图和物理参数。
+CPU 仿真目前把经纬向拉伸刚度合并成一个裁片刚度。贴图通道的显示和导出
+取决于目标格式。
 `simulate` 未指定新粒距时，可从保存的网格和零初速度启动 Rust CPU 求解，
 后续调用保留 Rust 计算出的速度。显式指定新粒距会重新划分网格。
 CPU 求解器会约束已识别的启用边区间缝线，并报告尚未覆盖的内部线和跨边缝线组。

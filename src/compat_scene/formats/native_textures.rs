@@ -1,6 +1,7 @@
 //! Resolve and replace texture images referenced by native fabric records.
 
 use super::clo_native::find;
+use super::native_materials::{face_records, face_type};
 use super::native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE};
 use super::native_recolor::edit_materials;
 use serde_json::{json, Value};
@@ -109,6 +110,48 @@ fn load_image<R: Read + Seek>(archive: &mut ZipArchive<R>, name: &str) -> Result
     cache_image(&bytes)
 }
 
+fn front_texture_refs<'a>(material: &Fields<'a>) -> Result<Vec<(&'static str, &'a str)>, String> {
+    let (faces, legacy_front) = face_records(material)?;
+    let mut refs = Vec::new();
+    for (index, face) in faces.iter().enumerate() {
+        if face_type(face, index, legacy_front)? != 0 {
+            continue;
+        }
+        for texture in textures(face)? {
+            let kind = integer(&texture, b"enType")?;
+            if let Some((key, _)) = TYPES.iter().find(|(_, type_id)| *type_id == kind) {
+                if let Ok(name) = filename(&texture) {
+                    refs.push((*key, name));
+                }
+            }
+        }
+    }
+    Ok(refs)
+}
+
+pub(super) fn fabric_maps<R: Read + Seek>(
+    material: &Fields<'_>,
+    archive: &mut ZipArchive<R>,
+) -> Result<(Value, Vec<String>), String> {
+    let mut maps = json!({});
+    let mut warnings = Vec::new();
+    let mut total = 0u64;
+    for (key, name) in front_texture_refs(material)? {
+        let size = archive.by_name(name).map_or(0, |file| file.size());
+        if total.saturating_add(size) > 256 * 1024 * 1024 {
+            return Err("fabric texture cache exceeded 256 MiB".into());
+        }
+        match load_image(archive, name) {
+            Ok(path) => {
+                total += size;
+                maps[key] = json!(path);
+            }
+            Err(error) => warnings.push(format!("native texture {name}: {error}")),
+        }
+    }
+    Ok((maps, warnings))
+}
+
 pub(super) fn hydrate<R: Read + Seek>(
     pac: &[u8],
     archive: &mut ZipArchive<R>,
@@ -124,41 +167,29 @@ pub(super) fn hydrate<R: Read + Seek>(
     let mut warnings = Vec::new();
     for (index, fabric) in fabrics.iter().enumerate() {
         let material = fabric.map(b"mapMaterial2D")?;
-        for face in map_list(material.get(b"listFaceMaterial", LIST_TYPE)?, 64)? {
-            if integer(&face, b"enMaterialFaceType")? != 0 {
-                continue;
-            }
-            for texture in textures(&face)? {
-                let kind = integer(&texture, b"enType")?;
-                let Some((key, _)) = TYPES.iter().find(|(_, type_id)| *type_id == kind) else {
+        for (key, name) in front_texture_refs(&material)? {
+            let cached = if let Some(path) = cache.get(name) {
+                path.clone()
+            } else {
+                // Bound extracted assets from one scene, including multiple fabrics.
+                let size = archive.by_name(name).map_or(0, |file| file.size());
+                if totals.saturating_add(size) > 256 * 1024 * 1024 {
+                    warnings.push("native texture cache exceeded 256 MiB".to_owned());
                     continue;
-                };
-                let Ok(name) = filename(&texture) else {
-                    continue;
-                };
-                let cached = if let Some(path) = cache.get(name) {
-                    path.clone()
-                } else {
-                    // Bound extracted assets from one scene, including multiple fabrics.
-                    let size = archive.by_name(name).map_or(0, |file| file.size());
-                    if totals.saturating_add(size) > 256 * 1024 * 1024 {
-                        warnings.push("native texture cache exceeded 256 MiB".to_owned());
+                }
+                match load_image(archive, name) {
+                    Ok(path) => {
+                        totals += size;
+                        cache.insert(name.to_owned(), path.clone());
+                        path
+                    }
+                    Err(error) => {
+                        warnings.push(format!("native texture {name}: {error}"));
                         continue;
                     }
-                    match load_image(archive, name) {
-                        Ok(path) => {
-                            totals += size;
-                            cache.insert(name.to_owned(), path.clone());
-                            path
-                        }
-                        Err(error) => {
-                            warnings.push(format!("native texture {name}: {error}"));
-                            continue;
-                        }
-                    }
-                };
-                state["fabrics"][index]["texture_maps"][*key] = json!(cached);
-            }
+                }
+            };
+            state["fabrics"][index]["texture_maps"][key] = json!(cached);
         }
     }
     state["native_texture_warnings"] = json!(warnings);
