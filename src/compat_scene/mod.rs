@@ -13,6 +13,23 @@ pub(crate) use formats::write as write_artifact;
 pub(crate) use scene::{avatar_names, checkpoint_before_build, clear_patterns};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 
+pub(crate) fn fabric_for_colorway<'a>(
+    state: &Value,
+    fabric: &'a Value,
+    colorway: usize,
+) -> Result<&'a Value, String> {
+    if state["current_colorway"].as_u64().unwrap_or(0) == colorway as u64 {
+        return Ok(fabric);
+    }
+    let variants = &fabric["native_colorway_materials"];
+    if variants["names"] == state["colorways"] {
+        if let Some(material) = variants["values"].get(colorway).filter(|value| value.is_object()) {
+            return Ok(material);
+        }
+    }
+    Err(format!("fabric has no archived material for colorway {colorway}"))
+}
+
 pub(crate) fn append_curved_arrangement_fields(record: &mut Value, values: [Option<f32>; 4]) {
     record["ArrangementType"] = json!("Curved");
     for ((field, scale, origin), value) in [

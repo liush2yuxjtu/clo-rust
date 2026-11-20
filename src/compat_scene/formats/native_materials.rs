@@ -1,7 +1,8 @@
 //! Restore recorded material identity and front-face color for scene queries and display.
 
-use super::native_pose::{panel_records, Fields, BYTE_TYPE, LIST_TYPE};
+use super::native_pose::{map_list, panel_records, Fields, BYTE_TYPE, LIST_TYPE};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const INT_TYPE: u8 = 4;
 const UINT_TYPE: u8 = 5;
@@ -21,7 +22,7 @@ pub(super) fn read_colorways(pac: &[u8]) -> Result<(Vec<String>, usize), String>
     } else {
         root.get(b"listColorway", LIST_TYPE)?
     };
-    let names = super::native_pose::map_list(records, 4096)?
+    let names = map_list(records, 4096)?
         .iter()
         .map(|record| {
             let name = record
@@ -82,7 +83,7 @@ pub(super) fn read_face_colors(material: &Fields<'_>) -> Result<Vec<(i32, [f64; 
 }
 
 pub(super) fn face_records<'a>(material: &Fields<'a>) -> Result<(Vec<Fields<'a>>, bool), String> {
-    let faces = super::native_pose::map_list(material.get(b"listFaceMaterial", LIST_TYPE)?, 64)?;
+    let faces = map_list(material.get(b"listFaceMaterial", LIST_TYPE)?, 64)?;
     let legacy_front = faces.len() == 1 && faces[0].get(b"enMaterialFaceType", INT_TYPE).is_err();
     Ok((faces, legacy_front))
 }
@@ -98,11 +99,10 @@ pub(super) fn face_type(
     integer(face.get(b"enMaterialFaceType", INT_TYPE)?)
 }
 
-fn material(record: &Fields<'_>) -> Result<Value, String> {
+pub(super) fn material(record: &Fields<'_>, material: &Fields<'_>) -> Result<Value, String> {
     let name = std::str::from_utf8(record.get(b"qsFabricNameUTF8", BYTE_TYPE)?)
         .map_err(|_| "invalid UTF-8 in native fabric name")?;
-    let material = record.map(b"mapMaterial2D")?;
-    let faces = read_face_colors(&material)?;
+    let faces = read_face_colors(material)?;
     let front = faces
         .iter()
         .find(|(kind, _)| *kind == 0)
@@ -111,7 +111,7 @@ fn material(record: &Fields<'_>) -> Result<Value, String> {
         "name": name, "texture_maps": {},
         "info": {
             "source": "native_saved_material",
-            "catalog": super::native_fabric::catalog(record, &material)?,
+            "catalog": super::native_fabric::catalog(record, material)?,
             "face_colors": faces.iter().map(|(type_code, rgba)| json!({"type": type_code, "rgba": rgba})).collect::<Vec<_>>()
         }
     });
@@ -123,6 +123,53 @@ fn material(record: &Fields<'_>) -> Result<Value, String> {
         entry["info"]["physical_properties"] = properties;
     }
     Ok(entry)
+}
+
+pub(super) fn colorway_materials<'a>(
+    root: &Fields<'a>,
+    fabrics: &[Fields<'a>],
+) -> Result<Vec<Vec<Fields<'a>>>, String> {
+    let table = root.map(b"mapColorWay")?;
+    let colorways = map_list(
+        table.map(b"mapNewColorway")?.get(b"listColorway", LIST_TYPE)?,
+        4096,
+    )?;
+    if colorways.len().saturating_mul(fabrics.len()) > 65_536 {
+        return Err("native fabric and colorway count exceeds the supported limit".into());
+    }
+    let id = |row: &Fields<'_>, key| {
+        let data = row.get(key, UINT_TYPE)?;
+        Ok::<_, String>(u32::from_le_bytes(data.try_into().map_err(|_| "invalid native colorway ID width")?))
+    };
+    let mut chips = HashMap::new();
+    let vectors = table.map(b"mapStyleChipAssign")?;
+    for vector in map_list(vectors.get(b"listFabricToStyleChipVector", LIST_TYPE)?, 4096)? {
+        let style = id(&vector, b"uiStyleID")?;
+        for chip in map_list(vector.get(b"listStyleChip", LIST_TYPE)?, 4096)? {
+            let chip_id = id(&chip.map(b"mapElement")?, b"uiID")?;
+            if chips.insert((style, chip_id), chip).is_some() {
+                return Err("duplicate native fabric style chip".into());
+            }
+        }
+    }
+    let styles = fabrics.iter().map(|row| id(row, b"uiID")).collect::<Result<Vec<_>, _>>()?;
+    colorways.iter().map(|colorway| {
+        let assignments = colorway.map(b"mapAssignStyleChip")?;
+        let mut selected = HashMap::new();
+        for row in map_list(assignments.get(b"listFabricToStyleChip", LIST_TYPE)?, 4096)? {
+            if selected.insert(id(&row, b"uiStyleID")?, id(&row, b"uiStyleChipID")?).is_some() {
+                return Err("duplicate native colorway fabric assignment".into());
+            }
+        }
+        styles.iter().map(|style| {
+            let chip_id = selected.get(style).ok_or("native colorway does not assign a fabric")?;
+            let chip = chips.get(&(*style, *chip_id)).ok_or("native colorway fabric style chip is missing")?;
+            let materials = map_list(chip.get(b"listMaterial2D", LIST_TYPE)?, 64)?;
+            let [material] = <[Fields<'_>; 1]>::try_from(materials)
+                .map_err(|_| "native colorway fabric style chip must have one material")?;
+            Ok(material)
+        }).collect()
+    }).collect()
 }
 
 fn assignment(record: &Fields<'_>, count: usize) -> Result<usize, String> {
@@ -142,11 +189,11 @@ fn assignment(record: &Fields<'_>, count: usize) -> Result<usize, String> {
 
 pub(super) fn read(pac: &[u8], patterns: &[Value]) -> Result<Materials, String> {
     let root = Fields::read(pac)?;
-    let entries: Vec<_> = super::native_pose::map_list(root.get(b"listFabric", LIST_TYPE)?, 4096)?
+    let entries: Vec<_> = map_list(root.get(b"listFabric", LIST_TYPE)?, 4096)?
         .iter()
         .enumerate()
         .map(|(index, record)| {
-            let mut data = material(record)?;
+            let mut data = material(record, &record.map(b"mapMaterial2D")?)?;
             data["index"] = json!(index);
             Ok::<_, String>(data)
         })
@@ -246,7 +293,8 @@ mod tests {
                 map(&[(b"listFaceMaterial", LIST_TYPE, body)]),
             ),
         ]);
-        let entry = material(&Fields::read(&bytes).unwrap()).unwrap();
+        let record = Fields::read(&bytes).unwrap();
+        let entry = material(&record, &record.map(b"mapMaterial2D").unwrap()).unwrap();
         assert_eq!(entry["name"], "Stored test fabric");
         assert_eq!(entry["color"], json!([0.125, 0.25, 0.75]));
         assert_eq!(entry["rgba"], json!([0.125, 0.25, 0.75, 0.5]));

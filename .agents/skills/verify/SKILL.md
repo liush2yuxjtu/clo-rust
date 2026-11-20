@@ -434,7 +434,10 @@ Run `--verify-reordered-native-archives` with `CLO_REORDERED_ZPRJ` and
 record. Verify the two panels, named seam, material assignments, colorway
 order and active index, and each archive's particle distance. Reopen the
 portable save and check that zero simulation steps preserve triangle
-indices, rest UVs, and posed vertices exactly.
+indices, rest UVs, and posed vertices exactly. Read both front RGBA values
+through the three-argument fabric API, then repeat the query from Python
+after reopening. Verify the two-argument call reads the active colorway
+and an invalid colorway index leaves the scene intact.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.

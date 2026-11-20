@@ -3755,6 +3755,17 @@ async def verify_reordered_native_archives():
                 assert scene["colorways"] == ["Original", "Alternate"] and scene["current_colorway"] == 1
                 assert [row["name"] for row in scene["patterns"]] == ["Front", "Back"]
                 assert all(row["fabric_index"] == 0 for row in scene["patterns"])
+                function = "fabric_api.GetFabricPBRMaterialBaseColor"
+                expected_colors = [[0.6, 0, 0.2, 1], [36 / 255, 95 / 255, 221 / 255, 1]]
+                for index, expected in enumerate(expected_colors):
+                    result = await json_result(session, "clo_api_call", {
+                        "name": function, "args": [index, 0, 0],
+                    })
+                    assert all(abs(a - b) < 1e-6 for a, b in zip(result["value"], expected, strict=True))
+                active = await json_result(session, "clo_api_call", {"name": function, "args": [0, 0]})
+                assert all(abs(a - b) < 1e-6 for a, b in zip(active["value"], expected_colors[1], strict=True))
+                invalid = await session.call_tool("clo_api_call", {"name": function, "args": [2, 0, 0]})
+                assert invalid.isError and await json_result(session, "scene_info") == scene
                 groups = await json_result(session, "seams_list")
                 group, = groups["groups"]
                 assert group["name"] == "Sewing_8359" and group["patterns"] == ["Front", "Back"]
@@ -3772,6 +3783,11 @@ async def verify_reordered_native_archives():
                 assert pose["source"] == "native_saved_pose"
                 assert sum(len(mesh["positions"]) for mesh in pose["meshes"]) == vertices
                 await json_result(session, "scene_open", {"path": str(path)})
+                colors = await json_result(session, "clo_run_python", {
+                    "code": f"[list({function}(i, 0, 0)) for i in (0, 1)]",
+                })
+                for actual, expected in zip(colors["value"], expected_colors, strict=True):
+                    assert all(abs(a - b) < 1e-6 for a, b in zip(actual, expected, strict=True))
                 result = await json_result(session, "simulate", {"steps": 0})
                 assert result["ok"] and result["steps"] == 0
                 reopened = path.with_name(f"{kind}-reopened.clorust")
@@ -3782,7 +3798,8 @@ async def verify_reordered_native_archives():
                     assert after["velocities"] == [[0, 0, 0]] * len(before["positions"])
                 checked.append({"format": kind, "panels": 2, "colorways": scene["colorways"],
                                 "seam_groups": groups["count"], "pose_vertices": vertices,
-                                "particle_distance": distance, "zero_step_pose_exact": True})
+                                "particle_distance": distance, "zero_step_pose_exact": True,
+                                "colorway_rgba_after_reopen": colors["value"]})
     print(json.dumps({"case": "reordered native PAC fields", "fixtures": checked}, ensure_ascii=False))
 
 

@@ -1,7 +1,7 @@
 //! Resolve and replace texture images referenced by native fabric records.
 
 use super::clo_native::find;
-use super::native_materials::{face_records, face_type};
+use super::native_materials::{colorway_materials, face_records, face_type, material};
 use super::native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE};
 use super::native_recolor::edit_materials;
 use serde_json::{json, Value};
@@ -188,12 +188,11 @@ pub(super) fn hydrate<R: Read + Seek>(
     let mut cache: HashMap<String, PathBuf> = HashMap::new();
     let mut totals = 0u64;
     let mut warnings = Vec::new();
-    for (index, fabric) in fabrics.iter().enumerate() {
-        let material = fabric.map(b"mapMaterial2D")?;
-        if front_desaturated(&material)? {
-            state["fabrics"][index]["base_texture_desaturated"] = json!(true);
+    let mut hydrate = |entry: &mut Value, material: &Fields<'_>| -> Result<(), String> {
+        if front_desaturated(material)? {
+            entry["base_texture_desaturated"] = json!(true);
         }
-        for (key, name) in front_texture_refs(&material)? {
+        for (key, name) in front_texture_refs(material)? {
             let cached = if let Some(path) = cache.get(name) {
                 path.clone()
             } else {
@@ -215,7 +214,36 @@ pub(super) fn hydrate<R: Read + Seek>(
                     }
                 }
             };
-            state["fabrics"][index]["texture_maps"][key] = json!(cached);
+            entry["texture_maps"][key] = json!(cached);
+        }
+        Ok(())
+    };
+    for (index, fabric) in fabrics.iter().enumerate() {
+        hydrate(&mut state["fabrics"][index], &fabric.map(b"mapMaterial2D")?)?;
+    }
+    let names = state["colorways"].clone();
+    if names.as_array().is_some_and(|names| names.len() > 1) {
+        let variants = (|| -> Result<Vec<Vec<Value>>, String> {
+            let variants = colorway_materials(&root, &fabrics)?;
+            let mut output = vec![Vec::new(); fabrics.len()];
+            for materials in variants {
+                for (index, colorway) in materials.iter().enumerate() {
+                    let mut entry = material(&fabrics[index], colorway)?;
+                    entry["index"] = json!(index);
+                    hydrate(&mut entry, colorway)?;
+                    output[index].push(entry);
+                }
+            }
+            Ok(output)
+        })();
+        match variants {
+            Ok(variants) => {
+                for (index, values) in variants.into_iter().enumerate() {
+                    state["fabrics"][index]["native_colorway_materials"] =
+                        json!({"names": names, "values": values});
+                }
+            }
+            Err(error) => warnings.push(error),
         }
     }
     state["native_texture_warnings"] = json!(warnings);

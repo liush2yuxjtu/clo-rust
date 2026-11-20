@@ -153,7 +153,7 @@ const FUNCTIONS: &[Entry] = functions![
     (
         "fabric_api.GetFabricPBRMaterialBaseColor",
         "(index, face=0)",
-        "Get the base material color."
+        "Get the active base material color, or call with (colorway, index, face) to read an archived colorway."
     ),
     (
         "fabric_api.SetBaseTextureMapImageGivenFilePath",
@@ -1160,7 +1160,13 @@ pub(super) fn invoke(
         .ok_or_else(|| {
             format!("Unknown Rust API name: {name}. Use clo_api_catalog for implemented entries.")
         })?;
-    let arg = bind(entry, &args, &kwargs)?;
+    let colorway_color = name == "fabric_api.GetFabricPBRMaterialBaseColor" && array(&args).len() == 3;
+    let arg = if colorway_color {
+        let overload = Entry { name: entry.name, signature: "(colorway, index, face)", doc: entry.doc };
+        bind(&overload, &args, &kwargs)?
+    } else {
+        bind(entry, &args, &kwargs)?
+    };
     let name = match name {
         "export_api.ExportFBXW" => "export_api.ExportFBX",
         "export_api.ExportThumbnail3DW" => "export_api.ExportThumbnail3D",
@@ -1256,20 +1262,23 @@ pub(super) fn invoke(
         }
         "fabric_api.GetCurrentFabricIndex" => Ok(json!(current_fabric(state))),
         "fabric_api.GetFabricCount" => Ok(json!(fabrics.len())),
-        "fabric_api.GetFabricInformation" | "fabric_api.GetFabricName" | "fabric_api.GetFabricPBRMaterialBaseColor" => {
+        "fabric_api.GetFabricInformation" | "fabric_api.GetFabricName" => {
             let fabric = &fabrics[index(&arg[0], fabrics.len(), "fabric")?];
-            match name {
-                "fabric_api.GetFabricInformation" => Ok(property(fabric,"info")),
-                "fabric_api.GetFabricName" => Ok(property(fabric,"name")),
-                _ => {
-                    let face_color = array(&fabric["info"]["face_colors"])
-                        .iter()
-                        .find(|face| face["type"] == arg[1])
-                        .map(|face| &face["rgba"]);
-                    let color = face_color.or_else(|| fabric.get("rgba").filter(|value| !value.is_null()));
-                    color_channels(color.unwrap_or(&fabric["color"]))
-                }
+            let key = if name == "fabric_api.GetFabricName" { "name" } else { "info" };
+            Ok(property(fabric, key))
+        }
+        "fabric_api.GetFabricPBRMaterialBaseColor" => {
+            let fabric_index = usize::from(colorway_color);
+            let mut fabric = &fabrics[index(&arg[fabric_index], fabrics.len(), "fabric")?];
+            if colorway_color {
+                let colorway = index(&arg[0], array(&state["colorways"]).len().max(1), "colorway")?;
+                fabric = crate::compat_scene::fabric_for_colorway(state, fabric, colorway)?;
             }
+            let face = &arg[fabric_index + 1];
+            let face_color = array(&fabric["info"]["face_colors"]).iter()
+                .find(|row| row["type"] == *face).map(|row| &row["rgba"]);
+            let color = face_color.or_else(|| fabric.get("rgba").filter(|value| !value.is_null()));
+            color_channels(color.unwrap_or(&fabric["color"]))
         }
         "fabric_api.SetCurrentFabricIndex" => {
             let index = index(&arg[0],fabrics.len(),"fabric")?;
