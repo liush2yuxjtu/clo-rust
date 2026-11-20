@@ -1695,17 +1695,26 @@ async def verify_build_snapshot_workflow():
             assert await thumbnail("after-3d") == oblique
             await successful(rust, "snapshot_2d")
             assert await thumbnail("after-2d") == oblique
-            invalid_snapshot = await rust.call_tool("snapshot", {"views": ["front", "unknown view"]})
-            assert invalid_snapshot.isError
-            assert await thumbnail("after-invalid") == oblique
+            snapshot_folder = output / "snapshots"
+            before = set(snapshot_folder.glob("*.png"))
+            invalid_first = await rust.call_tool("snapshot", {"views": ["unknown view", "front"]})
+            assert invalid_first.isError
+            assert await thumbnail("after-invalid-first") == oblique
+            assert set(snapshot_folder.glob("*.png")) == before
 
-            before = sorted((output / "snapshots").glob("*.png"))
+            invalid_later = await rust.call_tool("snapshot", {"views": ["front", "unknown view", "back"]})
+            assert invalid_later.isError
+            completed, = set(snapshot_folder.glob("*.png")) - before
+            assert completed.read_bytes() == await thumbnail("after-invalid-later") == front
+
+            before = set(snapshot_folder.glob("*.png"))
             invalid = await rust.call_tool("garment_build", {
                 "spec": spec | {"length": "cropped", "color": "navy"},
                 "simulate_steps": 0, "views": ["front", "unknown view"],
             })
             assert invalid.isError and "unknown snapshot view" in invalid.content[0].text
-            assert sorted((output / "snapshots").glob("*.png")) == before
+            completed, = set(snapshot_folder.glob("*.png")) - before
+            assert completed.read_bytes() == await thumbnail("after-build-view-error")
             last = await json_result(rust, "garment_last_spec")
             assert last["spec"]["color"] == "navy" and last["spec"]["length"] == "cropped"
             stored = root / "after-error.clorust"
@@ -1720,7 +1729,6 @@ async def verify_build_snapshot_workflow():
             assert failed_draft.isError
             assert await json_result(rust, "garment_last_spec") == last
 
-            snapshot_folder = output / "snapshots"
             snapshot_folder.rename(root / "prior-snapshots")
             snapshot_folder.write_text("Block creation of the output directory")
             failed_export = await rust.call_tool("garment_rebuild", {
@@ -1733,7 +1741,8 @@ async def verify_build_snapshot_workflow():
                       "case": "build snapshot workflow", "default_views": defaults,
                       "aliases_and_png_content": "pass", "capture_error_commits_build": "pass",
                       "draft_error_preserves_previous_build": "pass",
-                      "thumbnail_matches_last_3d_view": True, "2d_and_errors_keep_camera": True}))
+                      "thumbnail_matches_last_3d_view": True, "2d_and_invalid_first_keep_camera": True,
+                      "later_view_error_keeps_completed_image_and_camera": True}))
 
 
 async def verify_one_piece_dress_merge():

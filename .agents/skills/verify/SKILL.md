@@ -305,8 +305,11 @@ leaves the completed build available through `garment_last_spec` and scene
 save. A failed draft preserves the prior build.
 For standalone snapshots, check that empty views and label use the default
 front and oblique PNGs and `snap_` prefix. Export a 3D thumbnail immediately
-after the snapshot and compare its bytes to the final image. Confirm a 2D capture
-and a rejected 3D view leave that camera unchanged.
+after the snapshot and compare its bytes to the final image. Confirm a 2D
+capture and an invalid first 3D view leave that camera unchanged. When a later
+view is invalid, confirm the tool returns an error, the earlier PNG is still on
+disk, the camera stays on the last completed view, and later views never run.
+Check the same behavior when snapshots are requested by a garment build.
 
 Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
 exercise two builds with different patterns. Within one MCP session,

@@ -600,9 +600,6 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
             .map(|view| view.as_str().ok_or("view must be a string"))
             .collect::<Result<_, _>>()?
     };
-    for view in &views {
-        let _ = camera(view)?;
-    }
     let root = std::env::var_os("CLO_RUST_OUTPUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("clo-rust-results"))
@@ -616,18 +613,13 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
         .filter(|label| !label.is_empty())
         .unwrap_or("snap");
     let mut images = Vec::new();
-    for view in &views {
-        match make_image(&drawings, &root, label, view, flat) {
-            Ok(path) => images.push(json!({"view":view,"path":path,"mime_type":"image/png"})),
-            Err(err) => {
-                for image in &images {
-                    if let Some(path) = image["path"].as_str() {
-                        let _ = fs::remove_file(path);
-                    }
-                }
-                return Err(err);
-            }
+    for view in views {
+        if !flat {
+            camera(view)?;
+            state["runtime"]["ui"]["view"] = json!(view);
         }
+        let path = make_image(&drawings, &root, label, view, flat)?;
+        images.push(json!({"view":view,"path":path,"mime_type":"image/png"}));
     }
     let mut result = json!({"images":images});
     if !textures.warnings.is_empty() {
@@ -635,8 +627,6 @@ pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, St
     }
     if flat {
         result["path"] = result["images"][0]["path"].clone();
-    } else if let Some(view) = views.last() {
-        state["runtime"]["ui"]["view"] = json!(view);
     }
     Ok(result)
 }
