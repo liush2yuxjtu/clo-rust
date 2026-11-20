@@ -2179,6 +2179,44 @@ async def verify_interchange_append_keeps_drape():
             mesh_fixtures = [root / "panels.obj", root / "panels.fbx"]
             for path in fixtures + mesh_fixtures:
                 await json_result(rust, "scene_export", {"path": str(path)})
+
+            project_path, _ = await save("multi-colorway")
+            document = json.loads(project_path.read_text())
+            document["scene"]["colorways"] = ["Original", "Alternate"]
+            project_path.write_text(json.dumps(document))
+            await json_result(rust, "scene_open", {"path": str(project_path)})
+            scene = await json_result(rust, "scene_info")
+            assert scene["colorways"] == ["Original", "Alternate"]
+            for path in fixtures:
+                plain = root / "plain" / path.name
+                await json_result(rust, "scene_export", {"path": str(plain)})
+                nested = root / "alternate" / f"裁片{path.suffix.upper()}"
+                result = await json_result(rust, "scene_export", {
+                    "path": str(nested), "colorways": True, "include_avatar": True,
+                })
+                expected = True if path.suffix == ".json" else str(nested)
+                assert result == {"path": str(nested), "result": expected}
+                assert nested.read_bytes() == plain.read_bytes()
+            assert await json_result(rust, "scene_info") == scene
+
+            existing_mesh = mesh_fixtures[0].read_bytes()
+            rejected = await rust.call_tool("scene_export", {
+                "path": str(mesh_fixtures[0]), "colorways": True,
+            })
+            assert rejected.isError and "one colorway" in rejected.content[0].text
+            assert mesh_fixtures[0].read_bytes() == existing_mesh
+            unknown = root / "unsupported.bin"
+            rejected = await rust.call_tool("scene_export", {"path": str(unknown), "colorways": True})
+            assert rejected.isError and "unsupported export extension" in rejected.content[0].text
+            assert not unknown.exists()
+            blocked = root / "blocked.clorust"
+            blocked.mkdir()
+            marker = blocked / "existing.txt"
+            marker.write_text("existing file")
+            rejected = await rust.call_tool("scene_save", {"path": str(blocked)})
+            assert rejected.isError and marker.read_text() == "existing file"
+            assert not list(root.glob(".clo-rust-*.tmp"))
+            assert await json_result(rust, "scene_info") == scene
             await json_result(rust, "scene_clear", {"keep_avatar": False})
             await create("Existing", 320)
             await json_result(rust, "simulate", {"steps": 2, "particle_distance": 50})
@@ -2233,7 +2271,8 @@ async def verify_interchange_append_keeps_drape():
                       "case": "append interchange patterns and meshes", "formats": results,
                       "default_mesh_import_kept_drape": mesh_counts,
                       "original_mesh_and_velocities": "unchanged", "continued_step": 3,
-                      "invalid_seam_is_atomic": True}))
+                      "invalid_seam_is_atomic": True, "pattern_exports_ignore_colorway_and_avatar_options": True,
+                      "save_and_export_errors_preserve_files_and_scene": True}))
 
 
 async def verify_portable_append_keeps_drape():

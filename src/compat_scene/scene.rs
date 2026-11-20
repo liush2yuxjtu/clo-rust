@@ -634,10 +634,10 @@ pub(super) fn export(args: &Value, state: &mut Value) -> Reply {
     let path = Path::new(string(args, "path")?);
     let ext = extension(path);
     if flag(args, "colorways", false)
-        && !matches!(ext.as_str(), "zprj" | "zpac")
-        && (!matches!(ext.as_str(), "obj" | "fbx" | "glb" | "gltf") || array(state, "colorways").len() > 1)
+        && matches!(ext.as_str(), "obj" | "fbx" | "glb" | "gltf")
+        && array(state, "colorways").len() > 1
     {
-        return Err("exporting colorways is supported for a single OBJ, FBX, GLB or glTF colorway".into());
+        return Err("Rust mesh export supports only one colorway".into());
     }
     match ext.as_str() {
         "clorust" => return save(args, state),

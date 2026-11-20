@@ -409,7 +409,12 @@ and verify the imported triangles coexist with the original simulated garment.
 Reopen and initialize the
 new panels at zero steps while the original mesh and velocities stay
 identical. The JSON seam follows its remapped panels, and a malformed
-seam reference leaves the receiving scene intact.
+seam reference leaves the receiving scene intact. In a two-colorway scene,
+export DXF and pattern JSON with both `colorways` and `include_avatar` set.
+Compare the files to exports without those flags. Check the return values,
+nested Unicode destinations, and unchanged project identity. Check that a
+blocked save, unsupported extension, and unsupported multi-colorway mesh
+export preserve existing files and the scene.
 
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
