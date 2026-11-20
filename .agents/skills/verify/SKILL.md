@@ -323,6 +323,12 @@ when just one absolute coordinate is present, and `MovePatternPoint` returning
 `null` with a visible point change. Verify a zero move and an invalid batch
 preserve the scene geometry and pose.
 
+Run `--verify-elastic-parameter-updates` after changing edge elastic settings.
+Set strength and target length through the API on disabled edges, then check
+the saved flags and zero solver constraints. Enable one edge through
+`pattern_ops`, reopen the archive, and check that updating a disabled edge
+still leaves the active constraint count unchanged.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the

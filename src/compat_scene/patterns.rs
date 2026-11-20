@@ -514,6 +514,24 @@ pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
     Ok(json!({"index": i, "arrangement": details}))
 }
 
+fn nested_integer(value: &Value) -> Option<i64> {
+    value.as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .or_else(|| {
+            let number = value.as_f64()?.trunc();
+            (i64::MIN as f64..-(i64::MIN as f64))
+                .contains(&number)
+                .then_some(number as i64)
+        })
+}
+
+fn nested_number(value: &Value, key: &str) -> Result<f64, String> {
+    value.as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| format!("{key} must be a finite number"))
+}
+
 pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let i = pattern_index(state, &args["pattern"])?;
     let mut points = points(&state["patterns"][i])?;
@@ -522,24 +540,13 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let [dx, dy] = offset(&state["patterns"][i]);
     let mut moved = Vec::new();
     for change in args["moves"].as_array().ok_or("moves must be an array")? {
-        let point = &change["point"];
-        let cursor = point
-            .as_u64()
-            .or_else(|| point.as_str()?.trim().parse().ok())
-            .or_else(|| {
-                let value = point.as_f64()?.trunc();
-                (0.0..u64::MAX as f64).contains(&value).then_some(value as u64)
-            })
+        let cursor = nested_integer(&change["point"])
             .and_then(|value| usize::try_from(value).ok())
             .ok_or("point must be a nonnegative integer")?;
         let position = *corners.get(cursor).ok_or("point index is out of range")?;
         let p = original[position];
         let read_coordinate = |key, default| match change.get(key) {
-            Some(value) => value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .filter(|coordinate| coordinate.is_finite())
-                .ok_or_else(|| format!("{key} must be a finite number")),
+            Some(value) => nested_number(value, key),
             None => Ok(default),
         };
         let (x, y) = if change.get("x").is_some() && change.get("y").is_some() {
@@ -694,20 +701,23 @@ fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<(), S
     Ok(())
 }
 
-fn line_properties(pattern: &mut Value, op: &str, args: &Value) -> Result<(), String> {
+fn line_properties(pattern: &mut Value, op: &str, args: &Value, on: Option<bool>) -> Result<(), String> {
     let line = args
         .get("line")
-        .map_or(Some(-1), Value::as_i64)
+        .map_or(Some(-1), nested_integer)
         .ok_or("line must be an integer")?;
     let count = corner_offsets(&points(pattern)?).len();
     if line < -1 || line >= count as i64 {
         return Err("line index is out of range".into());
     }
-    let mut update = json!({"on": flag(args, "on", true)});
+    let mut update = json!({});
+    if let Some(on) = on {
+        update["on"] = json!(on);
+    }
     if op == "elastic" {
         for key in ["total_length", "strength"] {
-            if args.get(key).is_some() {
-                let value = number(args, key)?;
+            if let Some(value) = args.get(key) {
+                let value = nested_number(value, key)?;
                 if value < 0.0 {
                     return Err(format!("{key} must be nonnegative"));
                 }
@@ -734,6 +744,12 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value) -> Result<(), St
         setting[key] = value.clone();
     }
     Ok(())
+}
+
+pub(super) fn set_elastic_values(args: &Value, state: &mut Value) -> Reply {
+    let index = pattern_index(state, &args["pattern"])?;
+    line_properties(&mut state["patterns"][index], "elastic", args, None)?;
+    Ok(Value::Null)
 }
 
 fn remap_outline(state: &mut Value, pattern: &mut Value, lines: &[Option<usize>]) {
@@ -849,7 +865,9 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             pattern["particle_distance"] = json!(mm);
         }
         "freeze" | "hide" | "strengthen" => pattern[op] = json!(flag(args, "on", true)),
-        "elastic" | "shirring" => line_properties(&mut pattern, op, args)?,
+        "elastic" | "shirring" => {
+            line_properties(&mut pattern, op, args, Some(flag(args, "on", true)))?;
+        }
         "delete_line" | "delete_point" => {
             let corner = index(args, if op == "delete_line" { "line" } else { "point" })?;
             let count = corner_offsets(&points(&pattern)?).len();

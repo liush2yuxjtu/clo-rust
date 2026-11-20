@@ -2315,6 +2315,54 @@ async def verify_symmetry_sewing():
                       "reopen_and_remap": "pass"}))
 
 
+async def verify_elastic_parameter_updates():
+    with TemporaryDirectory(prefix="clo-elastic-settings-") as directory:
+        archive = str(Path(directory) / "elastic.clorust")
+        async with open_backend("rust") as rust:
+            await inspect_contract(rust)
+            await json_result(rust, "pattern_create", {
+                "name": "Panel", "points": [[0, 0], [120, 0], [120, 100], [0, 100]],
+            })
+
+            async def elastic(**args):
+                await json_result(rust, "pattern_ops", {"pattern": "Panel", "op": "elastic", "args": args})
+
+            async def api(name, *args):
+                reply = await json_result(rust, "clo_api_call", {"name": f"pattern_api.{name}", "args": args})
+                assert reply["value"] is None
+
+            async def saved_options():
+                await json_result(rust, "scene_save", {"path": archive})
+                state = json.loads(Path(archive).read_text())["scene"]
+                return {key: value["elastic"] for key, value in state["patterns"][0]["line_properties"].items()}
+
+            await elastic(line="0", on=False)
+            await api("SetPatternPieceElasticStrength", 0, 0, 25)
+            await api("SetPatternPieceElasticTotalLength", 0, 1, 65)
+            initial = await saved_options()
+            assert initial == {"0": {"on": False, "strength": 25}, "1": {"total_length": 65}}
+            off = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 40})
+            assert off["elastic_constraint_count"] == 0
+
+            await elastic(line="1", on=True, strength="30.5")
+            await api("SetPatternPieceElasticStrength", 0, -1, 20)
+            active = await saved_options()
+            assert active == {"-1": {"strength": 20}, "0": {"on": False},
+                              "1": {"on": True, "total_length": 65}}
+            await json_result(rust, "scene_open", {"path": archive})
+            on = await json_result(rust, "simulate", {"steps": 0})
+            assert on["elastic_constraint_count"] > 0
+            await api("SetPatternPieceElasticTotalLength", 0, 0, 44)
+            assert (await saved_options())["0"] == {"on": False, "total_length": 44}
+            result = await json_result(rust, "simulate", {"steps": 0})
+            assert result["elastic_constraint_count"] == on["elastic_constraint_count"]
+    print(json.dumps({"tools": ["pattern_ops", "clo_api_call", "simulate"],
+                      "case": "elastic parameters preserve enable flags",
+                      "constraints_disabled": off["elastic_constraint_count"],
+                      "constraints_enabled_after_reopen": on["elastic_constraint_count"],
+                      "disabled_edge_stayed_disabled": True}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -2970,6 +3018,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-calibrated-build-arrangement", action="store_const", dest="comparison",
                              const=verify_calibrated_build_arrangement,
                              help="verify build placement using saved avatar arrangement calibration")
+    comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
+                             const=verify_elastic_parameter_updates,
+                             help="verify elastic parameter writes preserve enable flags and solver behavior")
     comparisons.add_argument("--verify-outline-edit-remaps", action="store_const", dest="comparison",
                              const=verify_outline_edit_remaps,
                              help="verify boundary edits preserve unaffected sewing and edge properties")
@@ -3024,7 +3075,7 @@ if __name__ == "__main__":
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
-                                verify_outline_edit_remaps, verify_symmetry_sewing,
+                                verify_outline_edit_remaps, verify_elastic_parameter_updates, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,

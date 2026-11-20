@@ -49,6 +49,7 @@ pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Reply> {
         "pattern_list" => patterns::list,
         "pattern_info" => patterns::info,
         "__clo_pattern_outline" => patterns::outline_query,
+        "__clo_set_elastic_values" => patterns::set_elastic_values,
         "pattern_create" => patterns::create,
         "pattern_delete" => patterns::delete,
         "pattern_edit_points" => patterns::edit,

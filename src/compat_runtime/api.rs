@@ -1345,8 +1345,10 @@ pub(super) fn invoke(
         "pattern_api.SetPatternHide3D" => pattern_op(state,"hide",json!({"on":arg[1]})).map(|result| success(&result)),
         "pattern_api.SetPatternLayer" => pattern_op(state,"layer",json!({"layer":arg[1]})).map(|result| success(&result)),
         "pattern_api.SetPatternPieceElastic" => pattern_op(state,"elastic",json!({"line":arg[1],"on":arg[2]})).map(|result| success(&result)),
-        "pattern_api.SetPatternPieceElasticStrength" => pattern_op(state,"elastic",json!({"line":arg[1],"strength":arg[2]})).map(|result| success(&result)),
-        "pattern_api.SetPatternPieceElasticTotalLength" => pattern_op(state,"elastic",json!({"line":arg[1],"total_length":arg[2]})).map(|result| success(&result)),
+        "pattern_api.SetPatternPieceElasticStrength" | "pattern_api.SetPatternPieceElasticTotalLength" => {
+            let key = if name.ends_with("Strength") { "strength" } else { "total_length" };
+            domain("__clo_set_elastic_values", &json!({"pattern":pattern_ref(&arg[0])?,"line":arg[1],(key):arg[2]}), state)
+        }
         "pattern_api.SetPatternPieceMove" => pattern_op(state,"move_2d",json!({"dx":arg[1],"dy":arg[2]})).map(|result| success(&result)),
         "pattern_api.SetPatternPieceName" => pattern_op(state,"rename",json!({"name":arg[1]})).map(|result| success(&result)),
         "pattern_api.SetPatternPiecePos" => pattern_op(state,"move_2d",json!({"x":arg[1],"y":arg[2]})).map(|result| success(&result)),
