@@ -1,4 +1,5 @@
 mod native_stitches;
+mod remesh;
 mod shirring;
 pub(super) mod weld;
 
@@ -1423,6 +1424,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let mixed_pose = !explicit_distance && existing["source"] == "mixed_saved_pose";
     let use_native = !explicit_distance && (saved_pose || existing["source"] == RUST_NATIVE_REST);
     let prior_meshes = array(&existing["meshes"]);
+    let explicit_remesh = explicit_distance && !prior_meshes.is_empty();
     let mixed_native_ids: HashSet<_> = prior_meshes.iter()
         .filter(|mesh| mixed_pose && mesh["texcoords_units"] == "mm")
         .map(|mesh| mesh["id"].clone())
@@ -1436,6 +1438,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         && !prior_meshes.is_empty()
         && existing["mesh_refinement"] != "adaptive";
 
+    let mut restored_remesh_panels = 0;
+    let mut restarted_remesh_panels = 0;
     let (mut meshes, resume) = if use_native {
         (
             native_meshes(patterns, prior_meshes, state, saved_pose)?,
@@ -1464,7 +1468,28 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 .iter()
                 .zip(prior_meshes)
                 .all(|(mesh, prior)| mesh.id == prior["id"]);
-        if resume {
+        if explicit_remesh {
+            let by_id: HashMap<_, _> = prior_meshes.iter().map(|m| (&m["id"], m)).collect();
+            for mesh in &mut meshes {
+                let Some(prior) = by_id.get(&mesh.id).copied() else { continue };
+                let restored = SavedPoseMesh::deserialize(prior).ok().and_then(|saved| {
+                    let velocities = if prior["velocities"].is_null()
+                        && crate::compat_fit::mesh_uses_rest_mm(state, prior)
+                    {
+                        vec![[0.0; 3]; saved.positions.len()]
+                    } else {
+                        Vec::<Point>::deserialize(&prior["velocities"]).ok()?
+                    };
+                    remesh::transfer(mesh, &saved, &velocities, crate::compat_fit::mesh_uses_rest_mm(state, prior))
+                }).is_some();
+                if restored {
+                    restored_remesh_panels += 1;
+                } else {
+                    restarted_remesh_panels += 1;
+                }
+            }
+            resume = restored_remesh_panels > 0;
+        } else if resume {
             let mut transferred = Vec::with_capacity(meshes.len());
             for (mesh, prior) in meshes.iter().zip(prior_meshes) {
                 let saved = SavedPoseMesh::deserialize(prior)
@@ -1717,6 +1742,10 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         } else {
             "native_rest_rust_velocities"
         });
+    }
+    if explicit_remesh {
+        result["remesh_preserved_panels"] = json!(restored_remesh_panels);
+        result["remesh_reinitialized_panels"] = json!(restarted_remesh_panels);
     }
     Ok(result)
 }

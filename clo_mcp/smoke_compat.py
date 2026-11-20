@@ -1778,6 +1778,58 @@ async def verify_display_edits_keep_drape():
                       "native_pose_meshes_preserved": native_meshes}))
 
 
+async def verify_simulation_remesh_keeps_pose():
+    with TemporaryDirectory(prefix="clo-simulation-remesh-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]["simulation"]
+
+            await json_result(rust, "pattern_create", {
+                "name": "Panel", "points": [[0, 0], [140, 0], [58, 110]],
+            })
+            await json_result(rust, "simulate", {"steps": 0, "particle_distance": 90})
+            _, rest = await save("rest")
+            await json_result(rust, "simulate", {"steps": 4})
+            _, posed = await save("posed")
+            result = await json_result(rust, "simulate", {"steps": 0, "particle_distance": 25})
+            assert result["remesh_preserved_panels"] == 1 and result["remesh_reinitialized_panels"] == 0
+            path, refined = await save("refined")
+            old, = posed["meshes"]
+            new, = refined["meshes"]
+            assert len(new["positions"]) > len(old["positions"]) and refined["steps"] == 4
+            indices = {tuple(uv): i for i, uv in enumerate(new["texcoords"])}
+            anchors = [(i, indices[tuple(uv)]) for i, uv in enumerate(old["texcoords"]) if tuple(uv) in indices]
+            assert len(anchors) >= 3
+            for a, b in anchors:
+                assert old["positions"][a] == new["positions"][b]
+                assert old["velocities"][a] == new["velocities"][b]
+            for velocity in new["velocities"]:
+                assert all(abs(a-b) < 1e-8 for a, b in zip(velocity, old["velocities"][0], strict=True))
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 1})
+            _, resumed = await save("resumed")
+            assert resumed["steps"] == 5
+            await json_result(rust, "simulation_reset")
+            await json_result(rust, "simulate", {"steps": 0})
+            _, initialized = await save("initialized")
+            assert initialized["steps"] == 0
+            fresh, = initialized["meshes"]
+            assert fresh["triangles"] == new["triangles"]
+            offset = old["positions"][0][1] - rest["meshes"][0]["positions"][0][1]
+            assert offset < 0
+            assert all(abs(posed[1] - start[1] - offset) < 1e-8
+                       for posed, start in zip(new["positions"], fresh["positions"], strict=True))
+    print(json.dumps({"tools": ["simulate", "simulation_reset", "scene_open"],
+                      "case": "remesh transfers the current cloth pose",
+                      "coarse_vertices": len(old["positions"]), "fine_vertices": len(new["positions"]),
+                      "exact_shared_vertices": len(anchors), "continued_step": 5}))
+
+
 async def verify_simulation_reset_quality():
     with TemporaryDirectory(prefix="clo-reset-quality-") as directory:
         root = Path(directory)
@@ -2222,7 +2274,7 @@ async def verify_appended_build_keeps_drape():
             assert automatic["simulation"]["quality"] == 1
             await json_result(rust, "simulate", {"steps": 0, "particle_distance": 90})
             _, explicitly_remeshed = await save("remeshed")
-            assert explicitly_remeshed["simulation"]["steps"] == 0
+            assert explicitly_remeshed["simulation"]["steps"] == 4
             assert "rest_particle_distance" not in explicitly_remeshed["simulation"]["meshes"][0]
     print(json.dumps({"tools": ["garment_build", "scene_open", "simulate"],
                       "case": "build beside settled cloth", "requested_distance_mm": 90,
@@ -2654,6 +2706,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-simulation-reset-quality", action="store_const", dest="comparison",
                              const=verify_simulation_reset_quality,
                              help="verify reset keeps shared and persisted solver settings")
+    comparisons.add_argument("--verify-simulation-remesh-keeps-pose", action="store_const", dest="comparison",
+                             const=verify_simulation_remesh_keeps_pose,
+                             help="verify new mesh vertices inherit current position and velocity")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2674,7 +2729,8 @@ if __name__ == "__main__":
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
                                 verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
                                 verify_interchange_append_keeps_drape, verify_appended_build_keeps_drape,
-                                verify_avatar_changes_keep_drape, verify_simulation_reset_quality)
+                                verify_avatar_changes_keep_drape, verify_simulation_reset_quality,
+                                verify_simulation_remesh_keeps_pose)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

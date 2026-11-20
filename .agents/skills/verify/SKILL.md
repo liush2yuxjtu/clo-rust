@@ -54,6 +54,44 @@ The sweep exits nonzero for missing, unexpected, or failed calls. Its success cr
 is `expected_count = called_count = ok_count = 48` with empty `missing`,
 `unexpected`, and `errors` arrays. Use `tools.<name>` to inspect each result.
 
+#### Read the evidence and reproduce a matched case
+
+Use the adapter's `tools/list` result to verify registration. `inspect_contract`
+compares the complete entries for all 48 pinned tools. `sweep_compat` then sends
+actual `tools/call` requests against Rust. Its `OK` status means the MCP result
+has no error flag for that representative call. The 11 diagnostic tools listed
+by the adapter are outside the 48-tool acceptance count.
+
+For a concrete dual-backend example, set the official stdio command as shown
+below and run:
+
+```sh
+python -m clo_mcp.smoke_compat --compare-strapped-draft-preview \
+  > strapped-preview.json 2> strapped-preview.log
+```
+
+This sends the same seven `garment_plan_preview` specs to both backends with
+`use_scene_measurements=false`. It asserts equality of every returned field,
+including pieces and seams, then checks that both reject `{"spec": []}` and
+that `garment_last_spec` remains unchanged. The JSON records the piece and seam
+counts and the error and state checks. This recipe exercises the draft preview
+path without requiring a live CLO scene. For a scene-backed example, run
+`--compare-saved-scene-info` with the same `.zprj` open in CLO, as described below.
+
+For the acceptance tally, create one row per pinned tool, with separate fields
+for contract, Rust call, and dual-backend behavior. Fill in these fields with
+the relevant evidence for each revision:
+
+| Tool | Contract | Rust call | Dual-backend behavior | Evidence |
+| --- | --- | --- | --- | --- |
+| `garment_plan_preview` | PASS | PASS | PASS for the seven strap-style cases | `strapped-preview.json`, matching request, input error, and spec readback |
+| `scene_info` when `clo_status.bridge` is `down` | PASS if listed | PASS if called | BLOCKED for the live scene comparison | Status response and the latest applicable saved-scene comparison |
+
+For scene-backed checks, save `clo_status` and confirm `bridge=up` before
+recording a live comparison. Keep results at case granularity. A tool-level
+behavior PASS requires all applicable cases in the checklist below. Report the
+three totals separately and link the case evidence behind the behavioral tally.
+
 Set `CLO_MCP_OFFICIAL_COMMAND` to the real CLO MCP stdio command as a JSON string array
 to include the official backend smoke. Run it with the CLO 3D bridge connected.
 `tools/list` is checked against the contract, including input and output schemas.
@@ -274,6 +312,13 @@ simulation and after reset. Exercise the public tools and corresponding
 `utility_api` calls, checking that both use the same quality setting,
 reset keeps the sewing and per-panel particle distance, and opening a
 saved scene in a fresh session can recover the saved quality before reset.
+
+Run `--verify-simulation-remesh-keeps-pose` to refine settled cloth from
+90 mm to 25 mm at zero steps. Check exact shared vertices, inherited
+velocity at interpolated vertices, and the measured displacement from
+the reset arrangement. Reopen and continue the original step count.
+Read `remesh_preserved_panels` and `remesh_reinitialized_panels` when
+explicitly remeshing a scene that already has a pose.
 
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
