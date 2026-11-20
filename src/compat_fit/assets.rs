@@ -990,6 +990,7 @@ pub fn fabric_library(args: &Value) -> Value {
 pub fn fabric_list(state: &Value) -> Value {
     let fabrics: Vec<_> = array(&state["fabrics"])
         .iter()
+        .take(crate::compat_scene::assigned_fabric_count(state))
         .map(|value| {
             let material = &value["info"];
             let catalog = &material["catalog"];
@@ -1013,18 +1014,12 @@ pub fn fabric_list(state: &Value) -> Value {
                     "Print": string(catalog, "Print", ""),
                     "SupplierName": string(catalog, "SupplierName", "None"),
                     "Texture": string(catalog, "Texture", texture.unwrap_or("None")),
-                    "Thickness": thickness, "Weight": weight,
-                    "material":material,"color":value["color"],"texture_maps":value["texture_maps"],
-                    "base_texture_desaturated":value["base_texture_desaturated"] == true
+                    "Thickness": thickness, "Weight": weight
                 }
             })
         })
         .collect();
-    let current = state["current_fabric"]
-        .as_i64()
-        .filter(|&index| fabrics.iter().any(|fabric| fabric["index"] == index))
-        .or_else(|| fabrics.first()?.get("index")?.as_i64())
-        .unwrap_or(-1);
+    let current = state["current_fabric"].as_u64().unwrap_or(0);
     json!({"fabrics":fabrics,"current":current})
 }
 

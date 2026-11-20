@@ -457,7 +457,7 @@ pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
     let pts = points(args)?;
     let pattern = json!({
         "id": next_id(state)?, "name": name, "points": pts.into_iter().map(Point::record).collect::<Vec<_>>(),
-        "arrangement": "", "fabric_index": 0
+        "arrangement": "", "fabric_index": state["current_fabric"].as_u64().unwrap_or(0)
     });
     vec_mut(state, "patterns").push(pattern);
     use_partial_pose(state);

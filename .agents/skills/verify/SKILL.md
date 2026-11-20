@@ -286,6 +286,16 @@ The case reads the official `fabric_list`, opens the saved project in Rust,
 sets the same current fabric in the disposable Rust session, and compares names,
 indices, selection readback and each public catalog field reported by CLO.
 
+Use `--compare-native-fabric-list` with `CLO_FABRIC_LIST_FIXTURE` pointing
+to the saved two-panel project with assignments `[1, 0]` and two fabrics.
+Open the same project in the dedicated native session first. Compare full
+`fabric_list` results after rename, two recolors, deletion of the panel
+assigned to index 0, and both clear modes. The selected index can be absent
+from the listing. After a keep-avatar clear, create a new panel and read
+back its assignment to the selected fabric. The comparison restores the
+starting file in both sessions. For Rust-specific map and material-state
+checks, read the saved `.clorust` records rather than the public catalog.
+
 Use `--compare-saved-pattern-settings` with a saved project and no unsaved
 pattern edits in CLO. The case compares names, indices, materials and arrangement
 names for every panel, checks detailed arrangement, layer and particle distance
