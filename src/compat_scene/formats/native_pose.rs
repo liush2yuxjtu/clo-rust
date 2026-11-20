@@ -145,6 +145,42 @@ fn inner_seam_paths(record: &Fields<'_>) -> Result<InnerSeamPaths, String> {
         .collect())
 }
 
+pub(super) fn replace_positions(record: &Fields<'_>, mesh: &Value) -> Result<Option<Vec<u8>>, String> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct ContinuedPose {
+        positions: Vec<[f64; 3]>,
+        triangles: Vec<[u32; 3]>,
+        texcoords: Vec<[f64; 2]>,
+    }
+    let pose = ContinuedPose::deserialize(mesh)
+        .map_err(|error| format!("invalid native continuation pose: {error}"))?;
+    let geometry = record.map(b"mapFabricShape2D")?.map(b"mapMesh2D")?;
+    let (triangles, rest) = mesh_fields(&geometry)?;
+    if pose.triangles.len() != triangles.len() / 12
+        || pose.texcoords.len() != rest.len() / 8
+        || pose.positions.len() != rest.len() / 8
+        || !pose.triangles.iter().flatten().flat_map(|index| index.to_le_bytes())
+            .eq(triangles.iter().copied())
+        || !pose.texcoords.iter().flatten().zip(rest.chunks_exact(4)).all(|(&value, raw)| {
+            value.is_finite() && value == f64::from(f32::from_le_bytes(raw.try_into().expect("float width")))
+        })
+    {
+        return Err("native save requires the original rest mesh and triangle topology".into());
+    }
+    let world: Vec<_> = pose.positions.iter().flatten().map(|&value| value as f32).collect();
+    if world.iter().any(|value| !value.is_finite()) {
+        return Err("native continuation position exceeds the archive float range".into());
+    }
+    let encoded: Vec<_> = world.into_iter().flat_map(f32::to_le_bytes).collect();
+    if record.get(b"baPosition3D", BYTE_TYPE)? == encoded {
+        return Ok(None);
+    }
+    let updated = record.replace(b"baPosition3D", BYTE_TYPE, &encoded)?;
+    Ok(Some(Fields::read(&updated)?.set(b"bDraped", 1, &[1])?))
+}
+
 fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String> {
     let geometry = record.map(b"mapFabricShape2D")?.map(b"mapMesh2D")?;
     let positions3d = record.get(b"baPosition3D", BYTE_TYPE)?;

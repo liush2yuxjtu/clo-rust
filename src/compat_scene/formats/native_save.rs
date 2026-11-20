@@ -2,7 +2,7 @@
 
 use super::{
     clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
-    native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
+    native_pose::{encode_map, encoded_list, map_list, replace_positions, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
     native_avatar_ids::AvatarIdentities, native_author, native_compose, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
@@ -45,10 +45,9 @@ fn hash_except(value: &Value, omitted: &[&str], hash: &mut DefaultHasher) {
     }
 }
 
-fn garment_fingerprint(state: &Value) -> u64 {
-    let mut hash = DefaultHasher::new();
+fn hash_garment_layout(state: &Value, hash: &mut DefaultHasher) {
     for pattern in super::super::array(state, "patterns") {
-        hash_except(pattern, &["name"], &mut hash);
+        hash_except(pattern, &["name"], hash);
     }
     for key in [
         "seams",
@@ -57,8 +56,19 @@ fn garment_fingerprint(state: &Value) -> u64 {
         "colorways",
         "imported_meshes",
     ] {
-        state[key].hash(&mut hash);
+        state[key].hash(hash);
     }
+}
+
+fn layout_fingerprint(state: &Value) -> u64 {
+    let mut hash = DefaultHasher::new();
+    hash_garment_layout(state, &mut hash);
+    hash.finish()
+}
+
+fn garment_fingerprint(state: &Value) -> u64 {
+    let mut hash = DefaultHasher::new();
+    hash_garment_layout(state, &mut hash);
     let simulation = &state["simulation"];
     hash_except(simulation, &["meshes"], &mut hash);
     for mesh in super::super::array(simulation, "meshes") {
@@ -211,6 +221,7 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "path": path.to_str()?,
                 "project": project,
                 "garment": garment_fingerprint(state),
+                "layout": layout_fingerprint(state),
                 "fabrics": fabric_fingerprint(state),
                 "assigned_fabrics": assigned_fabric_fingerprint(state),
                 "colorways": colorway_fingerprints(state),
@@ -353,12 +364,18 @@ fn rename_fields(record: &Fields<'_>, utf8: &[u8], legacy: &[u8], name: &str) ->
     Ok(updated)
 }
 
-fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
+fn update_panels(pac: &[u8], state: &Value, write_pose: bool) -> Result<Option<Vec<u8>>, String> {
     let root = Fields::read(pac)?;
     let editor = root.map(b"mapPatternEditor")?;
     let patterns = editor.map(b"mapPatternList")?;
     let records = patterns.get(b"listPattern", LIST_TYPE)?;
-    let names = super::super::array(state, "patterns");
+    let panels = super::super::array(state, "patterns");
+    let meshes = super::super::array(&state["simulation"], "meshes");
+    if write_pose && (meshes.len() != panels.len() || panels.iter().zip(meshes).any(|(panel, mesh)| {
+        panel["id"].is_null() || panel["id"] != mesh["id"] || !crate::compat_fit::mesh_uses_rest_mm(state, mesh)
+    })) {
+        return Err("native save requires a continued native pose for every original panel".into());
+    }
     let mut current = 0;
     let mut edited = false;
     let records = map_list(records, 4096)?;
@@ -368,16 +385,26 @@ fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
             bytes.push(Cow::Borrowed(record.encoded()));
             continue;
         }
-        let name = names
+        let name = panels
             .get(current)
             .and_then(|piece| piece["name"].as_str())
             .ok_or("native write requires the original editable panel count")?;
+        let posed = if write_pose { replace_positions(&record, &meshes[current])? } else { None };
         current += 1;
         let element = record.map(b"mapElement")?;
         if element.get(b"qsNameUTF8", BYTE_TYPE)? == name.as_bytes() {
-            bytes.push(Cow::Borrowed(record.encoded()));
+            if let Some(posed) = posed {
+                bytes.push(Cow::Owned(posed));
+                edited = true;
+            } else {
+                bytes.push(Cow::Borrowed(record.encoded()));
+            }
             continue;
         }
+        let record = match &posed {
+            Some(bytes) => Fields::read(bytes)?,
+            None => record,
+        };
         if name.is_empty()
             || name.len() > 255
             || name.chars().any(char::is_control)
@@ -403,7 +430,7 @@ fn renamed_pac(pac: &[u8], state: &Value) -> Result<Option<Vec<u8>>, String> {
         bytes.push(Cow::Owned(updated));
         edited = true;
     }
-    if current != names.len() {
+    if current != panels.len() {
         return Err("native write requires the original editable panel count".into());
     }
     if !edited {
@@ -978,10 +1005,11 @@ pub(in crate::compat_scene) fn encode(
                 && super::super::array(source, "retextured").is_empty()
                 && verify_colorway_materials(state, source, &recolors, &texture_edits)
     };
-    if source["garment"].as_u64() != Some(garment_fingerprint(state))
-        || !can_save_materials
-    {
-        return Err("native save supports the loaded scene, pattern renames, verified fabric edits and archived colorway edits. Save other edits as .clorust".into());
+    let changed_garment = source["garment"].as_u64() != Some(garment_fingerprint(state));
+    let write_pose = changed_garment && parts.is_empty() && !empty_append
+        && source["layout"].as_u64() == Some(layout_fingerprint(state));
+    if changed_garment && !write_pose || !can_save_materials {
+        return Err("native save requires the original layout, with compatible pose, name and fabric edits".into());
     }
     let original = read_source(source)?;
     let garment = garment_archive(original.clone(), source_project)?;
@@ -1002,15 +1030,15 @@ pub(in crate::compat_scene) fn encode(
         garment_archive.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
             .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
     };
-    let renamed = renamed_pac(&pac, state)?;
+    let panel_edits = update_panels(&pac, state, write_pose)?;
     let (edited, assets) = if !parts.is_empty() || empty_append {
-        (Some(renamed.unwrap_or(pac)), appended_assets)
+        (Some(panel_edits.unwrap_or(pac)), appended_assets)
     } else if write_colorways {
         let index = state["current_colorway"]
             .as_u64()
             .and_then(|index| u32::try_from(index).ok())
             .ok_or("invalid active colorway index")?;
-        let pac = renamed.as_deref().unwrap_or(&pac);
+        let pac = panel_edits.as_deref().unwrap_or(&pac);
         let recolored = if recolors.is_empty() {
             None
         } else {
@@ -1030,12 +1058,12 @@ pub(in crate::compat_scene) fn encode(
         }
     } else {
         let recolored = native_recolor::recolor(
-            renamed.as_deref().unwrap_or(&pac),
+            panel_edits.as_deref().unwrap_or(&pac),
             state,
             super::super::array(source, "recolored"),
             super::super::array(source, "retextured"),
         )?;
-        let edited = recolored.or(renamed);
+        let edited = recolored.or(panel_edits);
         let retextured = super::super::array(source, "retextured");
         let occupied = if retextured.is_empty() { HashSet::new() } else { asset_names()? };
         let (textures, assets) = native_textures::replacements(

@@ -6258,11 +6258,11 @@ async def read_composed_archive(session):
                               for slot in range(total)]}
 
 
-async def snapshot_composed_archive(session, path):
+async def snapshot_composed_archive(session, path, source="native_saved_pose"):
     await json_result(session, "scene_save", {"path": str(path)})
     saved = json.loads(path.read_text())["scene"]
     simulation = saved["simulation"]
-    assert simulation["source"] == "native_saved_pose"
+    assert simulation["source"] == source
     meshes = [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
               for mesh in simulation["meshes"]]
     return (meshes, saved["native_seam_groups"])
@@ -6985,6 +6985,117 @@ async def compare_live_authored_poses():
     print(json.dumps({"cases": reports, "result": "pass"}))
 
 
+async def compare_live_resumed_native_save():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    assert root.is_dir() and project.is_file() and garment.is_file()
+    assert not os.environ.get("CLO_RUST_CHECKPOINT_DIR")
+
+    def other_payloads(path):
+        with zipfile.ZipFile(path) as archive:
+            outer = {name: archive.read(name) for name in archive.namelist()}
+        if path.suffix == ".zprj":
+            inner = outer.pop(next(name for name in outer if name.endswith(".zpac")))
+            with zipfile.ZipFile(BytesIO(inner)) as archive:
+                members = {name: archive.read(name) for name in archive.namelist() if not name.endswith(".pac")}
+            return outer, members
+        return {}, {name: data for name, data in outer.items() if not name.endswith(".pac")}
+
+    async def meshes(session, label, source="native_saved_pose"):
+        result, _ = await snapshot_composed_archive(session, root / f"{label}.clorust", source)
+        return result
+
+    def displacement(left, right):
+        assert len(left) == len(right) and left
+        return max(abs(x - y) for a, b in zip(left, right, strict=True)
+                   for p, q in zip(a["positions"], b["positions"], strict=True)
+                   for x, y in zip(p, q, strict=True))
+
+    results = []
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as inspector:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            for source, kind in ((project, "zprj"), (garment, "zpac"), (project, "checkpoint")):
+                await json_result(inspector, "scene_open", {"path": str(source)})
+                initial = await meshes(inspector, f"{kind}-initial")
+                outputs = {}
+                for writer, session in backends:
+                    label = f"{kind}-{writer}"
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    await composed_archive_api(session, "utility_api.SetCurrentColorwayIndex", 0)
+                    solved = await json_result(session, "simulate", {"steps": 8})
+                    assert solved["ok"]
+                    if kind == "zprj":
+                        await json_result(session, "pattern_ops", {
+                            "pattern": "Front", "op": "rename", "args": {"name": "续算前片"},
+                        })
+                    state = await read_composed_archive(session)
+                    continued = (await meshes(rust, f"{label}-unsaved", "rust_cpu_from_native_saved_pose")
+                                 if writer == "rust" else None)
+                    if kind == "checkpoint":
+                        checkpoint = await json_result(session, "checkpoint_save", {"name": label})
+                        path = Path(checkpoint["path"])
+                        assert path.suffix == ".zprj"
+                    else:
+                        path = root / f"{label}.{kind}"
+                        assert await json_result(session, "scene_save", {"path": str(path), "thumbnail": False}) == {
+                            "path": str(path)}
+                    assert path.is_file()
+                    await json_result(inspector, "scene_open", {"path": str(path)})
+                    expected = await meshes(inspector, f"{label}-expected")
+                    if writer == "rust":
+                        assert other_payloads(path) == other_payloads(source), label
+                        assert displacement(initial, expected) > 0.001, label
+                        for start, solved, saved in zip(initial, continued, expected, strict=True):
+                            assert start["texcoords"] == solved["texcoords"] == saved["texcoords"], label
+                            assert start["triangles"] == solved["triangles"] == saved["triangles"], label
+                            assert b"".join(struct.pack("<3f", *p) for p in solved["positions"]) == b"".join(
+                                struct.pack("<3f", *p) for p in saved["positions"]), label
+                    outputs[writer] = (path, expected, state)
+
+                for writer, (path, expected, state) in outputs.items():
+                    for reader, session in backends:
+                        label = f"{kind}-{writer}-{reader}"
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        if kind == "checkpoint":
+                            await json_result(session, "checkpoint_restore", {"name": f"{kind}-{writer}"})
+                        else:
+                            await json_result(session, "scene_open", {"path": str(path)})
+                        assert await read_composed_archive(session) == state, label
+                        if reader == "official":
+                            capture = root / f"{label}.zpac"
+                            await json_result(clo, "scene_save", {"path": str(capture)})
+                            await json_result(inspector, "scene_open", {"path": str(capture)})
+                            observed = await meshes(inspector, f"{label}-observed")
+                        else:
+                            observed = await meshes(rust, f"{label}-observed")
+                        for a, b in zip(expected, observed, strict=True):
+                            assert a["triangles"] == b["triangles"] and a["texcoords"] == b["texcoords"], label
+                        error = displacement(expected, observed)
+                        assert error < 0.001, (label, error)
+                        results.append({"format": kind, "writer": writer, "reader": reader,
+                                        "vertices": sum(len(m["positions"]) for m in observed),
+                                        "max_position_error_mm": error})
+                rust_output, _, _ = outputs["rust"]
+                await json_result(rust, "scene_open", {"path": str(rust_output)})
+                before_file = rust_output.read_bytes()
+                await json_result(rust, "simulate", {"steps": 0, "particle_distance": 16})
+                scene = await json_result(rust, "scene_info")
+                rejected = await rust.call_tool("scene_save", {"path": str(rust_output), "thumbnail": False})
+                assert rejected.isError and rust_output.read_bytes() == before_file
+                assert await json_result(rust, "scene_info") == scene
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": results, "remesh_rejected_without_changes": True, "result": "pass"}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -7633,6 +7744,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-authored-poses", action="store_const", dest="comparison",
                              const=compare_live_authored_poses,
                              help="cross-open solved ZPRJ, ZPAC and checkpoints and resume the saved drape")
+    comparisons.add_argument("--compare-live-resumed-native-save", action="store_const", dest="comparison",
+                             const=compare_live_resumed_native_save,
+                             help="resume native ZPRJ and ZPAC and cross-open the position-only updates")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

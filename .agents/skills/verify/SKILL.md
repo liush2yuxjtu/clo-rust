@@ -152,6 +152,18 @@ jq '.tools.garment_plan_preview' "$evidence_dir/rust-tool-calls.json"
 jq '{cases: (.comparisons | length), invalid_spec_error, last_spec_unchanged}' "$evidence_dir/strapped-preview.json"
 ```
 
+To audit coverage, compare the exact tool names in the pinned contract, the Rust
+report, and the 48-row evidence table. A passing command produces no diff.
+
+```sh
+jq -r '.[].name' clo_mcp/clo_tool_contract.json | LC_ALL=C sort > "$evidence_dir/pinned-names.txt"
+jq -r '.tools | keys[]' "$evidence_dir/rust-tool-calls.json" | LC_ALL=C sort > "$evidence_dir/called-names.txt"
+sed -n '/^## 48 项逐项记录/,$s/^| `\([^`]*\)` |.*/\1/p' docs/verification/clo-mcp-acceptance.md \
+  | LC_ALL=C sort > "$evidence_dir/evidence-names.txt"
+diff -u "$evidence_dir/pinned-names.txt" "$evidence_dir/called-names.txt" &&
+  diff -u "$evidence_dir/pinned-names.txt" "$evidence_dir/evidence-names.txt"
+```
+
 #### What to verify for each tool
 
 Use the pinned list as the row index. Record the Rust revision, reference MCP
@@ -272,6 +284,26 @@ applicable. An open response can report success even when the expected scene
 data is missing. The [same-name texture case](../../../docs/verification/clo-mcp-acceptance.md#同名贴图的组合写入)
 applies this matrix to two colorways and checks the archive PNG bytes and the
 decoded RGBA bound to each exported GLB primitive.
+
+For an existing native scene with unchanged topology, run the continuation replay
+on the shared CLO host with a fresh `CLO_MCP_STATE` used by both servers:
+
+```sh
+export CLO_SCENE_OPEN_PROJECT=/absolute/path/to/multi-colorway-colored.zprj
+export CLO_SCENE_OPEN_GARMENT=/absolute/path/to/multi-colorway-simulated.zpac
+unset CLO_RUST_CHECKPOINT_DIR
+python -m clo_mcp.smoke_compat --compare-live-resumed-native-save
+```
+
+Verify 12 writer/reader cases across ZPRJ, ZPAC and checkpoints. Each reader
+must recover its writer's state, rest coordinates, triangles and saved pose.
+Require `max_position_error_mm < 0.001` for each case and
+`remesh_rejected_without_changes=true`. The Rust-side assertions pack the
+pre-save vertex coordinates as native 32-bit floats, require exact archive
+readback and check that archive members outside the garment records remain
+byte-identical. The official reader captures another ZPAC for independent
+mesh inspection. Use the fixture hashes and scope in the
+[continuation evidence](../../../docs/verification/clo-mcp-acceptance.md#已有原生工程续算后的再次保存).
 
 #### Additional verification recipes
 
