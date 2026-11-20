@@ -442,6 +442,27 @@ the destination PNG list and the subsequent thumbnail with the last valid
 view. Run `cargo test --locked edge_on_snapshot_keeps_a_one_pixel_profile`
 to verify an exact planar panel still yields an edge profile in four views.
 
+Run `--compare-live-garment-workflow` with a live CLO bridge,
+`CLO_GARMENT_LIVE_FIXTURE` set to the shared two-panel
+`multi-colorway-colored.zprj`, and the same Avatar and Fabric libraries.
+Set a shared disposable `CLO_MCP_STATE` with the real Mia measurement table
+from Avatar Editor in `measurements/Mara_09_eye_Joint.json`. Reuse the
+official scene calibration under `calibration/Mara_09_eye_Joint.json`
+or let the official build generate it before the first Rust build.
+Check that an invalid draft keeps the newly loaded avatar and leaves the
+existing panels and history intact. Compare a live-measurement preview using
+that avatar, and read back the unchanged scene and history. Delete the first
+source panel before appending six new pieces so a gap in Rust's panel IDs exercises assignment
+by scene index. Match the complete append report and read back geometry,
+material assignments and 14 seam group memberships. Rebuild with no steps
+and then with one step, comparing the reports except elapsed time and the
+checkpoint path. Restore each artifact through `checkpoint_restore`, check
+the checkpoint becomes the active project and the current fabric resets to 0. The observed official artifact is ZPRJ and
+the independently authored Rust artifact is CLORUST. Compare a bad
+rebuild, an invalid view after a successful build, history after reopen,
+and an empty fresh MCP session. Simulation geometry needs a separate
+comparison.
+
 Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
 exercise two builds with different patterns. Within one MCP session,
 opening or restoring the older scene and clearing the project change the

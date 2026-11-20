@@ -4142,6 +4142,153 @@ async def verify_simulation_reset_quality():
                       "failed_distance_preserves_mesh": True, "seconds_resolution": 0.01}))
 
 
+async def compare_live_garment_workflow():
+    fixture = Path(os.environ["CLO_GARMENT_LIVE_FIXTURE"])
+    state_dir = Path(os.environ["CLO_MCP_STATE"])
+    cache = state_dir / "measurements" / "Mara_09_eye_Joint.json"
+    assert fixture.is_file() and cache.is_file()
+    spec = {"garment": "top", "silhouette": "regular", "neckline": "crew", "sleeve": "short",
+            "fabric": "cotton", "color": "navy", "particle_distance": 45}
+    empty = {"spec": None, "pieces": []}
+    names = ["Front", "Back", "Lower_Front", "Lower_Back", "Sleeve_L", "Sleeve_R"]
+
+    async def read(session):
+        scene = await json_result(session, "scene_info")
+        patterns = await json_result(session, "pattern_list")
+        seams = await json_result(session, "seams_list")
+        properties = ("index", "name", "arrangement", "fabric_index")
+        panels = [{key: panel[key] for key in properties} for panel in patterns["patterns"]]
+        geometry = [[*panel["pos_2d"], *(float(panel["bbox"][key]) for key in ("Width", "Height"))]
+                    for panel in patterns["patterns"]]
+        return {"project": scene["project_path"], "avatars": scene["avatars"], "panels": panels,
+                "geometry": geometry, "seams": [group["patterns"] for group in seams["groups"]],
+                "fabrics": await json_result(session, "fabric_list"),
+                "last": await json_result(session, "garment_last_spec")}
+
+    def same(left, right, check_project=False):
+        general = ("avatars", "panels", "seams", "fabrics", "last")
+        for key in (*general, "project") if check_project else general:
+            assert left[key] == right[key], (key, left[key], right[key])
+        for a, b in zip(left["geometry"], right["geometry"], strict=True):
+            assert all(abs(x - y) <= 0.001 for x, y in zip(a, b, strict=True)), (a, b)
+
+    async def build(session, tool, args):
+        result = await successful(session, tool, args)
+        assert [block.type for block in result.content] == ["text"]
+        return json.loads(result.content[0].text)
+
+    async def rejected(session, tool, args):
+        assert (await session.call_tool(tool, args)).isError, (tool, args)
+
+    def checkpoint(report, expected_suffix, scene):
+        path = Path(report.pop("checkpoint_before_build"))
+        assert path.suffix == expected_suffix and path.name.startswith("auto_before_build_"), path
+        assert path.parent == state_dir / "checkpoints" and path.stat().st_size > 0, path
+        assert scene["project"] == str(path)
+        return path
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        sessions = (clo, rust)
+        try:
+            previews = []
+            for session in sessions:
+                await inspect_contract(session)
+                await json_result(session, "scene_open", {"path": str(fixture)})
+                before = await read(session)
+                assert before["avatars"] == [] and before["last"] == empty
+                await rejected(session, "garment_rebuild", {"changes": {}})
+                assert await read(session) == before
+                await rejected(session, "garment_build", {
+                    "spec": spec | {"particle_distance": []}, "snapshots": False, "simulate_steps": 0,
+                })
+                assert await read(session) == before | {"avatars": ["Mara_09_eye_Joint"]}
+                preview_state = await read(session)
+                previews.append(await json_result(session, "garment_plan_preview", {
+                    "spec": spec, "use_scene_measurements": True,
+                }))
+                assert await read(session) == preview_state
+                await json_result(session, "scene_open", {"path": str(fixture)})
+                await json_result(session, "pattern_delete", {"patterns": ["0"]})
+
+            assert previews[0] == previews[1]
+            assert previews[0]["measurement_source"] == f"cached CLO measurements ({cache.name})"
+
+            append = [await build(session, "garment_build", {
+                "spec": spec, "replace_existing": False, "simulate_steps": 0, "snapshots": False,
+            }) for session in sessions]
+            assert append[0] == append[1], append
+            assert append[0]["checkpoint_before_build"] is None and append[0]["simulation"] is None
+            assert append[0]["measurements"] == f"cached CLO measurements ({cache.name})"
+            appended = [await read(session) for session in sessions]
+            same(*appended, check_project=True)
+            assert [row["name"] for row in appended[0]["panels"]] == ["Back", *names]
+            assert [row["fabric_index"] for row in appended[0]["panels"]] == [0, *([1] * len(names))]
+            assert appended[0]["last"] == {"spec": append[0]["spec"], "pieces": names}
+            assert len(append[0]["seams"]) == 14 and append[0]["arrangement"]
+
+            rebuilt = [await build(session, "garment_rebuild", {
+                "changes": {"color": "#246", "sleeve": "long"}, "simulate_steps": 0, "snapshots": False,
+            }) for session in sessions]
+            latest = [await read(session) for session in sessions]
+            same(*latest)
+            checkpoints = [checkpoint(report, suffix, scene) for report, suffix, scene in
+                           zip(rebuilt, (".zprj", ".clorust"), latest, strict=True)]
+            assert rebuilt[0] == rebuilt[1], rebuilt
+            assert [row["name"] for row in latest[0]["panels"]] == names
+            assert [row["fabric_index"] for row in latest[0]["panels"]] == [2] * len(names)
+            assert latest[0]["last"] == {"spec": rebuilt[0]["spec"], "pieces": names}
+            for session, scene in zip(sessions, latest, strict=True):
+                await rejected(session, "garment_rebuild", {"changes": {"particle_distance": []}, "snapshots": False})
+                assert await read(session) == scene
+
+            simulated = [await build(session, "garment_rebuild", {
+                "changes": {"sleeve": "short"}, "simulate_steps": 1, "snapshots": False,
+            }) for session in sessions]
+            simulated_state = [await read(session) for session in sessions]
+            same(*simulated_state)
+            for report, suffix, scene in zip(simulated, (".zprj", ".clorust"), simulated_state, strict=True):
+                checkpoint(report, suffix, scene)
+                assert report["simulation"].pop("seconds") >= 0
+            assert simulated[0] == simulated[1], simulated
+            assert simulated[0]["simulation"]["ok"] is True and simulated[0]["simulation"]["steps"] == 1
+            assert [pair["ok"] for pair in simulated[0]["simulation"]["merged_pieces"]] == [False, False]
+
+            failed_snapshot = []
+            for session in sessions:
+                await rejected(session, "garment_build", {
+                    "spec": spec | {"color": "red"}, "simulate_steps": 0, "views": ["invalid-verify-view"],
+                })
+                scene = await read(session)
+                assert scene["last"]["spec"]["color"] == "red"
+                assert scene["last"]["pieces"] == names
+                failed_snapshot.append(scene)
+            same(*failed_snapshot)
+
+            for session, path, original_panels, history in zip(sessions, checkpoints, appended, failed_snapshot, strict=True):
+                result = await json_result(session, "checkpoint_restore", {"name": path.stem})
+                assert result["ok"] and result["path"] == str(path) and result["pattern_count"] == 7
+                restored = await read(session)
+                expected = original_panels | {"last": history["last"], "project": str(path),
+                                              "fabrics": original_panels["fabrics"] | {"current": 0}}
+                same(restored, expected, check_project=True)
+        finally:
+            if original["project_path"] not in ("NULL", "", None):
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            assert await json_result(session, "garment_last_spec") == empty
+    print(json.dumps({"append_new_pieces": len(names), "append_seams": 14, "summary_matched": True,
+                      "checkpoints_reopened": [path.suffix for path in checkpoints],
+                      "restored_default_fabric_selection": True, "live_measurement_preview_matched": True,
+                      "invalid_draft_kept_loaded_avatar": True, "invalid_rebuild_kept_history": True,
+                      "invalid_snapshot_kept_successful_build": True, "positive_step_merge_flags": [False, False],
+                      "new_session_history_empty": True, "result": "pass"}))
+
+
 async def compare_live_avatar_workflow():
     fixture = os.environ["CLO_AVATAR_PROJECT_FIXTURE"]
     assert Path(fixture).is_file(), fixture
@@ -6356,6 +6503,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
+    comparisons.add_argument("--compare-live-garment-workflow", action="store_const", dest="comparison",
+                             const=compare_live_garment_workflow,
+                             help="compare live build, rebuild, checkpoint and session history")
     comparisons.add_argument("--compare-live-avatar-editor-cache", action="store_const", dest="comparison",
                              const=compare_live_avatar_editor_cache,
                              help="compare an actual native Avatar Editor cache with Rust")

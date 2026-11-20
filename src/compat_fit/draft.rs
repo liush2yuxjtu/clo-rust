@@ -1357,9 +1357,8 @@ fn calibrate_arrangement(draft: &mut Value, avatar: &Value) -> Vec<String> {
 }
 
 pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, String> {
-    let mut next = state.clone();
     let spec = if rebuild {
-        let mut saved = next["runtime"]["last_garment"]["spec"]
+        let mut saved = state["runtime"]["last_garment"]["spec"]
             .as_object()
             .cloned()
             .ok_or("nothing built yet in this session; call garment_build")?;
@@ -1371,19 +1370,20 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     } else {
         args["spec"].clone()
     };
-    if next["avatar"].is_null() {
+    if state["avatar"].is_null() {
         assets::avatar_load(
             &json!({"name_or_path":string(&spec,"avatar","mia")}),
-            &mut next,
+            state,
         )?;
     }
+    let mut next = state.clone();
     let (body, source) = assets::body_measurements(&next["avatar"], false);
     let mut draft = plan(&spec, &body, &source)?;
     let arrangement_notes = calibrate_arrangement(&mut draft, &next["avatar"]);
     let material = assets::load_material(string(&draft["spec"], "fabric", ""))?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
-        crate::compat_scene::checkpoint_before_build(&next)
+        crate::compat_scene::checkpoint_before_build(&mut next)
             .map(|value| value["path"].clone())
             .unwrap_or(Value::Null)
     } else {
@@ -1434,7 +1434,7 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             "b":format!("{b}:{}", seam["line_b"]),"ok":true}));
     }
     let fabric = assets::apply_material(
-        &json!({"color":draft["fabric"]["color"],"patterns":ids.values().cloned().collect::<Vec<_>>()}),
+        &json!({"color":draft["fabric"]["color"],"patterns":summary.values().map(|piece| piece["index"].clone()).collect::<Vec<_>>()}),
         &mut next,
         material,
     )?;
@@ -1475,7 +1475,8 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         } else {
             json!({"steps":steps,"particle_distance":draft["simulation"]["particle_distance"]})
         };
-        let mut simulation = solver::simulate(&options, state)?;
+        let run = solver::simulate(&options, state)?;
+        let mut simulation = json!({"ok":run["ok"],"steps":run["steps"],"seconds":run["seconds"]});
         if array(&draft["pieces"])
             .iter()
             .any(|piece| piece["layer"].as_i64().is_some_and(|layer| layer != 0))
@@ -1491,10 +1492,8 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             let merged = pairs.iter().map(|pair| {
                 let base = pair[0].as_str().expect("drafted merge base");
                 let other = pair[1].as_str().expect("drafted merge partner");
-                match solver::weld::merge_drafted_pair(state, &ids[base], &ids[other]) {
-                    Ok(()) => json!({"base":base,"other":other,"ok":true}),
-                    Err(error) => json!({"base":base,"other":other,"ok":false,"error":error}),
-                }
+                let ok = solver::weld::merge_drafted_pair(state, &ids[base], &ids[other]).is_ok();
+                json!({"base":base,"other":other,"ok":ok})
             }).collect::<Vec<_>>();
             simulation["merged_pieces"] = json!(merged);
             for (name, piece) in &mut summary {

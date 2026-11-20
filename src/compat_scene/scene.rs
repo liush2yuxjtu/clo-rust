@@ -556,6 +556,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 vec_mut(state, "fabrics").extend(fabrics);
             } else {
                 state["fabrics"] = json!(fabrics);
+                state["current_fabric"] = json!(0);
                 if let Some(runtime) = state["runtime"].as_object_mut() {
                     runtime.remove("last_added_fabric");
                 }
@@ -790,8 +791,10 @@ pub(super) fn checkpoint_save(args: &Value, state: &mut Value) -> Reply {
     Ok(result)
 }
 
-pub(crate) fn checkpoint_before_build(state: &Value) -> Reply {
-    save_checkpoint(state, None, "auto_before_build")
+pub(crate) fn checkpoint_before_build(state: &mut Value) -> Reply {
+    let result = save_checkpoint(state, None, "auto_before_build")?;
+    set_project(state, Path::new(string(&result, "path")?));
+    Ok(result)
 }
 
 fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
@@ -861,6 +864,7 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
         restored[formats::native_save::SOURCE] = source;
     }
     set_project(&mut restored, &path);
+    restored["current_fabric"] = json!(0);
     replace_scene(state, restored);
     crate::compat_runtime::clear_scene_ui(state, true);
     Ok(open_reply(state, &path))
