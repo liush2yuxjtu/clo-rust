@@ -58,10 +58,10 @@
 | `garment_build` | Rust 实调和构建、检查点、快照用例 | 双端加载人台、替换和追加、缝合和模拟读回 |
 | `garment_rebuild` | 本轮 Rust 会话历史用例 | 双端改规格重建、失败后历史和场景 |
 | `garment_last_spec` | 本轮双端空会话和预览后不变 | 完成构建和重建之后的双端历史 |
-| `clo_api_catalog` | Rust 查询、分页及导出 API 用例；2 个纸样条目匹配原生目录留档 | 双端实际工作流的可调用目录及翻页 |
+| `clo_api_catalog` | 4 个纸样条目匹配原生目录留档。Rust 实测按参数类型过滤，`GetPatternIndex` 和 `GetPatternIndexW` 分两页读回 | 现场双端可调用目录及翻页 |
 | `clo_api_describe` | Rust 文档字段和导出 API 用例 | 双端实用类型、枚举、重载及缺失项 |
-| `clo_api_call` | Rust 调用、导出回开及相机变更 | 双端读写、参数类型和错误的状态读回 |
-| `clo_api_release` | Rust 重复释放 `ImportExportOption` 句柄返回 1 和 0 | 现场双端释放、失效及重新获取 |
+| `clo_api_call` | Rust 从保存的工程实测纸样名称与索引双向读回，另有导出回开及相机变更记录 | 双端读写、参数类型和错误的状态读回 |
+| `clo_api_release` | Rust 重复释放 `ImportExportOption` 句柄返回 1 和 0。使用旧句柄被拒绝，场景读回一致 | 现场双端释放、失效及重新获取 |
 | `clo_control_guide` | 本轮双端实测四步指南，覆盖 API 查找与调用、检查 UI、执行操作和读回状态 | 路径所述的现场操作读回 |
 | `clo_ui_state` | 历史双端节点树、上下界及 6 个非法输入；本轮 Rust 复测通过 | 参考端本次未找到运行中的 CLO 应用。待复测选区、窗口和对话框 |
 | `clo_ui_action` | 历史双端过期快照拒绝；本轮 Rust 复测通过 | 双端可执行动作和效果读回 |

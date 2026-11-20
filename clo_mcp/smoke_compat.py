@@ -1743,10 +1743,33 @@ async def verify_runtime_pattern_query():
                 assert json.loads(doc["result"]) == description
             findings[short] = {"catalog": entry, "doc": description["doc"].splitlines()[0]}
 
+        index_query = "pattern_api.GetPatternIndex arg0: str"
+        for offset, short in enumerate(("GetPatternIndex", "GetPatternIndexW")):
+            name = f"pattern_api.{short}"
+            summary = f"{short}(arg0: str) -> int"
+            entry = {"name": name, "kind": "function", "signature": None, "summary": summary}
+            page = await json_result(session, "clo_api_catalog", {
+                "query": index_query, "module": "pattern_api", "limit": 1, "offset": offset,
+            })
+            assert page == {"entries": [entry], "total": 2, "next_offset": 1 if offset == 0 else None,
+                            "unavailable_modules": {}}, page
+            if offset == 0:
+                search = await json_result(session, "clo_api_search", {"query": index_query.lower(), "limit": 1})
+                assert json.loads(search["result"]) == page
+            description = await json_result(session, "clo_api_describe", {"name": name})
+            assert description["name"] == name and description["members"] == []
+            assert description["doc"].splitlines()[0] == summary
+            doc = await json_result(session, "clo_api_doc", {"function_name": short})
+            assert json.loads(doc["result"]) == description
+            findings[short] = {"catalog": entry, "doc": summary}
+
         count = scene["pattern_count"]
         assert count > 0
         first = scene["patterns"][0]["name"]
-        for short, args, value in (("GetPatternCount", [], count), ("GetPatternPieceName", [0], first)):
+        index, selected = next(((i, pattern["name"]) for i, pattern in enumerate(scene["patterns"])
+                                if pattern["name"] != first), (0, first))
+        for short, args, value in (("GetPatternCount", [], count), ("GetPatternPieceName", [index], selected),
+                                   ("GetPatternIndex", [selected], index), ("GetPatternIndexW", [selected], index)):
             name = f"pattern_api.{short}"
             assert await json_result(session, "clo_api_call", {"name": name, "args": args}) == {
                 "name": name, "value": value,
@@ -1768,6 +1791,8 @@ async def verify_runtime_pattern_query():
             ("clo_api_catalog", {"module": "pattern_api", "offset": -1}),
             ("clo_api_search", {"query": "GetPatternCount", "limit": 0}),
             ("clo_api_call", {"name": "pattern_api.GetPatternCount", "args": [42]}),
+            ("clo_api_call", {"name": "pattern_api.GetPatternIndex",
+                              "args": [{"$handle": handle["$handle"]}]}),
             ("clo_run_python", {"code": "raise ValueError('verification control')"}),
         ):
             assert (await session.call_tool(tool, args)).isError, (tool, args)
@@ -1775,7 +1800,8 @@ async def verify_runtime_pattern_query():
         for key in ("project_path", "patterns", "pattern_count", "avatars", "fabric_count", "seam_groups"):
             assert after[key] == scene[key], key
         return {"apis": findings, "pattern_count": count, "first_pattern": first,
-                "handle_release_counts": [1, 0], "errors_rejected": 4, "scene_unchanged": True}
+                "index_lookup": {"name": selected, "index": index}, "catalog_pages": 2,
+                "handle_release_counts": [1, 0], "errors_rejected": 5, "scene_unchanged": True}
 
     async with open_backend("rust") as rust:
         await inspect_contract(rust)

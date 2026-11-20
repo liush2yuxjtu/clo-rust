@@ -612,6 +612,8 @@ const TYPES: &[(&str, &[(&str, &str)])] = &[
 fn native_pattern_doc(name: &str) -> Option<&'static str> {
     match name {
         "pattern_api.GetPatternCount" => Some("GetPatternCount() -> int"),
+        "pattern_api.GetPatternIndex" => Some("GetPatternIndex(arg0: str) -> int"),
+        "pattern_api.GetPatternIndexW" => Some("GetPatternIndexW(arg0: str) -> int"),
         "pattern_api.GetPatternPieceName" => Some("GetPatternPieceName(arg0: int) -> str"),
         "pattern_api.MovePatternPoint" => Some("MovePatternPoint(arg0: int, arg1: int, arg2: float, arg3: float) -> None"),
         _ => None,

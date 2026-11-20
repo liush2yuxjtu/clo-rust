@@ -397,9 +397,12 @@ the same setter on settled cloth retains the step count and pose, and
 `simulate(particle_distance=0)` follows the omitted-distance path.
 
 Set `CLO_RUNTIME_PATTERN_FIXTURE` to a saved `.zprj` containing patterns and
-run `--verify-runtime-pattern-query`. Check two pattern catalog entries, search,
-description and doc lookup, structured calls, Python output, and release of an
-`ImportExportOption` handle twice. Verify rejected inputs leave the scene intact.
+run `--verify-runtime-pattern-query`. Check four pattern catalog entries,
+including two pages for `GetPatternIndex` and `GetPatternIndexW`. Verify both
+index lookups against a named piece from `scene_info`, then read the name back
+by index. Check search, description, doc lookup, Python output, and repeated
+release of an `ImportExportOption` handle. Verify a call with the released
+handle is rejected and the scene remains intact.
 With the official command configured, load the same saved fixture in CLO first.
 The case reads that scene without editing it. A down bridge or a different open
 project is recorded as `BLOCKED` with exit 2, alongside the Rust observations.
