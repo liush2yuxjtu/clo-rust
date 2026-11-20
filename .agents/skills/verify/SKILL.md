@@ -97,6 +97,13 @@ corresponding positions after `simulate`, and check reversed direction and a
 disconnected path. A generated interval validates the Rust solver; compare a
 native CLO-authored fixture separately before claiming double-backend parity.
 
+For remeshing with internal seams, run `cargo test --locked rebuilt_mesh_anchors_internal_seams_in_rest_coordinates`.
+Open the native fixture, call `simulate` with a different `particle_distance`,
+and check the mesh vertex count changed while `native_inner_seam_groups` is
+preserved. Reopen the Rust project and repeat from the new mesh. Compare against
+a disposable copy without the recorded `inner_seam_rest` coordinates, and check
+that points outside the new mesh are rejected rather than snapped to a boundary.
+
 Use `open_backend()`, `inspect_contract()`, and `json_result()` from
 `clo_mcp.smoke_compat` for additional cases. Keep the same source fixture on both
 backends. Use disposable projects on the CLO 3D side for state-changing cases.

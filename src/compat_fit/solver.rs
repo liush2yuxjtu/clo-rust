@@ -3,7 +3,7 @@ mod shirring;
 
 use super::{array, assets, boolean, number, string};
 use crate::collision::MeshCollider;
-use crate::compat_scene::InnerSeamPaths;
+use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -124,6 +124,8 @@ pub struct Mesh {
     native_shirring_base: Option<NativeShirringBase>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     inner_seam_paths: InnerSeamPaths,
+    #[serde(skip)]
+    inner_seam_rest: InnerSeamRest,
 }
 
 fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
@@ -378,6 +380,8 @@ fn new_mesh(pattern: &Value, distance: f64, state: &Value) -> Result<Mesh, Strin
         shirring_edges,
         native_shirring_base: None,
         inner_seam_paths: Vec::new(),
+        inner_seam_rest: serde_json::from_value(pattern["inner_seam_rest"].clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -657,6 +661,7 @@ fn native_mesh(
         shirring_edges,
         native_shirring_base,
         inner_seam_paths,
+        inner_seam_rest: Vec::new(),
     })
 }
 

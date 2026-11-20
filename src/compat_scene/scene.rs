@@ -336,8 +336,8 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
             reply["native_import"] = loaded["native_import"].clone();
             reply["native_import"]["embedded_avatar_loaded"] = json!(embedded_avatar);
             let mut warnings = vec![
-                "Loaded native panel outlines using saved mesh samples. Authored curve controls and internal lines were not recovered.".to_owned(),
-                "Cloth calibration, panel arrangement and official solver continuation state were not imported.".to_owned(),
+                "Loaded native outlines from saved mesh samples. Internal seam paths can be recovered from verified meshes. Authored curve controls and editable internal shapes are unavailable.".to_owned(),
+                "Saved arrangement settings may be present. Official placement calibration and solver continuation state are unavailable.".to_owned(),
                 "Full single outline-edge seams were restored where verified. Other recovered intervals remain recorded in seams_list.".to_owned(),
             ];
             if embedded_avatar {

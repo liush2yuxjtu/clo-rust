@@ -1,9 +1,10 @@
 //! Read a stored native drape without claiming that it was solved by the Rust engine.
 
 use super::clo_native::{posed_topology, sized_list, sizes, take, uint};
-use crate::compat_scene::InnerSeamPaths;
+use crate::compat_scene::{InnerSeamPaths, InnerSeamRest};
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 pub(super) const MAP_TYPE: u8 = 22;
 pub(super) const LIST_TYPE: u8 = 20;
@@ -165,9 +166,33 @@ fn pattern_pose(record: &Fields, id: &Value, name: &str) -> Result<Value, String
         })
         .collect();
     let mut pose = json!({"id": id, "name": name, "positions": positions, "triangles": indices, "texcoords": texcoords});
-    if let Ok(paths) = inner_seam_paths(record) {
+    if let Ok(mut paths) = inner_seam_paths(record) {
         if paths.iter().flatten().any(|path| path.len() > 1) {
+            let edge = |a: usize, b: usize| (a.min(b), a.max(b));
+            let edges: HashSet<_> = indices
+                .iter()
+                .flat_map(|&[a, b, c]| [edge(a, b), edge(b, c), edge(c, a)])
+                .collect();
+            for path in paths.iter_mut().flatten() {
+                if path.len() < 2
+                    || path
+                        .windows(2)
+                        .any(|pair| !edges.contains(&edge(pair[0], pair[1])))
+                {
+                    path.clear();
+                }
+            }
+            let rest: InnerSeamRest = paths
+                .iter()
+                .map(|shape| {
+                    shape
+                        .iter()
+                        .map(|path| path.iter().map(|&vertex| texcoords[vertex]).collect())
+                        .collect()
+                })
+                .collect();
             pose["inner_seam_paths"] = json!(paths);
+            pose["inner_seam_rest"] = json!(rest);
         }
     }
     Ok(pose)

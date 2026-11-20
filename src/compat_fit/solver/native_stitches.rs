@@ -1,24 +1,32 @@
 //! Sew archived outline and internal intervals without snapping endpoints to vertices.
 
-use super::{array, distance2, length, Mesh, Point};
+use super::{array, distance2, flat_cross, length, Mesh, Point, Point2};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+type Anchor = [(usize, f64); 3];
+
+enum Path<'a> {
+    Vertices(Cow<'a, [usize]>),
+    Rest(Cow<'a, [Point2]>),
+}
+
 struct Span<'a> {
-    vertices: Cow<'a, [usize]>,
+    path: Path<'a>,
+    mesh: &'a Mesh,
     lengths: Vec<f64>,
     start: f64,
     end: f64,
     offset: usize,
 }
 
-fn joined_path(
-    lines: &[Vec<usize>],
+fn joined_path<T: Copy + PartialEq>(
+    lines: &[Vec<T>],
     start: usize,
     end: usize,
     forward: bool,
-) -> Option<(Vec<usize>, usize, usize)> {
+) -> Option<(Vec<T>, usize, usize)> {
     let mut path = Vec::new();
     let mut first_end = 0;
     let mut line = start;
@@ -58,54 +66,99 @@ fn joined_path(
     None
 }
 
+fn span_path<T: Copy + PartialEq>(
+    lines: &[Vec<T>],
+    start: usize,
+    end: usize,
+    forward: bool,
+) -> Option<(Cow<'_, [T]>, usize, usize)> {
+    if start != end {
+        let (path, first_end, last_start) = joined_path(lines, start, end, forward)?;
+        return Some((Cow::Owned(path), first_end, last_start));
+    }
+    let line = lines.get(start)?;
+    (line.len() >= 2).then(|| (Cow::Borrowed(line.as_slice()), line.len() - 1, 0))
+}
+
+fn triangle_anchor(mesh: &Mesh, point: Point2, offset: usize) -> Option<Anchor> {
+    const EPSILON: f64 = 1e-7;
+    for &[ia, ib, ic] in &mesh.triangles {
+        let [a, b, c] = [mesh.points[ia], mesh.points[ib], mesh.points[ic]];
+        let area = flat_cross(a, b, c);
+        if area.abs() <= 1e-10 {
+            continue;
+        }
+        let weights = [
+            flat_cross(b, c, point) / area,
+            flat_cross(c, a, point) / area,
+            flat_cross(a, b, point) / area,
+        ];
+        if weights
+            .iter()
+            .all(|&w| (-EPSILON..=1.0 + EPSILON).contains(&w))
+        {
+            let weights = weights.map(|w| w.clamp(0.0, 1.0));
+            let sum = weights.iter().sum::<f64>();
+            let indices = [ia, ib, ic];
+            return Some(std::array::from_fn(|i| {
+                (offset + indices[i], weights[i] / sum)
+            }));
+        }
+    }
+    None
+}
+
 impl<'a> Span<'a> {
     fn new(mesh: &'a Mesh, endpoint: &Value, offset: usize) -> Option<Self> {
         let start_line = usize::try_from(endpoint["start_line"].as_u64()?).ok()?;
         let end_line = usize::try_from(endpoint["end_line"].as_u64()?).ok()?;
-        let lines = match endpoint["shape_depth"].as_u64()? {
-            1 => &mesh.sides,
+        let mut start = endpoint["start_ratio"].as_f64()?;
+        let mut end = endpoint["end_ratio"].as_f64()?;
+        let forward = endpoint["direction"].as_bool()?;
+        if !(0.0..=1.0).contains(&start)
+            || !(0.0..=1.0).contains(&end)
+            || start_line == end_line && forward != (end > start)
+        {
+            return None;
+        }
+        if start_line != end_line && !forward {
+            start = 1.0 - start;
+            end = 1.0 - end;
+        }
+
+        let (path, first_end, last_start) = match endpoint["shape_depth"].as_u64()? {
+            1 => {
+                let (p, a, b) = span_path(&mesh.sides, start_line, end_line, forward)?;
+                (Path::Vertices(p), a, b)
+            }
             2 => {
                 let shape = usize::try_from(endpoint["shape_index"].as_u64()?).ok()?;
-                mesh.inner_seam_paths.get(shape)?
+                if let Some(lines) = mesh.inner_seam_paths.get(shape) {
+                    let (p, a, b) = span_path(lines, start_line, end_line, forward)?;
+                    (Path::Vertices(p), a, b)
+                } else {
+                    let lines = mesh.inner_seam_rest.get(shape)?;
+                    let (p, a, b) = span_path(lines, start_line, end_line, forward)?;
+                    (Path::Rest(p), a, b)
+                }
             }
             _ => return None,
         };
-        let start = endpoint["start_ratio"].as_f64()?;
-        let end = endpoint["end_ratio"].as_f64()?;
-        let forward = endpoint["direction"].as_bool()?;
-        if !(0.0..=1.0).contains(&start) || !(0.0..=1.0).contains(&end) {
-            return None;
-        }
-
-        let (vertices, start, end, first_end, last_start) = if start_line == end_line {
-            let vertices = lines.get(start_line)?;
-            if vertices.len() < 2 || forward != (end > start) {
-                return None;
-            }
-            (
-                Cow::Borrowed(vertices.as_slice()),
-                start,
-                end,
-                vertices.len() - 1,
-                0,
-            )
-        } else {
-            let (vertices, first_end, last_start) =
-                joined_path(lines, start_line, end_line, forward)?;
-            let orient = |ratio| if forward { ratio } else { 1.0 - ratio };
-            (
-                Cow::Owned(vertices),
-                orient(start),
-                orient(end),
-                first_end,
-                last_start,
-            )
-        };
         let mut lengths = vec![0.0];
-        for pair in vertices.windows(2) {
-            lengths.push(
-                lengths.last()? + distance2(mesh.points[pair[0]], mesh.points[pair[1]]).sqrt(),
-            );
+        let mut append = |a, b| {
+            lengths.push(lengths.last().copied().unwrap_or_default() + distance2(a, b).sqrt());
+        };
+        match &path {
+            Path::Vertices(vertices) => {
+                for pair in vertices.windows(2) {
+                    append(mesh.points[pair[0]], mesh.points[pair[1]]);
+                }
+            }
+            Path::Rest(points) => {
+                for pair in points.windows(2) {
+                    append(pair[0], pair[1]);
+                }
+            }
         }
         let total = *lengths.last()?;
         if !total.is_finite() || total <= 1e-9 {
@@ -117,7 +170,8 @@ impl<'a> Span<'a> {
             return None;
         }
         Some(Self {
-            vertices,
+            path,
+            mesh,
             lengths,
             start,
             end,
@@ -125,7 +179,7 @@ impl<'a> Span<'a> {
         })
     }
 
-    fn sample(&self, t: f64) -> [(usize, f64); 2] {
+    fn sample(&self, t: f64) -> Option<Anchor> {
         let x = (self.start + (self.end - self.start) * t)
             .clamp(0.0, self.lengths[self.lengths.len() - 1]);
         let hi = self
@@ -139,10 +193,19 @@ impl<'a> Span<'a> {
         } else {
             0.0
         };
-        [
-            (self.vertices[lo] + self.offset, 1.0 - alpha),
-            (self.vertices[hi] + self.offset, alpha),
-        ]
+        match &self.path {
+            Path::Vertices(vertices) => Some([
+                (vertices[lo] + self.offset, 1.0 - alpha),
+                (vertices[hi] + self.offset, alpha),
+                (0, 0.0),
+            ]),
+            Path::Rest(points) => {
+                let p = std::array::from_fn(|i| {
+                    points[lo][i] + alpha * (points[hi][i] - points[lo][i])
+                });
+                triangle_anchor(self.mesh, p, self.offset)
+            }
+        }
     }
 
     fn breakpoints(&self) -> impl Iterator<Item = f64> + '_ {
@@ -154,14 +217,14 @@ impl<'a> Span<'a> {
 }
 
 pub(super) struct Stitch {
-    terms: [(usize, f64); 4],
+    terms: [(usize, f64); 6],
     used: usize,
     inverse_mass: f64,
 }
 
 impl Stitch {
-    fn new(a: [(usize, f64); 2], b: [(usize, f64); 2], weights: &[f64]) -> Option<Self> {
-        let mut terms = [(0, 0.0); 4];
+    fn new(a: Anchor, b: Anchor, weights: &[f64]) -> Option<Self> {
+        let mut terms = [(0, 0.0); 6];
         let mut used = 0;
         for (index, coefficient) in a.into_iter().chain(b.map(|(i, c)| (i, -c))) {
             if coefficient.abs() < 1e-12 {
@@ -255,7 +318,7 @@ pub(super) fn build(
             continue;
         };
         let start = result.constraints.len();
-        for (a, b) in spans {
+        let attached = spans.into_iter().try_for_each(|(a, b)| {
             let mut samples: Vec<_> = std::iter::once(0.0)
                 .chain(a.breakpoints())
                 .chain(b.breakpoints())
@@ -263,11 +326,15 @@ pub(super) fn build(
                 .collect();
             samples.sort_unstable_by(f64::total_cmp);
             samples.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
-            result.constraints.extend(
-                samples
-                    .into_iter()
-                    .filter_map(|t| Stitch::new(a.sample(t), b.sample(t), weights)),
-            );
+            for t in samples {
+                if let Some(stitch) = Stitch::new(a.sample(t)?, b.sample(t)?, weights) {
+                    result.constraints.push(stitch);
+                }
+            }
+            Some(())
+        });
+        if attached.is_none() {
+            result.constraints.truncate(start);
         }
         if result.constraints.len() > start {
             result.groups += 1;
@@ -287,6 +354,35 @@ pub(super) fn build(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rebuilt_mesh_anchors_internal_seams_in_rest_coordinates() {
+        let mesh = super::super::new_mesh(
+            &json!({"points":[[0,0],[100,0],[100,50],[0,50]],
+                    "inner_seam_rest":[[[[15,7],[50,21],[81,41]]]]}),
+            24.0,
+            &Value::Null,
+        )
+        .unwrap();
+        let endpoint = json!({
+            "shape_depth":2,"shape_index":0,"start_line":0,"end_line":0,
+            "start_ratio":0,"end_ratio":1,"direction":true
+        });
+        let span = Span::new(&mesh, &endpoint, 7).unwrap();
+        let coordinates = |fraction| {
+            let anchor = span.sample(fraction).unwrap();
+            std::array::from_fn::<_, 2, _>(|axis| {
+                anchor
+                    .iter()
+                    .map(|&(i, weight)| weight * mesh.points[i - 7][axis])
+                    .sum::<f64>()
+            })
+        };
+        for (fraction, expected) in [(0.0, [15.0, 7.0]), (1.0, [81.0, 41.0])] {
+            assert!(distance2(coordinates(fraction), expected) < 1e-18);
+        }
+        assert!(triangle_anchor(&mesh, [-1.0, 25.0], 0).is_none());
+    }
 
     #[test]
     fn native_span_uses_distance_across_edges_in_either_direction() {
@@ -310,7 +406,7 @@ mod tests {
         let forward = make(0, 1, 0.25, 0.5, true);
         let reverse = make(1, 0, 0.5, 0.25, false);
         let position = |span: &Span, fraction| {
-            let [(a, wa), (b, wb)] = span.sample(fraction);
+            let [(a, wa), (b, wb), _] = span.sample(fraction).unwrap();
             std::array::from_fn(|axis| mesh.points[a][axis] * wa + mesh.points[b][axis] * wb)
         };
         for (fraction, expected) in [
@@ -331,7 +427,12 @@ mod tests {
     fn interior_samples_project_to_each_other_without_moving_frozen_vertices() {
         let mut points = [[0., 0., 0.], [10., 0., 0.], [0., 2., 0.], [10., 2., 0.]];
         let weights = [0., 0., 1., 1.];
-        let stitch = Stitch::new([(0, 0.75), (1, 0.25)], [(2, 0.75), (3, 0.25)], &weights).unwrap();
+        let stitch = Stitch::new(
+            [(0, 0.75), (1, 0.25), (0, 0.0)],
+            [(2, 0.75), (3, 0.25), (0, 0.0)],
+            &weights,
+        )
+        .unwrap();
         assert_eq!(stitch.gap(&points), 2.0);
         stitch.apply(&mut points, &weights);
         assert!((stitch.gap(&points) - 0.4).abs() < 1e-9);

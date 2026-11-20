@@ -380,7 +380,14 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         Err(error) => (Vec::new(), Some(error)),
     };
     let (pose, pose_error) = match super::native_pose::read(pac, &patterns) {
-        Ok(meshes) => (meshes, None),
+        Ok(mut meshes) => {
+            for (pattern, mesh) in patterns.iter_mut().zip(&mut meshes) {
+                if let Some(rest) = mesh.as_object_mut().and_then(|record| record.remove("inner_seam_rest")) {
+                    pattern["inner_seam_rest"] = rest;
+                }
+            }
+            (meshes, None)
+        }
         Err(error) => (Vec::new(), Some(error)),
     };
     let native_import = json!({
