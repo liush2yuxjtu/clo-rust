@@ -3,7 +3,7 @@
 use super::{
     clo_native::{member, open_archive, ARCHIVE_LIMIT, ZPAC, ZPRJ},
     native_pose::{encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_materials, native_recolor, native_textures, write,
+    native_compose, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use native_textures::{ColorwayTextureEdit, TextureAssets};
@@ -213,6 +213,47 @@ pub(in crate::compat_scene) fn remember_empty_append(state: &mut Value, path: &P
     remember(state, path, project);
     if state[SOURCE].is_object() {
         state[SOURCE]["empty_append"] = json!(true);
+    }
+}
+
+pub(in crate::compat_scene) fn append_sources(state: &Value, path: &Path, project: bool) -> Option<Vec<Value>> {
+    let source = &state[SOURCE];
+    if source["empty_append"] == true
+        || source["garment"].as_u64()? != garment_fingerprint(state)
+        || source["fabrics"].as_u64()? != fabric_fingerprint(state)
+        || ["recolored", "retextured", "colorway_recolors", "colorway_textures"]
+            .iter().any(|key| !super::super::array(source, key).is_empty())
+    {
+        return None;
+    }
+    let path = path.canonicalize().ok()?;
+    let mut parts = super::super::array(source, "appended").to_vec();
+    if parts.len() >= 16 {
+        return None;
+    }
+    parts.push(json!({"path": path.to_str()?, "stamp": stamp(&path).ok()?, "project": project}));
+    Some(parts)
+}
+
+pub(in crate::compat_scene) fn remember_composition(state: &mut Value, parts: Vec<Value>) {
+    let Some(incoming) = parts.last() else {
+        return;
+    };
+    let stable = incoming["path"].as_str().map(Path::new)
+        .and_then(|path| stamp(path).ok()).is_some_and(|value| value == incoming["stamp"]);
+    if !stable {
+        return;
+    }
+    let source = &state[SOURCE];
+    let path = source["path"].as_str().map(std::path::PathBuf::from);
+    let project = source["project"] == true;
+    let old_stamp = source["stamp"].clone();
+    if let Some(path) = path {
+        remember(state, &path, project);
+        if state[SOURCE].is_object() {
+            state[SOURCE]["stamp"] = old_stamp;
+            state[SOURCE]["appended"] = json!(parts);
+        }
     }
 }
 
@@ -515,6 +556,88 @@ fn project_preview(input: Vec<u8>, thumbnail: bool, state: &Value) -> Result<Vec
     }
 }
 
+fn source_path(source: &Value) -> Result<&Path, String> {
+    source["path"].as_str().map(Path::new).ok_or_else(||
+        "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene".into(),
+    )
+}
+
+fn read_source(source: &Value) -> Result<Vec<u8>, String> {
+    let template = source_path(source)?;
+    let expected = stamp(template)?;
+    if expected != source["stamp"] {
+        return Err("native source archive changed since it was opened".into());
+    }
+    let original = fs::read(template).map_err(|error| format!("{}: {error}", template.display()))?;
+    if stamp(template)? != expected || Some(original.len() as u64) != expected[0].as_u64() {
+        return Err("native source archive changed during save".into());
+    }
+    Ok(original)
+}
+
+fn garment_archive(original: Vec<u8>, project: bool) -> Result<Vec<u8>, String> {
+    if project {
+        member(&mut open_archive(Cursor::new(original), ZPRJ)?, "zpac")
+    } else {
+        Ok(original)
+    }
+}
+
+fn append_archives(raw: &[u8], mut pac: Vec<u8>, parts: &[Value]) -> Result<(Vec<u8>, TextureAssets), String> {
+    let mut receiver = open_archive(Cursor::new(raw), ZPAC)?;
+    let mut images = TextureAssets::default();
+    let mut total_bytes = raw.len() as u64;
+    for source in parts {
+        let bytes = garment_archive(read_source(source)?, source["project"] == true)?;
+        let mut archive = open_archive(Cursor::new(bytes), ZPAC)?;
+        let incoming = member(&mut archive, "pac")?;
+        if pac.len() + incoming.len() > 256 * 1024 * 1024 {
+            return Err("native composition PAC payload exceeds 256 MiB".into());
+        }
+        pac = native_compose::join(&pac, &incoming)?;
+        for index in 0..archive.len() {
+            let file = archive.by_index(index).map_err(|error| error.to_string())?;
+            let name = file.name().map_err(|error| error.to_string())?.into_owned();
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".pac") || matches!(lower.as_str(), "clofiles.json" | "displaysettings.json") {
+                continue;
+            }
+            if file.is_dir() || file.size() > 64 * 1024 * 1024 || name.contains(['/', '\\']) {
+                return Err("unsupported native composition asset".into());
+            }
+            let mut contents = Vec::new();
+            file.take(64 * 1024 * 1024 + 1).read_to_end(&mut contents).map_err(|error| error.to_string())?;
+            let matches = match receiver.by_name(&name) {
+                Ok(mut previous) => {
+                    let mut other = Vec::new();
+                    (&mut previous).take(contents.len() as u64 + 1).read_to_end(&mut other).map_err(|error| error.to_string())?;
+                    contents == other
+                }
+                Err(zip::result::ZipError::FileNotFound) => {
+                    if lower != name {
+                        return Err("new native composition asset has an unsupported case-sensitive name".into());
+                    }
+                    if let Some(previous) = images.added.get(&lower) {
+                        contents == *previous
+                    } else {
+                        total_bytes += contents.len() as u64;
+                        if total_bytes > ARCHIVE_LIMIT {
+                            return Err("native composition assets exceed 512 MiB".into());
+                        }
+                        images.added.insert(lower, contents);
+                        true
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            if !matches {
+                return Err("native composition has different assets with the same name".into());
+            }
+        }
+    }
+    Ok((pac, images))
+}
+
 pub(in crate::compat_scene) fn save(
     path: &Path,
     state: &mut Value,
@@ -525,6 +648,8 @@ pub(in crate::compat_scene) fn save(
     write(path, &output)?;
     if state[SOURCE]["empty_append"] == true {
         remember_empty_append(state, path, false);
+    } else if !super::super::array(&state[SOURCE], "appended").is_empty() {
+        remember(state, path, false);
     } else if (state[SOURCE]["project"] == true) == project {
         remember(state, path, project);
     }
@@ -537,12 +662,11 @@ pub(in crate::compat_scene) fn encode(
     thumbnail: bool,
 ) -> Result<Vec<u8>, String> {
     let source = &state[SOURCE];
-    let template = source["path"].as_str().map(Path::new).ok_or(
-        "native save requires a compatible .zprj or .zpac loaded into this Rust session; use .clorust for a new Rust scene",
-    )?;
+    source_path(source)?;
+    let parts = super::super::array(source, "appended");
     let source_project = source["project"] == true;
     let empty_append = source["empty_append"] == true;
-    if project && empty_append {
+    if project && (empty_append || !parts.is_empty()) {
         return Err("saving this appended scene as .zprj is unsupported; use .zpac or .clorust".into());
     }
     if project && !source_project {
@@ -555,7 +679,7 @@ pub(in crate::compat_scene) fn encode(
     let texture_edits: Vec<ColorwayTextureEdit> = serde_json::from_value(source["colorway_textures"].clone())
         .map_err(|_| "invalid native colorway texture targets")?;
     let write_colorways = switched || !recolors.is_empty() || !texture_edits.is_empty();
-    let can_save_materials = if empty_append {
+    let can_save_materials = if empty_append || !parts.is_empty() {
         !write_colorways && !changed_material
             && super::super::array(source, "recolored").is_empty()
             && super::super::array(source, "retextured").is_empty()
@@ -571,29 +695,23 @@ pub(in crate::compat_scene) fn encode(
     {
         return Err("native save supports the loaded scene, pattern renames, verified fabric edits and archived colorway edits. Save other edits as .clorust".into());
     }
-    let expected = stamp(template)?;
-    if expected != source["stamp"] {
-        return Err("native source archive changed since it was opened".into());
-    }
-    let original =
-        fs::read(template).map_err(|error| format!("{}: {error}", template.display()))?;
-    if stamp(template)? != expected || Some(original.len() as u64) != expected[0].as_u64() {
-        return Err("native source archive changed during save".into());
-    }
-    let garment = if source_project {
-        let mut archive = open_archive(Cursor::new(original.as_slice()), ZPRJ)?;
-        member(&mut archive, "zpac")?
-    } else {
-        original.clone()
-    };
+    let original = read_source(source)?;
+    let garment = garment_archive(original.clone(), source_project)?;
     let mut garment_archive = open_archive(Cursor::new(garment.as_slice()), ZPAC)?;
     let pac = member(&mut garment_archive, "pac")?;
+    let (pac, appended_assets) = if parts.is_empty() {
+        (pac, TextureAssets::default())
+    } else {
+        append_archives(&garment, pac, parts)?
+    };
     let asset_names = || {
         garment_archive.file_names().map(|name| name.map(|name| name.to_ascii_lowercase()))
             .collect::<Result<HashSet<_>, _>>().map_err(|error| error.to_string())
     };
     let renamed = renamed_pac(&pac, state)?;
-    let (edited, assets) = if empty_append {
+    let (edited, assets) = if !parts.is_empty() {
+        (Some(renamed.unwrap_or(pac)), appended_assets)
+    } else if empty_append {
         // Garment export omits the receiver's unused default material. The
         // appended source already has the desired compact fabric indices.
         let name = state["colorways"][0].as_str().ok_or("native ZPAC has no active colorway name")?;

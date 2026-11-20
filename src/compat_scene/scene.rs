@@ -551,8 +551,15 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 }
                 return Ok(open_reply(state, path));
             }
-            let mut loaded = formats::clo_native::read(path, is_project)?;
             let prior_count = array(state, "patterns").len();
+            let composition = if append && prior_count != 0 {
+                formats::native_save::append_sources(state, path, is_project)
+            } else {
+                None
+            };
+            let mut loaded = formats::clo_native::read(path, is_project)?;
+            let composition = composition.filter(|_| state["colorways"] == loaded["colorways"]
+                && state["current_colorway"] == loaded["current_colorway"]);
             let empty_receiver = append
                 && prior_count == 0
                 && array(state, "imported_meshes").is_empty()
@@ -617,6 +624,8 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 formats::native_save::remember(state, path, is_project);
             } else if empty_receiver && !array(state, "patterns").is_empty() {
                 formats::native_save::remember_empty_append(state, path, is_project);
+            } else if let Some(parts) = composition {
+                formats::native_save::remember_composition(state, parts);
             }
             let mut reply = open_reply(state, path);
             reply["partial"] = json!(true);

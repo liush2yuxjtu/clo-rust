@@ -2,6 +2,7 @@ pub(super) mod clo_native;
 mod dxf;
 mod mesh;
 mod native_materials;
+mod native_compose;
 pub(super) mod native_fabric;
 mod native_pose;
 mod native_recolor;

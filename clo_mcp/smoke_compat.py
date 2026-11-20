@@ -6267,7 +6267,7 @@ async def compare_live_composed_zpac():
                             for backend in ("official", "rust")}
                 assert not any(path.exists() for path in archives.values()), "use a fresh test directory"
                 expected = None
-                expected_meshes = None
+                expected_archive = None
                 report = {"case": label, "checked": {}, "export_errors": {}}
                 for backend, session in (("official", clo), ("rust", rust)):
                     await json_result(session, "scene_clear", {"keep_avatar": False})
@@ -6297,15 +6297,17 @@ async def compare_live_composed_zpac():
                         if reader == "rust":
                             snapshot = archives[backend].with_suffix(".clorust")
                             await json_result(target, "scene_save", {"path": str(snapshot)})
-                            simulation = json.loads(snapshot.read_text())["scene"]["simulation"]
+                            saved = json.loads(snapshot.read_text())["scene"]
+                            simulation = saved["simulation"]
                             assert simulation["source"] == "native_saved_pose"
                             meshes = [{key: mesh[key] for key in ("positions", "triangles", "texcoords")}
                                       for mesh in simulation["meshes"]]
                             assert len(meshes) == len(after)
-                            if expected_meshes is None:
-                                expected_meshes = meshes
-                            assert meshes == expected_meshes, (label, backend, "stored meshes differ")
-                report["stored_meshes_compared"] = not report["export_errors"]
+                            archive = (meshes, saved["native_seam_groups"])
+                            if expected_archive is None:
+                                expected_archive = archive
+                            assert archive == expected_archive, (label, backend, "stored meshes or seam endpoints differ")
+                report["stored_meshes_and_seams_compared"] = not report["export_errors"]
                 reports.append(report)
         finally:
             if original not in ("NULL", "", None):

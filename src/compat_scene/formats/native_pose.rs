@@ -58,6 +58,10 @@ impl<'a> Fields<'a> {
         self.1
     }
 
+    pub(super) fn fields(&self) -> impl Iterator<Item = (&'a [u8], u8, &'a [u8])> + '_ {
+        self.0.iter().map(|field| (field.name, field.kind, field.value))
+    }
+
     pub(super) fn replace(&self, name: &[u8], kind: u8, value: &[u8]) -> Result<Vec<u8>, String> {
         self.get(name, kind)?;
         self.set(name, kind, value)

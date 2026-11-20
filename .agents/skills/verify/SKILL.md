@@ -975,9 +975,11 @@ unused default fabric, so both panels change from index 1 in the live
 scene to index 0 after reopening. Require the first source material
 variant even when the source was saved with its second colorway active.
 Read back fabrics, colorways and seams. Compare saved mesh coordinates,
-triangle indices and 2D rest coordinates via the reopened Rust scenes.
-The `nonempty` case probes composition into an existing project and
-requires both source garments and both colorways to survive reopening.
+triangle indices, 2D rest coordinates and sewing endpoints via the reopened
+Rust scenes. The `nonempty` case appends a saved native garment to a
+native project with a matching palette. Require four panels, two independent
+fabric slots and two seam groups with endpoints on the corresponding panels.
+Confirm the same record counts and open the Rust-written file in official CLO.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.
