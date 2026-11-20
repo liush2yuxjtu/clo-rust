@@ -454,8 +454,26 @@ pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
         "arrangement": point, "fabric_index": 0
     });
     vec_mut(state, "patterns").push(pattern);
-    invalidate_geometry(state);
+    retain_pose_after_append(state);
     Ok(json!({"index": i, "name": name}))
+}
+
+fn retain_pose_after_append(state: &mut Value) {
+    let pose = &mut state["simulation"];
+    let uses_mm = pose["source"] == "native_saved_pose" || pose["texcoords_units"] == "mm";
+    let Some(meshes) = pose.get_mut("meshes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if meshes.is_empty() {
+        return;
+    }
+    if uses_mm {
+        for mesh in meshes {
+            mesh["texcoords_units"] = json!("mm");
+        }
+        pose.as_object_mut().expect("simulation record").remove("texcoords_units");
+    }
+    pose["source"] = json!("mixed_saved_pose");
 }
 
 pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
@@ -791,7 +809,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 super::annotations::duplicate_sewing(state, &old_id, &id)?;
             }
             vec_mut(state, "patterns").push(pattern);
-            invalidate_geometry(state);
+            retain_pose_after_append(state);
             return Ok(if op == "copy" {
                 json!({"new_index": new_index})
             } else {

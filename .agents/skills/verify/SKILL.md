@@ -232,6 +232,12 @@ meshes and sewing are removed. Reopen and resume the surviving
 simulation. Set `CLO_DISPLAY_FIXTURE` to also check archived meshes and
 native seam groups after deleting a native panel.
 
+Run `--verify-new-panels-keep-drape` to create, copy and mirror panels
+beside settled cloth. Verify the OBJ contains both posed and newly
+placed panels, then reopen and assemble the new meshes at zero steps.
+Check the original mesh, velocities and step count, then resume simulation.
+Set `CLO_DISPLAY_FIXTURE` to also verify a new panel beside archived meshes.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

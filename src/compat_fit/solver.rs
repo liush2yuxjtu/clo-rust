@@ -1487,7 +1487,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         (meshes, resume)
     };
     let primary_avatar = &state["avatar"];
-    let use_saved_avatar_proxy = |avatar: &Value| (use_native || mixed_pose) && !avatar["source_project"].is_null();
+    let has_native_pose = use_native || !mixed_native_ids.is_empty();
+    let use_saved_avatar_proxy = |avatar: &Value| has_native_pose && !avatar["source_project"].is_null();
     let mesh_geometry = |avatar: &Value| {
         (!avatar["mesh"].is_null() && !use_saved_avatar_proxy(avatar))
             .then(|| avatar_geometry(avatar))
@@ -1682,7 +1683,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     if using_proxy {
         limitations.push("The primary avatar uses an analytic collision proxy.".into());
     }
-    if use_native || mixed_pose {
+    if has_native_pose {
         limitations.push("Native topology and saved drape initialize the independent CPU solver. Official CLO solver velocities and state are unavailable.".into());
     }
     if native_stitches.unsupported > 0 {

@@ -1355,6 +1355,77 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_new_panels_keep_drape():
+    with TemporaryDirectory(prefix="clo-add-panel-drape-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def create(name):
+                return await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[0, 0], [120, 0], [45, 80]],
+                })
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            await create("Base")
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
+            _, before = await save("before")
+            await create("Added")
+            copy = await json_result(rust, "pattern_ops", {
+                "pattern": "Base", "op": "copy", "args": {"dx": 100},
+            })
+            assert copy["new_index"] == 2
+            await json_result(rust, "pattern_ops", {
+                "pattern": "Base", "op": "symmetry", "args": {"with_sewing": False},
+            })
+            path, mixed = await save("mixed")
+            assert len(mixed["patterns"]) == 4
+            assert mixed["simulation"] == before["simulation"] | {"source": "mixed_saved_pose"}
+            obj = root / "mixed.obj"
+            await json_result(rust, "scene_export", {"path": str(obj)})
+            assert sum(line.startswith("o ") for line in obj.read_text().splitlines()) == 4
+            await json_result(rust, "scene_open", {"path": str(path)})
+            result = await json_result(rust, "simulate", {"steps": 0})
+            assert result["initialization"] == "mixed_saved_and_initialized_pose"
+            assert not any("Native topology" in limit for limit in result["limitations"])
+            _, initialized = await save("initialized")
+            meshes = initialized["simulation"]["meshes"]
+            assert len(meshes) == 4 and meshes[0] == before["simulation"]["meshes"][0]
+            assert initialized["simulation"]["steps"] == 3
+            await json_result(rust, "simulate", {"steps": 1})
+            _, continued = await save("continued")
+            assert continued["simulation"]["steps"] == 4
+
+            native_count = None
+            if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
+                await json_result(rust, "scene_open", {"path": fixture})
+                _, original = await save("native")
+                native_count = len(original["simulation"]["meshes"])
+                assert native_count > 0 and original["simulation"]["source"] == "native_saved_pose"
+                await create("Added to received pose")
+                path, edited = await save("native-edited")
+                assert edited["simulation"]["source"] == "mixed_saved_pose"
+                assert edited["simulation"]["meshes"] == [
+                    mesh | {"texcoords_units": "mm"} for mesh in original["simulation"]["meshes"]
+                ]
+                await json_result(rust, "scene_open", {"path": str(path)})
+                await json_result(rust, "simulate", {"steps": 0})
+                _, initialized = await save("native-initialized")
+                restored = initialized["simulation"]["meshes"]
+                assert len(restored) == native_count + 1
+                for saved, mesh in zip(original["simulation"]["meshes"], restored[:-1], strict=True):
+                    for field in ("id", "positions", "triangles", "texcoords"):
+                        assert mesh[field] == saved[field], field
+                assert restored[-1].get("texcoords_units") is None
+    print(json.dumps({"tools": ["pattern_create", "pattern_ops", "scene_export", "simulate"],
+                      "case": "new panels alongside a saved drape", "new_meshes_initialized": 3,
+                      "continued_step": 4, "native_pose_meshes_preserved": native_count}))
+
+
 async def verify_delete_keeps_drape():
     with TemporaryDirectory(prefix="clo-delete-drape-") as directory:
         root = Path(directory)
@@ -2183,6 +2254,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-delete-keeps-drape", action="store_const", dest="comparison",
                              const=verify_delete_keeps_drape,
                              help="verify panel deletion removes only associated meshes and sewing")
+    comparisons.add_argument("--verify-new-panels-keep-drape", action="store_const", dest="comparison",
+                             const=verify_new_panels_keep_drape,
+                             help="verify newly created or copied panels can join settled cloth")
     comparisons.add_argument("--compare-checkpoint-listing", action="store_const", dest="comparison",
                              const=compare_checkpoint_listing,
                              help="compare offline checkpoint list ordering and local timestamps")
@@ -2200,7 +2274,7 @@ if __name__ == "__main__":
                                 verify_appended_build_report, verify_calibrated_build_arrangement,
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
-                                verify_delete_keeps_drape)
+                                verify_delete_keeps_drape, verify_new_panels_keep_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))
