@@ -745,27 +745,30 @@ pub fn avatar_load(args: &Value, state: &mut Value) -> Result<Value, String> {
     Ok(result)
 }
 
-pub(super) fn measurement_source(avatar: &Value) -> &str {
-    string(
+pub(super) fn body_measurements(avatar: &Value, refresh: bool) -> (Value, String) {
+    if !refresh {
+        if let Some(cached) = avatar["name"]
+            .as_str()
+            .and_then(super::measurement_cache::read)
+        {
+            return cached;
+        }
+    }
+    let source = string(
         avatar,
         "measurement_source",
         string(avatar, "source", "rust_scene"),
-    )
+    );
+    (avatar["body"].clone(), source.to_owned())
 }
 
-pub fn avatar_measurements(args: &Value, state: &mut Value) -> Result<Value, String> {
-    if boolean(args, "refresh", false) {
-        if let Some(path) = state["avatar"]["path"].as_str() {
-            let refreshed = avatar_from_path(Path::new(path))?;
-            state["avatar"]["body"] = refreshed["body"].clone();
-            state["avatar"]["measurement_source"] = json!(measurement_source(&refreshed));
-        }
-    }
+pub fn avatar_measurements(args: &Value, state: &Value) -> Result<Value, String> {
     let avatar = &state["avatar"];
     if avatar.is_null() {
         return Err("no avatar in the scene; call avatar_load first".into());
     }
-    Ok(json!({"avatar":avatar["name"],"source":measurement_source(avatar),"body":avatar["body"]}))
+    let (body, source) = body_measurements(avatar, boolean(args, "refresh", false));
+    Ok(json!({"avatar":avatar["name"],"source":source,"body":body}))
 }
 
 pub fn arrangement_points(state: &Value) -> Result<Value, String> {

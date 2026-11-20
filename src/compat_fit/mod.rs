@@ -1,6 +1,7 @@
 mod assets;
 mod avt;
 mod draft;
+mod measurement_cache;
 mod mesh_measure;
 mod render;
 mod solver;

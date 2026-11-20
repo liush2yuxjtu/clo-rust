@@ -891,25 +891,20 @@ fn plan(spec: &Value, body: &Value, source: &str) -> Result<Value, String> {
 }
 
 pub fn preview(args: &Value, state: &Value) -> Result<Value, String> {
-    let defaults;
     let (body, source) = if boolean(args, "use_scene_measurements", false) {
         if state["avatar"].is_null() {
             return Err(
                 "load an avatar first, or preview with use_scene_measurements=false".into(),
             );
         }
-        (
-            &state["avatar"]["body"],
-            assets::measurement_source(&state["avatar"]),
-        )
+        assets::body_measurements(&state["avatar"], false)
     } else {
-        defaults = assets::default_body();
         (
-            &defaults,
-            "standard default measurements; not fitted to a live avatar",
+            assets::default_body(),
+            "standard default measurements; not fitted to a live avatar".to_owned(),
         )
     };
-    let mut result = plan(&args["spec"], body, source)?;
+    let mut result = plan(&args["spec"], &body, &source)?;
     for panel in array_mut(&mut result, "pieces") {
         let obj = panel.as_object_mut().unwrap();
         obj.remove("points");
@@ -943,8 +938,8 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             &mut next,
         )?;
     }
-    let source = assets::measurement_source(&next["avatar"]).to_owned();
-    let draft = plan(&spec, &next["avatar"]["body"], &source)?;
+    let (body, source) = assets::body_measurements(&next["avatar"], false);
+    let draft = plan(&spec, &body, &source)?;
     let replace = rebuild || boolean(args, "replace_existing", true);
     let checkpoint = if replace && !array(&next["patterns"]).is_empty() {
         crate::compat_scene::dispatch("checkpoint_save", &json!({}), &mut next)

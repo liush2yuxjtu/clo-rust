@@ -516,6 +516,41 @@ async def compare_saved_avatar_mesh(height_only=False):
     }, ensure_ascii=False))
 
 
+async def compare_saved_avatar_cache():
+    preview_args = {"spec": {"type": "tshirt"}, "use_scene_measurements": True}
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        scene = await json_result(session, "scene_info")
+        official = await json_result(session, "avatar_measurements")
+        official_preview = await json_result(session, "garment_plan_preview", preview_args)
+    assert official["body"]["source"] == "clo", official["source"]
+    assert official["source"].startswith("cached CLO measurements ("), official["source"]
+    project = Path(scene["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust = await json_result(session, "avatar_measurements")
+        refreshed = await json_result(session, "avatar_measurements", {"refresh": True})
+        assert refreshed["avatar"] == rust["avatar"]
+        assert refreshed["source"] == "rust_mesh_estimate"
+        assert await json_result(session, "avatar_measurements") == rust
+        preview = await json_result(session, "garment_plan_preview", preview_args)
+    assert official == rust, {
+        key: (official["body"].get(key), rust["body"].get(key))
+        for key in official["body"].keys() | rust["body"].keys()
+        if official["body"].get(key) != rust["body"].get(key)
+    }
+    assert official_preview["measurement_source"] == preview["measurement_source"] == rust["source"]
+    print(json.dumps({
+        "tool": "avatar_measurements", "case": "saved measurement cache",
+        "avatar": rust["avatar"], "source": rust["source"],
+        "numeric_fields_matched": len(rust["body"]) - 1,
+        "refresh_bypassed_cache": True,
+        "draft_preview_used_cache": True,
+    }, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -546,6 +581,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-avatar-mesh", action="store_const", dest="comparison",
                              const=compare_saved_avatar_mesh,
                              help="compare all geometry fallback body fields in a saved CLO project")
+    comparisons.add_argument("--compare-saved-avatar-cache", action="store_const", dest="comparison",
+                             const=compare_saved_avatar_cache,
+                             help="compare the same saved avatar measurement cache across backends")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

@@ -114,12 +114,21 @@ avatar with accessories. The check requires CLO's mesh fallback on
 `avatar_measurements(refresh=True)`, which exports the current avatar to a
 temporary OBJ. It compares height to within 0.25 mm. For a project with
 recognized AVT body-region tags, run `--compare-saved-avatar-mesh` for all
-32 numeric body fields with the same tolerance. A CLO editor reading or
-cached measurement table requires a separate case. Check that the Rust avatar
+32 numeric body fields with the same tolerance. An active CLO editor reading
+requires a separate case. Check that the Rust avatar
 still retains its complete mesh and arrangement names for collision and display.
 Refresh a loaded avatar after stepping simulation and verify the pose and step
 count remain intact. If the stored region indices disagree with the physical
 mesh, check that the avatar opens and uses the unclassified mesh estimate.
+
+For `--compare-saved-avatar-cache`, keep the saved project open in CLO and use
+the same `CLO_MCP_STATE` directory on both backends (default `~/.clo3d-mcp`).
+The Rust backend reads `measurements/<avatar>.json` and uses its millimetre
+values for `avatar_measurements` and scene-based garment drafting. Compare every
+body field and the cache source. Check that Rust `refresh=True` uses the
+loaded mesh measurements and a subsequent normal read still returns the saved
+table. A missing or unusable cache falls back to the mesh. Run
+`cargo test --locked cache_uses_supported_names_units_and_avatar_identity`.
 
 For saved internal seams, run `cargo test --locked native_inner_seam_uses_saved_mesh_edges`.
 Open a native fixture with internal seams over MCP and use `simulate` without a
