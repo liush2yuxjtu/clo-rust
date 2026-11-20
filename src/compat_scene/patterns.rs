@@ -522,32 +522,47 @@ pub(super) fn edit(args: &Value, state: &mut Value) -> Reply {
     let [dx, dy] = offset(&state["patterns"][i]);
     let mut moved = Vec::new();
     for change in args["moves"].as_array().ok_or("moves must be an array")? {
-        let cursor = index(change, "point")?;
+        let point = &change["point"];
+        let cursor = point
+            .as_u64()
+            .or_else(|| point.as_str()?.trim().parse().ok())
+            .or_else(|| {
+                let value = point.as_f64()?.trunc();
+                (0.0..u64::MAX as f64).contains(&value).then_some(value as u64)
+            })
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("point must be a nonnegative integer")?;
         let position = *corners.get(cursor).ok_or("point index is out of range")?;
         let p = original[position];
-        let (x, y) = if change.get("x").is_some() || change.get("y").is_some() {
-            (number(change, "x")?, number(change, "y")?)
-        } else {
-            let offset = |key| {
-                if change.get(key).is_some() {
-                    number(change, key)
-                } else {
-                    Ok(0.)
-                }
-            };
-            (p.x + dx + offset("dx")?, p.y + dy + offset("dy")?)
+        let read_coordinate = |key, default| match change.get(key) {
+            Some(value) => value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .filter(|coordinate| coordinate.is_finite())
+                .ok_or_else(|| format!("{key} must be a finite number")),
+            None => Ok(default),
         };
-        if !x.is_finite() || !y.is_finite() {
+        let (x, y) = if change.get("x").is_some() && change.get("y").is_some() {
+            (read_coordinate("x", 0.0)?, read_coordinate("y", 0.0)?)
+        } else {
+            (
+                p.x + dx + read_coordinate("dx", 0.0)?,
+                p.y + dy + read_coordinate("dy", 0.0)?,
+            )
+        };
+        let local_x = if x == p.x + dx { p.x } else { x - dx };
+        let local_y = if y == p.y + dy { p.y } else { y - dy };
+        if ![x, y, local_x, local_y].into_iter().all(f64::is_finite) {
             return Err("point coordinates overflow".into());
         }
         points[position] = Point {
-            x: x - dx,
-            y: y - dy,
+            x: local_x,
+            y: local_y,
             ..p
         };
         moved.push(json!({"point": cursor, "x": x, "y": y}));
     }
-    if !moved.is_empty() {
+    if points != original {
         set_points(&mut state["patterns"][i], points);
         let id = state["patterns"][i]["id"].clone();
         discard_panel_pose(state, &id);

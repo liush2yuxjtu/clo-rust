@@ -318,6 +318,10 @@ arrangement changes, flips, point deletion and particle distance edits.
 Save and reopen after each edit. At zero steps, rebuild the edited panel
 and verify that the other panel's saved mesh and velocities match exactly.
 Check that a subsequent step continues the original simulation.
+Exercise numeric strings for corner coordinates and index, relative offsets
+when just one absolute coordinate is present, and `MovePatternPoint` returning
+`null` with a visible point change. Verify a zero move and an invalid batch
+preserve the scene geometry and pose.
 
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and

@@ -2172,16 +2172,38 @@ async def verify_geometry_edits_rebuild_one_panel():
             await json_result(rust, "simulate", {"steps": 3, "particle_distance": 50})
             initial, original = await save("initial")
             first, remaining = original["simulation"]["meshes"]
+            no_op = await json_result(rust, "pattern_edit_points", {
+                "pattern": "Front", "moves": [{"point": "0", "x": "ignored", "dy": "0"}],
+            })
+            assert no_op == {"index": 0, "moved": [{"point": 0, "x": 0.0, "y": 0.0}]}
+            invalid = await rust.call_tool("pattern_edit_points", {
+                "pattern": "Front", "moves": [{"point": 0, "dx": 15}, {"point": 1, "dy": "invalid"}],
+            })
+            assert invalid.isError
+            _, unchanged = await save("unchanged")
+            assert unchanged["patterns"] == original["patterns"]
+            assert unchanged["simulation"] == original["simulation"]
             results = []
             for tool, args in (
-                ("pattern_edit_points", {"moves": [{"point": 1, "dx": 40}]}),
+                ("pattern_edit_points", {"moves": [{"point": " 1 ", "x": "ignored", "dx": "40"},
+                                                   {"point": 2.9, "x": "56.5", "y": "90"}]}),
                 ("pattern_set_arrangement", {"point": "Back"}),
                 ("pattern_ops", {"op": "flip", "args": {"horizontal": True}}),
                 ("pattern_ops", {"op": "delete_point", "args": {"point": 1}}),
                 ("pattern_ops", {"op": "particle_distance", "args": {"mm": 24}}),
             ):
                 await json_result(rust, "scene_open", {"path": str(initial)})
-                await json_result(rust, tool, {"pattern": "Front"} | args)
+                reply = await json_result(rust, tool, {"pattern": "Front"} | args)
+                if tool == "pattern_edit_points":
+                    assert reply["moved"] == [{"point": 1, "x": 140, "y": 0},
+                                              {"point": 2, "x": 56.5, "y": 90}]
+                    raw = await json_result(rust, "clo_api_call", {
+                        "name": "pattern_api.MovePatternPoint", "args": [0, 3, 0, 61],
+                    })
+                    assert raw["value"] is None
+                    info = await json_result(rust, "pattern_info", {"pattern": "Front"})
+                    record = info["input_info"]["Pattern InputInformation"][0]["PointList"][4]
+                    assert record["Point index"] == "3" and record["Point positionY"] == 61
                 path, edited = await save("edited")
                 partial = edited["simulation"]
                 assert partial["source"] == "mixed_saved_pose" and partial["meshes"] == [remaining]
@@ -2215,7 +2237,8 @@ async def verify_geometry_edits_rebuild_one_panel():
     print(json.dumps({"tools": ["pattern_edit_points", "pattern_set_arrangement", "pattern_ops", "simulate"],
                       "case": "rebuild only the edited panel", "edits": results,
                       "unaffected_pose_and_velocities": "unchanged", "continued_step": 4,
-                      "native_meshes_preserved": native_count}))
+                      "native_meshes_preserved": native_count, "point_inputs": "pass",
+                      "zero_move_and_invalid_batch_preserved_pose": True, "api_returned_null": True}))
 
 
 async def verify_symmetry_sewing():

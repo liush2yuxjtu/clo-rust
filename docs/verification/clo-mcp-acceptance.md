@@ -28,7 +28,7 @@
 | `pattern_create` | Rust 实调及新片追加姿态用例 | 双端点型、重名和无效轮廓 |
 | `pattern_delete` | Rust 删除后剩余姿态续算 | 双端批量、缺失目标和引用缝组 |
 | `pattern_set_arrangement` | Rust 实调及单片重建 | 双端排布位置、偏移及无效点位 |
-| `pattern_edit_points` | Rust 单片重建和轮廓改点 | 双端移动、点索引和拒绝时的原状态 |
+| `pattern_edit_points` | Rust 字符串坐标、绝对与相对移动、原生留档 API 返回类型和单片重建 | 双端现场坐标和失败后的状态 |
 | `pattern_ops` | Rust 复制、镜像、显示和轮廓编辑 | 双端支持的操作、依赖场景变化和拒绝路径 |
 | `sew` | Rust 新约束和已保存姿态续算 | 双端端点、方向、缝组与失败后的状态 |
 | `seams_list` | 历史 240 个有序缝组、42 片成员关系对照 | 当前版本新建、删除及编辑读回 |

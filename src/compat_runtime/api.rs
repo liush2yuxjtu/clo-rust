@@ -608,10 +608,11 @@ const TYPES: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-fn pattern_query_doc(name: &str) -> Option<&'static str> {
+fn native_pattern_doc(name: &str) -> Option<&'static str> {
     match name {
         "pattern_api.GetPatternCount" => Some("GetPatternCount() -> int"),
         "pattern_api.GetPatternPieceName" => Some("GetPatternPieceName(arg0: int) -> str"),
+        "pattern_api.MovePatternPoint" => Some("MovePatternPoint(arg0: int, arg1: int, arg2: float, arg3: float) -> None"),
         _ => None,
     }
 }
@@ -648,7 +649,7 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
         }
     };
     for entry in FUNCTIONS {
-        if let Some(doc) = pattern_query_doc(entry.name) {
+        if let Some(doc) = native_pattern_doc(entry.name) {
             add(entry.name, "function", None, doc);
         } else {
             add(entry.name, "function", Some(entry.signature), entry.doc);
@@ -689,7 +690,7 @@ pub(super) fn catalog(args: &Value) -> ToolResult {
 
 pub(super) fn describe(name: &str) -> ToolResult {
     if let Some(entry) = FUNCTIONS.iter().find(|entry| entry.name == name) {
-        let doc = pattern_query_doc(name).map_or_else(
+        let doc = native_pattern_doc(name).map_or_else(
             || format!("{name}{}\n{}", entry.signature, entry.doc),
             str::to_owned,
         );
@@ -1322,7 +1323,7 @@ pub(super) fn invoke(
             let seams = array(&state["seams"]);
             Ok(property(&seams[index(&arg[0],seams.len(),"seam group")?],"name"))
         }
-        "pattern_api.MovePatternPoint" => domain("pattern_edit_points", &json!({"pattern":pattern_ref(&arg[0])?,"moves":[{"point":arg[1],"x":arg[2],"y":arg[3]}]}),state).map(|_| json!(true)),
+        "pattern_api.MovePatternPoint" => domain("pattern_edit_points", &json!({"pattern":pattern_ref(&arg[0])?,"moves":[{"point":arg[1],"x":arg[2],"y":arg[3]}]}),state).map(|_| Value::Null),
         "pattern_api.SetArrangement" => {
             let result = domain("arrangement_points", &json!({}),state)?;
             let names = array(&result["names"]);
