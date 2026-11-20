@@ -1,4 +1,4 @@
-use super::{array, flag, index, invalidate_geometry, next_id, number, string, vec_mut, Reply};
+use super::{array, flag, index, invalidate_geometry, next_id, number, string, use_partial_pose, vec_mut, Reply};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -456,24 +456,6 @@ pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
     vec_mut(state, "patterns").push(pattern);
     use_partial_pose(state);
     Ok(json!({"index": i, "name": name}))
-}
-
-fn use_partial_pose(state: &mut Value) {
-    let pose = &mut state["simulation"];
-    let uses_mm = pose["source"] == "native_saved_pose" || pose["texcoords_units"] == "mm";
-    let Some(meshes) = pose.get_mut("meshes").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if meshes.is_empty() {
-        return;
-    }
-    if uses_mm {
-        for mesh in meshes {
-            mesh["texcoords_units"] = json!("mm");
-        }
-        pose.as_object_mut().expect("simulation record").remove("texcoords_units");
-    }
-    pose["source"] = json!("mixed_saved_pose");
 }
 
 fn discard_panel_pose(state: &mut Value, id: &Value) {

@@ -1,4 +1,4 @@
-use super::{array, flag, formats, invalidate_geometry, patterns, string, vec_mut, Reply};
+use super::{array, flag, formats, invalidate_geometry, patterns, string, use_partial_pose, vec_mut, Reply};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
@@ -193,10 +193,12 @@ fn merge(state: &mut Value, incoming: &Value, append: bool) -> Result<(), String
         }
         joins.push(new_seam);
     }
+    if !additions.is_empty() {
+        use_partial_pose(state);
+    }
     vec_mut(state, "native_seam_groups").extend(groups);
     vec_mut(state, "patterns").extend(additions);
     vec_mut(state, "seams").extend(joins);
-    invalidate_geometry(state);
     Ok(())
 }
 

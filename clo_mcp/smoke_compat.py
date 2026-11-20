@@ -1355,6 +1355,71 @@ async def verify_checkpoint_workflow():
                       "native_project_reexported": bool(fixture)}))
 
 
+async def verify_interchange_append_keeps_drape():
+    with TemporaryDirectory(prefix="clo-interchange-append-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def create(name, x):
+                await json_result(rust, "pattern_create", {
+                    "name": name, "points": [[x, 0], [x + 100, 0], [x + 50, 75]],
+                })
+
+            async def save(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
+                return path, json.loads(path.read_text())["scene"]
+
+            await create("Front", 0)
+            await create("Back", 160)
+            await json_result(rust, "sew", {"pattern_a": "Front", "line_a": 0,
+                                            "pattern_b": "Back", "line_b": 0})
+            fixtures = [root / "panels.json", root / "panels.dxf"]
+            for path in fixtures:
+                await json_result(rust, "scene_export", {"path": str(path)})
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            await create("Existing", 320)
+            await json_result(rust, "simulate", {"steps": 2, "particle_distance": 50})
+            original_path, original = await save("original")
+            results = []
+            for path in fixtures:
+                await json_result(rust, "scene_open", {"path": str(original_path)})
+                opened = await json_result(rust, "scene_open", {"path": str(path), "mode": "append"})
+                assert opened["pattern_count"] == 3
+                saved_path, combined = await save(f"combined-{path.suffix[1:]}")
+                assert combined["simulation"] == original["simulation"] | {"source": "mixed_saved_pose"}
+                assert combined["patterns"][0] == original["patterns"][0]
+                assert len({panel["id"] for panel in combined["patterns"]}) == 3
+                seams = len(combined["seams"])
+                assert seams == int(path.suffix == ".json")
+                await json_result(rust, "scene_open", {"path": str(saved_path)})
+                await json_result(rust, "simulate", {"steps": 0})
+                _, initialized = await save("initialized")
+                assert initialized["simulation"]["meshes"][:1] == original["simulation"]["meshes"]
+                assert len(initialized["simulation"]["meshes"]) == 3
+                assert initialized["simulation"]["steps"] == 2
+                await json_result(rust, "simulate", {"steps": 1})
+                _, continued = await save("continued")
+                assert continued["simulation"]["steps"] == 3
+                results.append({"format": path.suffix, "appended_panels": 2, "seams": seams})
+
+            invalid = root / "invalid.json"
+            broken = json.loads(fixtures[0].read_text())
+            broken["seams"][0]["line_a"] = 99
+            invalid.write_text(json.dumps(broken))
+            await json_result(rust, "scene_open", {"path": str(original_path)})
+            result = await rust.call_tool("scene_open", {"path": str(invalid), "mode": "append"})
+            assert result.isError
+            _, after_error = await save("after-error")
+            assert after_error["simulation"] == original["simulation"]
+            assert after_error["patterns"] == original["patterns"]
+    print(json.dumps({"tools": ["scene_open", "scene_export", "simulate"],
+                      "case": "append 2D interchange patterns", "formats": results,
+                      "original_mesh_and_velocities": "unchanged", "continued_step": 3,
+                      "invalid_seam_is_atomic": True}))
+
+
 async def verify_portable_append_keeps_drape():
     with TemporaryDirectory(prefix="clo-portable-append-") as directory:
         root = Path(directory)
@@ -2399,6 +2464,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-portable-append-keeps-drape", action="store_const", dest="comparison",
                              const=verify_portable_append_keeps_drape,
                              help="verify append remaps persisted panels, materials and simulation meshes")
+    comparisons.add_argument("--verify-interchange-append-keeps-drape", action="store_const", dest="comparison",
+                             const=verify_interchange_append_keeps_drape,
+                             help="verify DXF and pattern JSON append preserve the receiving drape")
     comparisons.add_argument("--verify-geometry-edits-rebuild-one-panel", action="store_const", dest="comparison",
                              const=verify_geometry_edits_rebuild_one_panel,
                              help="verify geometric edits preserve other panels and their continuation")
@@ -2420,7 +2488,8 @@ if __name__ == "__main__":
                                 verify_outline_edit_remaps, verify_symmetry_sewing,
                                 verify_display_edits_keep_drape, verify_sew_keeps_drape,
                                 verify_delete_keeps_drape, verify_new_panels_keep_drape,
-                                verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape)
+                                verify_geometry_edits_rebuild_one_panel, verify_portable_append_keeps_drape,
+                                verify_interchange_append_keeps_drape)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

@@ -245,6 +245,12 @@ meshes reference the remapped panels, both avatars are present, and
 zero steps preserve both sets of positions and velocities. The receiving
 scene's step count continues. An unknown saved mesh ID rejects the append.
 
+Run `--verify-interchange-append-keeps-drape` to export and append both a
+DXF layout and pattern JSON into simulated cloth. Reopen and initialize the
+new panels at zero steps while the original mesh and velocities stay
+identical. The JSON seam follows its remapped panels, and a malformed
+seam reference leaves the receiving scene intact.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Save and reopen after each edit. At zero steps, rebuild the edited panel

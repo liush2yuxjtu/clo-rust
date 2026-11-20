@@ -110,5 +110,23 @@ fn invalidate_geometry(state: &mut Value) {
     state["simulation"] = Value::Null;
 }
 
+fn use_partial_pose(state: &mut Value) {
+    let pose = &mut state["simulation"];
+    let uses_mm = pose["source"] == "native_saved_pose" || pose["texcoords_units"] == "mm";
+    let Some(meshes) = pose.get_mut("meshes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if meshes.is_empty() {
+        return;
+    }
+    if uses_mm {
+        for mesh in meshes {
+            mesh["texcoords_units"] = json!("mm");
+        }
+        pose.as_object_mut().expect("simulation record").remove("texcoords_units");
+    }
+    pose["source"] = json!("mixed_saved_pose");
+}
+
 #[cfg(test)]
 mod tests;
