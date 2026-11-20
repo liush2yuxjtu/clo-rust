@@ -2540,7 +2540,17 @@ async def verify_display_edits_keep_drape():
             assert isinstance(before, list)
             _, scene = await save("before")
             original_3d, original_2d = await capture("snapshot"), await capture("snapshot_2d")
-            await operate("Front", "move_2d", {"dx": 80, "dy": 55})
+            invalid = await rust.call_tool("pattern_ops", {
+                "pattern": "Front", "op": "move_2d", "args": {"x": "140"},
+            })
+            assert invalid.isError
+            assert (await json_result(rust, "pattern_info", {"pattern": "Front"}))["pos_2d"] == before
+            ui = await json_result(rust, "clo_ui_state")
+            await operate("Front", "move_2d", {"dx": "80", "dy": "55", "y": "ignored"})
+            stale = await rust.call_tool("clo_ui_action", {
+                "snapshot": ui["snapshot"], "action": "press", "element": 2,
+            })
+            assert stale.isError and any("Stale UI snapshot" in block.text for block in stale.content)
             moved = (await json_result(rust, "pattern_info", {"pattern": "Front"}))["pos_2d"]
             assert moved == [before[0] + 80, before[1] + 55]
             moved_2d = await capture("snapshot_2d")
@@ -2564,6 +2574,12 @@ async def verify_display_edits_keep_drape():
             await operate("Front", "flip", {"horizontal": True})
             _, flipped = await save("flipped")
             assert flipped["simulation"]["meshes"] == [continued["simulation"]["meshes"][1]]
+            source = (await json_result(rust, "pattern_info", {"pattern": "Back"}))["pos_2d"]
+            copied = await json_result(rust, "pattern_ops", {
+                "pattern": "Back", "op": "copy", "args": {"x": 0, "y": 0, "dy": "-18"},
+            })
+            duplicate = await json_result(rust, "pattern_info", {"pattern": str(copied["new_index"])})
+            assert duplicate["pos_2d"] == [source[0] + 300, source[1] - 18]
 
             native_meshes = None
             if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
@@ -2571,7 +2587,7 @@ async def verify_display_edits_keep_drape():
                 _, original = await save("native")
                 native_meshes = len(original["simulation"]["meshes"])
                 assert native_meshes > 0 and original["simulation"]["source"] == "native_saved_pose"
-                await operate("0", "move_2d", {"x": 500, "y": 250})
+                await operate("0", "move_2d", {"x": "500", "y": "250", "dx": "ignored"})
                 front = await json_result(rust, "pattern_info", {"pattern": "0"})
                 assert front["pos_2d"] == [500, 250]
                 await operate("0", "hide", {"on": True})
@@ -2584,7 +2600,8 @@ async def verify_display_edits_keep_drape():
     print(json.dumps({"tools": ["pattern_ops", "snapshot", "snapshot_2d", "scene_export", "simulate"],
                       "case": "layout and display edits preserve drape",
                       "pose_and_velocities": "unchanged", "continue_and_flip_control": "pass",
-                      "native_pose_meshes_preserved": native_meshes}))
+                      "native_pose_meshes_preserved": native_meshes,
+                      "reference_move_and_copy_argument_rules": True, "old_ui_snapshot_rejected": True}))
 
 
 async def verify_simulation_remesh_keeps_pose():

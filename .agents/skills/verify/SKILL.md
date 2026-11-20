@@ -329,6 +329,9 @@ internal seam groups reach the Rust solver after reopening.
 
 Run `--verify-display-edits-keep-drape` to verify that 2D movement,
 3D visibility and strengthening preserve an existing pose and velocities.
+Check numeric strings, relative movement with a stray `y` field, and rejection
+of an absolute move missing `y`. Copy uses relative offsets even when absolute
+fields are provided. Successful layout movement invalidates the old UI snapshot.
 Compare the 2D and 3D snapshots, visible OBJ objects, saved state, and
 step count after reopening. A geometric flip discards only the flipped panel's pose.
 Set `CLO_DISPLAY_FIXTURE` to a native project with saved drape to also

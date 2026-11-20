@@ -660,25 +660,28 @@ fn flip(pattern: &mut Value, horizontal: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn move_2d(pattern: &mut Value, args: &Value, default_dx: f64) -> Result<(), String> {
+fn move_2d(pattern: &mut Value, args: &Value, copy: bool) -> Result<(), String> {
     let [dx, dy] = offset(pattern);
     let offset = |key, default| {
-        if args.get(key).is_some() {
-            number(args, key)
+        if let Some(value) = args.get(key) {
+            nested_number(value, key)
         } else {
             Ok(default)
         }
     };
-    let (x, y) = if args.get("x").is_some() || args.get("y").is_some() {
+    let (x, y) = if !copy && args.get("x").is_some() {
         let [cx, cy] = centre(bounds(pattern)?);
-        (dx + number(args, "x")? - cx, dy + number(args, "y")? - cy)
+        (dx + nested_number(&args["x"], "x")? - cx, dy + nested_number(&args["y"], "y")? - cy)
     } else {
+        let default_dx = if copy { 300.0 } else { 0.0 };
         (dx + offset("dx", default_dx)?, dy + offset("dy", 0.)?)
     };
     if !x.is_finite() || !y.is_finite() {
         return Err("2D position overflow".into());
     }
-    pattern["pos_2d"] = json!([x, y]);
+    if x != dx || y != dy {
+        pattern["pos_2d"] = json!([x, y]);
+    }
     Ok(())
 }
 
@@ -826,7 +829,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
     let mut result = json!({"index": i, "op": op, "ok": true});
     match op {
         "rename" => pattern["name"] = json!(string(args, "name")?),
-        "move_2d" => move_2d(&mut pattern, args, 0.)?,
+        "move_2d" => move_2d(&mut pattern, args, false)?,
         "flip" => flip(&mut pattern, flag(args, "horizontal", true))?,
         "copy" | "symmetry" => {
             let old_id = pattern["id"].clone();
@@ -836,7 +839,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 flip(&mut pattern, true)?;
             }
             if op == "copy" {
-                move_2d(&mut pattern, args, 300.)?;
+                move_2d(&mut pattern, args, true)?;
             }
             let new_index = array(state, "patterns").len();
             if op == "symmetry" && flag(args, "with_sewing", true) {
@@ -844,6 +847,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             }
             vec_mut(state, "patterns").push(pattern);
             use_partial_pose(state);
+            crate::compat_runtime::invalidate_scene_ui_snapshot(state);
             return Ok(if op == "copy" {
                 json!({"new_index": new_index})
             } else {
@@ -902,6 +906,9 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
         "elastic" | "shirring" | "freeze" | "layer" | "move_2d" | "hide" | "strengthen"
     ) {
         discard_panel_pose(state, &pattern["id"]);
+    }
+    if op == "move_2d" && pattern["pos_2d"] != state["patterns"][i]["pos_2d"] {
+        crate::compat_runtime::invalidate_scene_ui_snapshot(state);
     }
     state["patterns"][i] = pattern;
     Ok(result)
