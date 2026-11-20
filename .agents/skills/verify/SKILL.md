@@ -175,6 +175,16 @@ views. Read the file bytes back and confirm that the mixed-case
 leaves the completed build available through `garment_last_spec` and scene
 save. A failed draft preserves the prior build.
 
+Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
+exercise two builds with different patterns. Within one MCP session,
+opening or restoring the older scene and clearing the project change the
+scene while the most recent successful build stays available for
+`garment_rebuild`. Restarting the bridge within that session preserves the
+record. A fresh MCP process can open the saved geometry and starts with
+empty `garment_last_spec`; a rebuild before its first build returns an error.
+Set `CLO_MCP_OFFICIAL_COMMAND` to also check empty history and the no-build
+error on the official MCP server without requiring its live bridge.
+
 Run `--verify-runtime-export-workflow` to verify Rust discovery by module and
 keyword, catalog pagination, qualified and unqualified documentation lookup,
 and invocation of the asset path, layout PNG, 3D thumbnail and FBX API entries.

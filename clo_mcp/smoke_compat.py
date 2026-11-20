@@ -935,6 +935,77 @@ async def verify_tiered_build_relaxation():
                       "manual_pose_and_resume": "pass", "rebuild_and_nonlayered_controls": "pass"}))
 
 
+async def verify_garment_session_history():
+    empty = {"spec": None, "pieces": []}
+    options = {"simulate_steps": 0, "snapshots": False}
+    official_baseline = None
+    if os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
+        async with open_backend("official") as official:
+            await inspect_contract(official)
+            assert await json_result(official, "garment_last_spec") == empty
+            refused = await official.call_tool("garment_rebuild", options | {"changes": {}})
+            assert refused.isError
+            assert await json_result(official, "garment_last_spec") == empty
+        official_baseline = "pass"
+    with TemporaryDirectory(prefix="clo-garment-history-") as directory:
+        root = Path(directory)
+        environment = {
+            "CLO_RUST_AVATAR_DIR": "", "CLO_RUST_FABRIC_DIR": "",
+            "CLO_RUST_CHECKPOINT_DIR": str(root / "checkpoints"),
+        }
+        project = root / "long-sleeve.clorust"
+        async with open_backend("rust", environment) as rust:
+            await inspect_contract(rust)
+            assert await json_result(rust, "garment_last_spec") == empty
+            first = await json_result(rust, "garment_build", options | {
+                "spec": {"garment": "top", "length": "waist", "sleeve": "long"},
+            })
+            first_pieces = (await json_result(rust, "garment_last_spec"))["pieces"]
+            assert len(first_pieces) == 4
+            await json_result(rust, "scene_save", {"path": str(project), "thumbnail": False})
+            await json_result(rust, "checkpoint_save", {"name": "long-sleeve"})
+            archived = json.loads(project.read_text())["scene"]
+            assert "runtime" not in archived and archived["garment_spec"] == first["spec"]
+
+            second = await json_result(rust, "garment_rebuild", options | {
+                "changes": {"length": "cropped", "sleeve": "none"},
+            })
+            recent = await json_result(rust, "garment_last_spec")
+            assert recent == {"spec": second["spec"], "pieces": ["Front", "Back"]}
+            reopened = await json_result(rust, "scene_open", {"path": str(project), "mode": "replace"})
+            assert reopened["pattern_count"] == len(first_pieces)
+            assert await json_result(rust, "garment_last_spec") == recent
+            await json_result(rust, "scene_clear", {"keep_avatar": True})
+            assert (await json_result(rust, "scene_info"))["pattern_count"] == 0
+            assert await json_result(rust, "garment_last_spec") == recent
+            restored = await json_result(rust, "checkpoint_restore", {"name": "long-sleeve"})
+            assert restored["pattern_count"] == len(first_pieces)
+            assert await json_result(rust, "garment_last_spec") == recent
+            await successful(rust, "clo_stop_bridge")
+            assert await json_result(rust, "garment_last_spec") == recent
+            await successful(rust, "clo_launch", {"with_bridge": True})
+            await json_result(rust, "scene_clear", {"keep_avatar": False})
+            assert (await json_result(rust, "scene_info"))["avatars"] == []
+            assert await json_result(rust, "garment_last_spec") == recent
+            rebuilt = await json_result(rust, "garment_rebuild", options | {"changes": {"color": "navy"}})
+            assert rebuilt["spec"] == recent["spec"] | {"color": "navy"}
+            assert set(rebuilt["pieces"]) == set(recent["pieces"])
+
+            async with open_backend("rust", environment) as independent:
+                opened = await json_result(independent, "scene_open", {"path": str(project)})
+                assert opened["pattern_count"] == len(first_pieces)
+                assert await json_result(independent, "garment_last_spec") == empty
+                refused = await independent.call_tool("garment_rebuild", options | {"changes": {}})
+                assert refused.isError and "nothing built yet in this session" in refused.content[0].text
+                assert await json_result(independent, "garment_last_spec") == empty
+                assert (await json_result(rust, "garment_last_spec"))["spec"] == rebuilt["spec"]
+    print(json.dumps({"tools": ["garment_last_spec", "garment_rebuild", "scene_open",
+                                "checkpoint_restore", "scene_clear"],
+                      "case": "garment session history", "open_and_restore": "pass",
+                      "clear_and_bridge_restart": "pass", "independent_client": "pass",
+                      "official_empty_session": official_baseline}))
+
+
 async def verify_build_snapshot_workflow():
     defaults = ["front", "3/4-right", "back"]
     caption = "Snapshots after simulation (judge fit, seams, drape; fix with garment_rebuild or pattern tools):"
@@ -1505,6 +1576,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-build-snapshot-workflow", action="store_const", dest="comparison",
                              const=verify_build_snapshot_workflow,
                              help="verify build snapshot order, view aliases, images and error readback")
+    comparisons.add_argument("--verify-garment-session-history", action="store_const", dest="comparison",
+                             const=verify_garment_session_history,
+                             help="verify last build history across scene changes and isolated MCP clients")
     comparisons.add_argument("--compare-curved-skirt-preview", action="store_const", dest="comparison",
                              const=compare_curved_skirt_preview,
                              help="compare offline circular and mermaid skirt draft previews")
@@ -1526,7 +1600,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if (args.comparison not in (None, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
-                                verify_one_piece_dress_merge, verify_build_snapshot_workflow)
+                                verify_one_piece_dress_merge, verify_build_snapshot_workflow,
+                                verify_garment_session_history)
             and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND")):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")
     asyncio.run(main(args.comparison))

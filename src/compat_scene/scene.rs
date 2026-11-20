@@ -55,6 +55,7 @@ fn clear_garment(state: &mut Value) {
         state[field] = json!([]);
     }
     state["garment_spec"] = Value::Null;
+    state["garment_piece_names"] = json!([]);
     state.as_object_mut().expect("scene object").remove(formats::native_save::SOURCE);
     invalidate_geometry(state);
 }

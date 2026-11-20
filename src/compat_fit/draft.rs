@@ -1286,13 +1286,15 @@ pub fn preview(args: &Value, state: &Value) -> Result<Value, String> {
 }
 
 pub fn last_spec(state: &Value) -> Value {
-    json!({"spec":state["garment_spec"],"pieces":state["garment_piece_names"].as_array().cloned().unwrap_or_default()})
+    state["runtime"]["last_garment"]
+        .as_object()
+        .map_or_else(|| json!({"spec":null,"pieces":[]}), |record| json!(record))
 }
 
 pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, String> {
     let mut next = state.clone();
     let spec = if rebuild {
-        let mut saved = next["garment_spec"]
+        let mut saved = next["runtime"]["last_garment"]["spec"]
             .as_object()
             .cloned()
             .ok_or("nothing built yet in this session; call garment_build")?;
@@ -1412,6 +1414,8 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
     };
     next["garment_spec"] = draft["spec"].clone();
     next["garment_piece_names"] = json!(names);
+    next["runtime"]["last_garment"] =
+        json!({"spec":next["garment_spec"],"pieces":next["garment_piece_names"]});
     // A snapshot runs after the completed build and session record are published.
     *state = next;
     let images = if boolean(args, "snapshots", true) {
