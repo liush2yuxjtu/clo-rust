@@ -416,6 +416,19 @@ nested Unicode destinations, and unchanged project identity. Check that a
 blocked save, unsupported extension, and unsupported multi-colorway mesh
 export preserve existing files and the scene.
 
+For a live multi-colorway export comparison, use a disposable two-panel
+project. In official CLO, call `utility_api.CopyColorway(0, 1)`, name the
+colorways with `utility_api.SetColorwayName`, and activate each in turn
+with `utility_api.SetCurrentColorwayIndex`. Set different fabric colors
+with `fabric_set_color` and verify both RGBA values through the three-argument
+`fabric_api.GetFabricPBRMaterialBaseColor` in `clo_run_python`. Save with
+the second colorway active. Check `scene_info`, then call `scene_export`
+with `colorways=true` for OBJ, FBX, GLB, and glTF. Compare ordered filenames,
+count and material content, including OBJ material and glTF binary sidecars.
+When running CLO on a remote Boat VM, copy the same saved project to the
+Rust host and verify its SHA-256 before comparing. Paths and runtime versions
+are host-specific.
+
 Run `--verify-geometry-edits-rebuild-one-panel` to verify point movement,
 arrangement changes, flips, point deletion and particle distance edits.
 Successful point movement must invalidate the pre-edit UI snapshot.

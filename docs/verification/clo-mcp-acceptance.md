@@ -10,7 +10,29 @@
 | Rust 实调 | `sweep_compat` 在临时场景里向每项工具发送真正的 `tools/call`，逐项记录错误标记及内容类型。 | 48／48，缺失、额外调用、MCP 错误均为 0。 |
 | 双端行为示例 | `smoke_compat --compare-strapped-draft-preview` 向两端发送相同的 7 组规格，逐字段比较纸样、缝线等返回值，再发送 `{"spec": []}` 并读回最后规格。 | 7 组相同，两端均拒绝无效输入，最后规格保持原值。此结果覆盖列出的起版用例。 |
 
-每个现场用例从相同输入开始。调用后对照结构化返回值，再读回受影响的场景对象或重新打开导出文件。错误用例也要读回状态，例如空规格应保留上次有效规格，有分阶段写入的工具可能保留已完成的步骤。测试记录附两端版本、工具参数、素材校验和与逐项断言。全量行为验收仍未完成。本轮 `clo_status` 返回参考端 `down`、Rust 端 `up`，依赖原生桥接的现场用例待复测。
+每个现场用例从相同输入开始。调用后对照结构化返回值，再读回受影响的场景对象或重新打开导出文件。错误用例也要读回状态，例如空规格应保留上次有效规格，有分阶段写入的工具可能保留已完成的步骤。测试记录附两端版本、工具参数、素材校验和与逐项断言。全量行为验收仍未完成。当时本机参考端返回 `down`。Boat 上的官方桥接随后恢复，已用于下面的多色组导出实测。
+
+## Boat 原生多色组导出基准
+
+CLO 2026.1.382 通过官方 MCP 在空白工程创建了 Front、Back 和一组反向缝线。复制默认色组后得到 `Original` 和 `Alternate`，分别设为 `#990033` 和 `#245fdd`。原生 API 读回了两组独立 RGBA，保存时当前色组为索引 1。
+
+`scene_export(path="colored.<ext>", colorways=true)` 的 `path` 保留请求值。官方 `result` 中的文件以色组顺序排列：
+
+| 格式 | `result` 中的文件名 |
+| --- | --- |
+| OBJ | `colored_Original.obj`、`colored_Alternate.obj`、两份同序 `.mtl` |
+| FBX | `colored_Original.fbx`、`colored_Alternate.fbx` |
+| GLB | `colored_Original.glb`、`colored_Alternate.glb` |
+| glTF | `colored_Original.gltf`、`colored_Alternate.gltf`、两份同序 `.bin` |
+
+本例同样验证了 DXF 返回单一路径。同一工程的纸样 JSON 调用返回 `result: false`，导出条件待查。相同的裁片创建和反向缝合请求在 Rust 返回了相同的裁片索引、名称及缝组数。两端的缝组成员相同，自动组名不同。
+
+两份官方归档传回后均已校验 SHA-256。Rust 的 `scene_open` 都在解析裁片记录时失败，即使 `.zpac` 在官方求解成功后保存也一样。多色组实现需要先读取这个归档布局，再比较每个色组的材质和网格文件。
+
+| 归档 | SHA-256 |
+| --- | --- |
+| `multi-colorway-colored.zprj` | `9903da2422ecb310568a0448d1286005d48faed288f156ac4729e9eb1edf5ec7` |
+| `multi-colorway-simulated.zpac` | `54c84d90578c51d8666a66a582c6958675c4d50b94c0f7594fac5ef9fe5ebe0a` |
 
 ## 48 项逐项记录
 
