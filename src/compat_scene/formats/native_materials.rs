@@ -12,6 +12,37 @@ pub(super) struct Materials {
     pub assignments: Vec<usize>,
 }
 
+pub(super) fn read_colorways(pac: &[u8]) -> Result<(Vec<String>, usize), String> {
+    let root = Fields::read(pac)?.map(b"mapColorWay")?;
+    let is_new = root.get(b"bIsTheNewColorway", 1).ok() == Some(&[1]);
+    let records = if is_new {
+        root.map(b"mapNewColorway")?
+            .get(b"listColorway", LIST_TYPE)?
+    } else {
+        root.get(b"listColorway", LIST_TYPE)?
+    };
+    let names = super::native_pose::map_list(records, 4096)?
+        .iter()
+        .map(|record| {
+            let name = record
+                .get(b"qsNameUTF8", BYTE_TYPE)
+                .or_else(|_| record.get(b"qsName", BYTE_TYPE))?;
+            std::str::from_utf8(name)
+                .map(str::to_owned)
+                .map_err(|e| e.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let current = u32::from_le_bytes(
+        root.get(b"uiCurrentCoordinationIndex", UINT_TYPE)?
+            .try_into()
+            .map_err(|_| "invalid colorway index width")?,
+    ) as usize;
+    if current >= names.len() {
+        return Err("native active colorway index is out of range".into());
+    }
+    Ok((names, current))
+}
+
 fn integer(bytes: &[u8]) -> Result<i32, String> {
     Ok(i32::from_le_bytes(
         bytes
@@ -158,6 +189,39 @@ mod tests {
             (b"enMaterialFaceType", INT_TYPE, kind.to_le_bytes().to_vec()),
             (b"mapBaseColor", 22, base),
         ])
+    }
+
+    #[test]
+    fn native_colorways_preserve_order_and_active_index() {
+        use super::super::native_pose::{encoded_list, MAP_TYPE};
+        use std::borrow::Cow;
+
+        let records = encoded_list(&[
+            Cow::Owned(map(&[(b"qsNameUTF8", BYTE_TYPE, b"Default".to_vec())])),
+            Cow::Owned(map(&[(b"qsName", BYTE_TYPE, b"Second".to_vec())])),
+        ])
+        .unwrap();
+        let colorways = map(&[(b"listColorway", LIST_TYPE, records)]);
+        for index in [1u32, 2] {
+            let record = map(&[
+                (b"bIsTheNewColorway", 1, vec![1]),
+                (b"mapNewColorway", MAP_TYPE, colorways.clone()),
+                (
+                    b"uiCurrentCoordinationIndex",
+                    UINT_TYPE,
+                    index.to_le_bytes().to_vec(),
+                ),
+            ]);
+            let pac = map(&[(b"mapColorWay", MAP_TYPE, record)]);
+            if index == 1 {
+                assert_eq!(
+                    read_colorways(&pac).unwrap(),
+                    (vec!["Default".into(), "Second".into()], 1)
+                );
+            } else {
+                assert!(read_colorways(&pac).is_err());
+            }
+        }
     }
 
     #[test]

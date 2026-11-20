@@ -20,6 +20,7 @@ pub(super) struct RestMesh {
     pub triangles: Vec<Triangle>,
     pub part_count: usize,
     pub arrangements: Vec<String>,
+    scene_name: Option<String>,
 }
 
 struct Field<'a> {
@@ -178,6 +179,11 @@ pub(super) fn decode(data: &[u8]) -> Result<RestMesh, String> {
         triangles: Vec::new(),
         part_count: 0,
         arrangements: arr_names(&root).unwrap_or_default(),
+        scene_name: find(&root, "qsNameUTF8", BYTES)
+            .or_else(|| find(&root, "qsName", BYTES))
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control))
+            .map(str::to_owned),
     };
     for (index, controller) in controllers.into_iter().enumerate() {
         append_mesh(controller, &mut result)
@@ -196,7 +202,11 @@ pub(super) fn read(path: &Path) -> Result<RestMesh, String> {
 
 pub(super) fn read_project(path: &Path) -> Result<Option<(String, RestMesh)>, String> {
     crate::compat_scene::read_project_avatar_dan(path)?
-        .map(|(name, dan)| decode(&dan).map(|mesh| (name, mesh)))
+        .map(|(name, dan)| {
+            let mut mesh = decode(&dan)?;
+            let name = mesh.scene_name.take().unwrap_or(name);
+            Ok((name, mesh))
+        })
         .transpose()
 }
 

@@ -424,6 +424,38 @@ async def compare_saved_seams():
                       "panel_memberships_matched": rust_panels["count"]}))
 
 
+async def compare_saved_scene_info():
+    async with open_backend("official") as session:
+        await inspect_contract(session)
+        official = await json_result(session, "scene_info")
+    project = Path(official["project_path"])
+    assert project.is_file() and project.suffix.lower() == ".zprj", project
+    async with open_backend("rust") as session:
+        await inspect_contract(session)
+        await json_result(session, "scene_open", {"path": str(project)})
+        rust = await json_result(session, "scene_info")
+
+    project_fields = (
+        "project", "project_path", "pattern_count", "patterns", "avatars",
+        "fabric_count", "fabrics", "colorways", "current_colorway", "seam_groups",
+    )
+    assert official.keys() == rust.keys(), (official.keys(), rust.keys())
+    for key in project_fields:
+        assert official[key] == rust[key], (key, official[key], rust[key])
+    assert Path(official["asset_folder"]) == Path(rust["asset_folder"])
+    for scene in (official, rust):
+        assert scene["clo_version"] and scene["temp_folder"]
+    print(json.dumps({
+        "tool": "scene_info", "project": rust["project"],
+        "project_fields_matched": len(project_fields),
+        "pattern_count": rust["pattern_count"], "fabric_count": rust["fabric_count"],
+        "seam_groups": rust["seam_groups"], "avatars": rust["avatars"],
+        "colorways": rust["colorways"], "current_colorway": rust["current_colorway"],
+        "asset_folder_matched": True,
+        "runtime_versions": [official["clo_version"], rust["clo_version"]],
+    }, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
@@ -442,6 +474,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-saved-seams", action="store_const", dest="comparison",
                              const=compare_saved_seams,
                              help="compare ordered seam groups and panel membership in a saved CLO project")
+    comparisons.add_argument("--compare-saved-scene-info", action="store_const", dest="comparison",
+                             const=compare_saved_scene_info,
+                             help="compare scene metadata for the same saved CLO project")
     args = parser.parse_args()
     if args.comparison is not None and not os.environ.get("CLO_MCP_OFFICIAL_COMMAND"):
         parser.error("live comparisons require CLO_MCP_OFFICIAL_COMMAND")

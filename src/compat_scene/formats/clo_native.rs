@@ -390,6 +390,7 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         }
         Err(error) => (Vec::new(), Some(error)),
     };
+    let colorways = super::native_materials::read_colorways(pac).ok();
     let native_import = json!({
         "rest_vertices_validated": rest_vertices, "rest_triangles_validated": triangles,
         "seam_groups_recovered": sewing.annotations.len(),
@@ -397,12 +398,15 @@ fn parse(pac: &[u8]) -> Result<Value, String> {
         "unreadable_seam_records": sewing.unreadable,
         "saved_pose_meshes": pose.len(), "saved_pose_unavailable": pose_error,
         "fabric_records": fabrics.len(), "fabric_records_unavailable": fabric_error,
-        "panel_settings_unavailable": panel_settings_error
+        "panel_settings_unavailable": panel_settings_error,
+        "colorway_count": colorways.as_ref().map(|(names, _)| names.len())
     });
     Ok(json!({
         "patterns": patterns, "seams": sewing.constraints,
         "native_seam_groups": sewing.annotations, "native_import": native_import,
-        "saved_pose": pose, "fabrics": fabrics
+        "saved_pose": pose, "fabrics": fabrics,
+        "colorways": colorways.as_ref().map(|(names, _)| names),
+        "current_colorway": colorways.map(|(_, current)| current)
     }))
 }
 

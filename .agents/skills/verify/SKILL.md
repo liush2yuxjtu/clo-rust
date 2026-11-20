@@ -83,6 +83,21 @@ indices in `pattern_list(detail=True)`. Test with a saved project that contains
 non-panel objects. This case verifies query results. Solver coverage requires
 separate drape and seam-gap evidence.
 
+For `scene_info`, leave a saved `.zprj` open in CLO 3D with no unsaved changes.
+Set the official stdio command as above and point Rust to the same asset folder.
+
+```sh
+CLO_RUST_BINARY="$PWD/target/release/pattern-native" \
+  CLO_MCP_ASSETS='/path/to/CLO Assets' \
+  python -m clo_mcp.smoke_compat --compare-saved-scene-info
+```
+
+The recipe reads the official scene and opens the same file in an isolated
+Rust session. It compares response keys, project identity, ordered patterns,
+avatars and fabrics, seam group count, colorway names, active colorway index
+and the shared asset path. It checks that each backend reports its own version
+and temp path. Use additional fixtures to verify multiple avatars and colorways.
+
 For saved internal seams, run `cargo test --locked native_inner_seam_uses_saved_mesh_edges`.
 Open a native fixture with internal seams over MCP and use `simulate` without a
 new particle distance. Save and reopen the resulting `.clorust` scene, then

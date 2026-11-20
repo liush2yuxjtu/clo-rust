@@ -46,7 +46,7 @@ pub(super) fn info(_: &Value, state: &mut Value) -> Reply {
         "current_colorway": state["current_colorway"].as_u64().unwrap_or(0),
         "seam_groups": super::annotations::count(state),
         "temp_folder": env::temp_dir(),
-        "asset_folder": env::var_os("CLO_RUST_ASSET_DIR").map(PathBuf::from)
+        "asset_folder": env::var_os("CLO_RUST_ASSET_DIR").or_else(|| env::var_os("CLO_MCP_ASSETS")).map(PathBuf::from)
     }))
 }
 
@@ -304,6 +304,10 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                 vec_mut(state, "fabrics").extend(fabrics);
             } else {
                 state["fabrics"] = json!(fabrics);
+                state["colorways"] = loaded["colorways"]
+                    .as_array()
+                    .map_or_else(|| json!(["Colorway 1"]), |names| json!(names));
+                state["current_colorway"] = json!(loaded["current_colorway"].as_u64().unwrap_or(0));
             }
             let mut avatar_error = None;
             let mut embedded_avatar = false;
@@ -320,8 +324,6 @@ pub(super) fn open(args: &Value, state: &mut Value) -> Reply {
                         Value::Null
                     }
                 };
-                state["colorways"] = json!(["Colorway 1"]);
-                state["current_colorway"] = json!(0);
                 set_project(state, path);
             }
             let pose = array(&loaded, "saved_pose");
