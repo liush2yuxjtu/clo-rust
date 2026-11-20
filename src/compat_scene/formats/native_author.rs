@@ -72,11 +72,17 @@ fn panel(
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
         .ok_or("invalid name for native editable pattern")?;
     let points = patterns::points(value)?;
-    if points.len() > 512 || points.iter().any(|point| point.kind != 0) {
-        return Err(
-            "native authoring currently requires at most 512 straight outline edges".into(),
-        );
+    if points.len() > 512
+        || (value["sampled_polyline"] == true && points.iter().any(|p| p.kind != 0))
+    {
+        return Err("native authoring requires editable outline points".into());
     }
+    let edges = patterns::split_edges(&points);
+    let (perimeter, corners) = patterns::sampled_perimeter(value, 512)?;
+    let perimeter = perimeter
+        .into_iter()
+        .map(|[x, y]| patterns::Point { x, y, kind: 0 })
+        .collect::<Vec<_>>();
     let fabric_index = value["fabric_index"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())
@@ -104,7 +110,7 @@ fn panel(
     };
     let entry = element(name, next())?;
     let [dx, dy] = patterns::offset(value);
-    let [min_x, min_y, max_x, max_y] = patterns::point_bounds(points.iter().copied(), [dx, dy]);
+    let [min_x, min_y, max_x, max_y] = patterns::point_bounds(perimeter.iter().copied(), [dx, dy]);
     let (cx, cy) = ((min_x + max_x) / 2., (min_y + max_y) / 2.);
     let basis = float_bytes([1., 0., 0., 0., 1., 0., cx, cy, 1.])?;
     let transform = encode_map(&[
@@ -130,11 +136,15 @@ fn panel(
         200.,
         1.,
     ])?;
-    let rest = float_bytes(points.iter().flat_map(|p| [p.x + dx, p.y + dy]))?;
-    let tex = float_bytes(points.iter().flat_map(|p| [p.x + dx - cx, p.y + dy - cy]))?;
-    let world = float_bytes(points.iter().flat_map(|p| [p.x, p.y, 200.]))?;
-    let triangles = triangulate(&points)?;
-    if triangles.len() + 2 != points.len() {
+    let rest = float_bytes(perimeter.iter().flat_map(|p| [p.x + dx, p.y + dy]))?;
+    let tex = float_bytes(
+        perimeter
+            .iter()
+            .flat_map(|p| [p.x + dx - cx, p.y + dy - cy]),
+    )?;
+    let world = float_bytes(perimeter.iter().flat_map(|p| [p.x, p.y, 200.]))?;
+    let triangles = triangulate(&perimeter)?;
+    if triangles.len() + 2 != perimeter.len() {
         return Err("native outline triangulation did not preserve each boundary point".into());
     }
     let triangle_indices = triangles
@@ -142,13 +152,14 @@ fn panel(
         .flatten()
         .flat_map(|index| index.to_le_bytes())
         .collect::<Vec<_>>();
-    let mut point_records = Vec::new();
-    let mut line_records = Vec::new();
-    let mut boundaries = Vec::new();
-    let count = points.len() as u32;
-    for index in 0..count {
-        let following = (index + 1) % count;
-        let coords = &tex[index as usize * 8..][..8];
+    let mut point_records = Vec::with_capacity(edges.len());
+    let mut line_records = Vec::with_capacity(edges.len());
+    let mut boundaries = Vec::with_capacity(edges.len());
+    for (index, edge) in edges.iter().enumerate() {
+        let following = (index + 1) % edges.len();
+        let first = corners[index];
+        let last = corners.get(index + 1).copied().unwrap_or(perimeter.len());
+        let coords = &tex[first * 8..][..8];
         let size_specific = [1u32.to_le_bytes().as_slice(), &[VEC2], coords].concat();
         point_records.push(encode_map(&[
             (b"uiID", UINT, &next().to_le_bytes()),
@@ -159,26 +170,55 @@ fn panel(
             (b"arrSizeSpecificPosition", ARRAY, &size_specific),
         ])?);
         let mut nodes = Vec::new();
-        for vertex in [index, following] {
+        for vertex in first..=last {
+            let vertex = (vertex % perimeter.len()) as u32;
             nodes.push(encode_map(&[
                 (b"uiMeshPointIndex", UINT, &vertex.to_le_bytes()),
                 (b"bMeshEdgeList", BOOL, TRUE),
             ])?);
         }
         let boundary = records(&nodes)?;
+        let controls = &edge[1..edge.len() - 1];
+        let kind: i32 = match controls {
+            [] => 0,
+            _ if controls.iter().all(|p| p.kind == 3) => 3,
+            _ => 2,
+        };
+        let control_records = controls
+            .iter()
+            .map(|point| {
+                let coordinates = float_bytes([point.x + dx - cx, point.y + dy - cy])?;
+                let size_specific = [1u32.to_le_bytes().as_slice(), &[VEC2], &coordinates].concat();
+                encode_map(&[
+                    (b"bLockState", BOOL, FALSE),
+                    (b"bGradingAuthoritative", BOOL, FALSE),
+                    (b"bGradedPoint", BOOL, FALSE),
+                    (b"iGradeRuleIdentifier", INT, &ZERO),
+                    (b"v2Position", VEC2, &coordinates),
+                    (b"bHandleBinded", BOOL, FALSE),
+                    (b"arrPointSizeSpec", ARRAY, &size_specific),
+                ])
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         line_records.push(encode_map(&[
             (b"uiID", UINT, &next().to_le_bytes()),
             (b"bVisible", BOOL, TRUE),
             (b"bEditable", BOOL, TRUE),
-            (b"iLineType", INT, &ZERO),
-            (b"mapGID", MAP_TYPE, &gid(slot, index)?),
-            (b"uiStartPointIndex", UINT, &index.to_le_bytes()),
-            (b"uiEndPointIndex", UINT, &following.to_le_bytes()),
+            (b"iLineType", INT, &kind.to_le_bytes()),
+            (b"mapGID", MAP_TYPE, &gid(slot, index as u32)?),
+            (b"uiStartPointIndex", UINT, &(index as u32).to_le_bytes()),
+            (b"uiEndPointIndex", UINT, &(following as u32).to_le_bytes()),
+            (
+                b"uiCtrlPointCnt",
+                UINT,
+                &(control_records.len() as u32).to_le_bytes(),
+            ),
+            (b"listPoint", LIST_TYPE, &records(&control_records)?),
             (b"listMeshPoint", LIST_TYPE, &boundary),
         ])?);
         boundaries.push(boundary);
     }
-    let mut edge_lists = count.to_le_bytes().to_vec();
+    let mut edge_lists = (edges.len() as u32).to_le_bytes().to_vec();
     edge_lists.push(LIST_TYPE);
     for edge in &boundaries {
         edge_lists.extend((edge.len() as u32).to_le_bytes());
@@ -186,7 +226,11 @@ fn panel(
     edge_lists.extend(boundaries.into_iter().flatten());
     let mesh = encode_map(&[
         (b"iSavedCurrentSizeIndex", INT, &ZERO),
-        (b"uiVertexCount2D", UINT, &count.to_le_bytes()),
+        (
+            b"uiVertexCount2D",
+            UINT,
+            &(perimeter.len() as u32).to_le_bytes(),
+        ),
         (b"baRest", BYTE_TYPE, &rest),
         (
             b"uiTriangleCount",

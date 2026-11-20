@@ -73,7 +73,7 @@ fn corner_offsets(points: &[Point]) -> Vec<usize> {
         .collect()
 }
 
-fn split_edges(points: &[Point]) -> Vec<Vec<Point>> {
+pub(super) fn split_edges(points: &[Point]) -> Vec<Vec<Point>> {
     let corners = corner_offsets(points);
     (0..corners.len())
         .map(|i| {

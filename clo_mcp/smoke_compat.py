@@ -6648,6 +6648,94 @@ async def compare_live_authored_projects():
     print(json.dumps({"cases": reports, "result": "pass"}))
 
 
+async def compare_live_authored_curves():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    assert root.is_dir()
+    panels = (
+        ("Mixed", [[0, 0], [60, 0, 2], [75, 43, 3], [15, 60]]),
+        ("Spline 1", [[220, 0], [315, 34, 2], [245, 80]]),
+        ("Spline 2", [[440, 0], [475, -20, 2], [540, 15, 2], [525, 100]]),
+        ("Spline 3", [[660, 0], [698, -9, 2], [742, 18, 2], [759, 55, 2], [715, 80]]),
+        ("Bézier", [[880, 0], [940, 0, 3], [955, 43, 3], [895, 60]]),
+        ("曲边三角形", [[1100, 0], [1135, -20, 2], [1180, 0], [1150, 60]]),
+        ("Asymmetric", [[1320, 0], [1435, 5, 2], [1440, 37, 2], [1370, 80]]),
+    )
+
+    def compare(expected, actual, case):
+        assert [actual[key] for key in ("name", "index", "fabric_index", "particle_distance")] == [
+            expected[key] for key in ("name", "index", "fabric_index", "particle_distance")
+        ], case
+        for key in ("Width", "Height"):
+            assert abs(float(expected["bbox"][key]) - float(actual["bbox"][key])) < 0.01, (
+                case, key, expected["bbox"], actual["bbox"])
+        for before, after in zip(expected["line_info"]["lines"], actual["line_info"]["lines"], strict=True):
+            assert before["lineIndex"] == after["lineIndex"], case
+            assert abs(before["length"] - after["length"]) < 0.01, (case, before, after)
+            for endpoint in ("start", "end"):
+                assert all(abs(before[endpoint][axis] - after[endpoint][axis]) < 0.001
+                           for axis in ("x", "y")), (case, before, after)
+
+    async def measure(session, name):
+        return await json_result(session, "pattern_info", {"pattern": name})
+
+    async def edit_endpoint(session, name):
+        return await json_result(session, "pattern_edit_points", {
+            "pattern": name, "moves": [{"point": 1, "dx": 12, "dy": -9}],
+        })
+
+    reports = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = (await json_result(clo, "scene_info"))["project_path"]
+        backends = (("official", clo), ("rust", rust))
+        try:
+            outputs = {}
+            baseline = {}
+            for writer, session in backends:
+                await json_result(session, "scene_clear", {"keep_avatar": False})
+                for index, (name, points) in enumerate(panels):
+                    assert await json_result(session, "pattern_create", {"name": name, "points": points}) == {
+                        "index": index, "name": name}
+                    measured = await measure(session, name)
+                    if writer == "official":
+                        baseline[name] = measured
+                    else:
+                        compare(baseline[name], measured, (writer, "created", name))
+                for suffix in ("zprj", "zpac"):
+                    path = root / f"authored-curves-{writer}.{suffix}"
+                    assert await json_result(session, "scene_save", {"path": str(path), "thumbnail": False}) == {
+                        "path": str(path)}
+                    assert path.is_file()
+                    outputs[writer, suffix] = path
+
+            edits = {}
+            for (writer, suffix), path in outputs.items():
+                for reader, session in backends:
+                    case = (writer, suffix, reader)
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    opened = await json_result(session, "scene_open", {"path": str(path)})
+                    assert opened["pattern_count"] == len(panels), case
+                    for name, _ in panels:
+                        compare(baseline[name], await measure(session, name), (*case, name))
+                    for name in ("Bézier", "Spline 2"):
+                        moved = await edit_endpoint(session, name)
+                        after = await measure(session, name)
+                        if writer == reader == "official" and suffix == "zprj":
+                            edits[name] = (moved, after)
+                        expected_move, expected_info = edits[name]
+                        assert moved == expected_move, (case, name, moved)
+                        compare(expected_info, after, (*case, name, "edited"))
+                    reports.append({"writer": writer, "format": suffix, "reader": reader,
+                                    "panels": len(panels), "edited_curves": 2})
+        finally:
+            if original not in (None, "", "NULL"):
+                await json_result(clo, "scene_open", {"path": original})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": reports, "result": "pass", "bounds_and_length_tolerance_mm": 0.01,
+                      "endpoint_tolerance_mm": 0.001}))
+
+
 async def compare_live_garment_to_project():
     source = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
     root = Path(os.environ["CLO_MCP_STATE"])
@@ -7287,6 +7375,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-authored-projects", action="store_const", dest="comparison",
                              const=compare_live_authored_projects,
                              help="write and cross-open native projects created from editable MCP panels")
+    comparisons.add_argument("--compare-live-authored-curves", action="store_const", dest="comparison",
+                             const=compare_live_authored_curves,
+                             help="cross-open ZPRJ and ZPAC containing newly authored editable curves")
     comparisons.add_argument("--compare-live-garment-to-project", action="store_const", dest="comparison",
                              const=compare_live_garment_to_project,
                              help="cross-open ZPRJ saves and checkpoints after importing only a ZPAC")

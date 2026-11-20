@@ -1043,6 +1043,14 @@ ZPRJ and confirm the error preserves both the target bytes and the live
 scene. Reload an intact AVT copy and save successfully. Remove the loose
 AVT copy, save the resulting embedded project again, then append a
 second AVT-bearing project and verify both avatars after reopening.
+Run `--compare-live-authored-curves` with the native bridge up and
+`CLO_MCP_STATE` set to a fresh shared directory. Create spline, Bézier and
+mixed-control panels from scratch, save ZPRJ and ZPAC on both backends, and
+reopen each file with both readers. Compare edge order and endpoint
+coordinates within 0.001 mm, and edge lengths and bounds within 0.01 mm.
+After each reopen move one Bézier endpoint and one spline endpoint using
+`pattern_edit_points` and compare the recalculated measurements.
+
 Run `--compare-live-authored-projects` with the native bridge up and
 `CLO_MCP_STATE` set to a fresh shared directory. Leave `CLO_RUST_CHECKPOINT_DIR`
 unset. Start each backend with a cleared scene and create the same editable
