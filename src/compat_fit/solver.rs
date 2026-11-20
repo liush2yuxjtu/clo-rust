@@ -158,6 +158,10 @@ fn perimeter(pattern: &Value) -> Result<(Vec<Point2>, Vec<usize>), String> {
         vertices.pop();
         corners.retain(|&i| i < vertices.len());
     }
+    if corners.len() == 2 {
+        // Two-corner curved outlines need physical samples between the corners.
+        return crate::compat_scene::sampled_perimeter(pattern);
+    }
     if vertices.len() < 3 || corners.len() < 3 {
         return Err("pattern requires at least three distinct corners".into());
     }

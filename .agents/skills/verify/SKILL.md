@@ -486,6 +486,19 @@ remains and the previous UI snapshot is rejected.
 Check the original mesh, velocities and step count, then resume simulation.
 Set `CLO_DISPLAY_FIXTURE` to also verify a new panel beside archived meshes.
 
+Use `--compare-native-pattern-creation` with `CLO_PATTERN_CREATE_FIXTURE`
+set to the same saved project open in native CLO. Use the two-panel fixture
+with an avatar, two fabrics and a seam group. Compare generated names by
+format and verify that the newly created pieces have distinct names. Check duplicate explicit names,
+two-corner curves, the active fabric and untouched original panels. Confirm
+that an invalid arrangement leaves the named piece, while short input and
+an unsupported point type leave the scene intact. Test both positive and
+negative out-of-range arrangement indices and compare the full arrangement
+records on valid calls. The Rust curve case also saves, reopens and exports
+a simulated mesh. A native attempt with three coincident points may open a
+remeshing dialog on the dedicated desktop, so verify its eventual reply in a
+manual case.
+
 Run `--verify-portable-append-keeps-drape` to append two simulated
 `.clorust` projects with overlapping panel IDs and nonconsecutive
 material indices. Reopen and verify that seams, fabrics and saved

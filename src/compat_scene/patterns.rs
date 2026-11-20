@@ -11,23 +11,22 @@ pub(super) struct Point {
 }
 
 impl Point {
-    pub fn from_json(point: &Value) -> Result<Self, String> {
-        let x = point.get(0).and_then(Value::as_f64);
-        let y = point.get(1).and_then(Value::as_f64);
-        let kind = point.get(2).map_or(Some(0), |v| {
-            v.as_f64()
-                .filter(|k| [0., 2., 3.].contains(k))
-                .map(|k| k as u64)
-        });
+    fn components(point: &Value) -> Result<(f64, f64, f64), String> {
+        let x = point.get(0).and_then(Value::as_f64).filter(|x| x.is_finite());
+        let y = point.get(1).and_then(Value::as_f64).filter(|y| y.is_finite());
+        let kind = point.get(2).map_or(Some(0.0), |value| value.as_f64().filter(|kind| kind.is_finite()));
         match (x, y, kind) {
-            (Some(x), Some(y), Some(kind)) if x.is_finite() && y.is_finite() => {
-                Ok(Self { x, y, kind })
-            }
-            _ => Err(
-                "point must be [x, y] or [x, y, type] with finite coordinates and type 0, 2 or 3"
-                    .into(),
-            ),
+            (Some(x), Some(y), Some(kind)) => Ok((x, y, kind)),
+            _ => Err("point must have finite x, y and optional type".into()),
         }
+    }
+
+    pub fn from_json(point: &Value) -> Result<Self, String> {
+        let (x, y, kind) = Self::components(point)?;
+        if ![0.0, 2.0, 3.0].contains(&kind) {
+            return Err("point type must be 0, 2 or 3".into());
+        }
+        Ok(Self { x, y, kind: kind as u64 })
     }
 
     fn position(self) -> Value {
@@ -54,10 +53,16 @@ pub(super) fn points(pattern: &Value) -> Result<Vec<Point>, String> {
         .iter()
         .map(Point::from_json)
         .collect::<Result<_, _>>()?;
-    if result.iter().filter(|p| p.kind == 0).count() < 3 {
-        return Err("need at least 3 corner points".into());
-    }
+    validate_outline(&result)?;
     Ok(result)
+}
+
+fn validate_outline(points: &[Point]) -> Result<(), String> {
+    // A closed contour can have two corners when one of the edges is curved.
+    if points.len() < 3 || points.iter().filter(|point| point.kind == 0).count() < 2 {
+        return Err("need at least 3 outline points and 2 corners".into());
+    }
+    Ok(())
 }
 
 fn corner_offsets(points: &[Point]) -> Vec<usize> {
@@ -147,6 +152,17 @@ pub(super) fn outline(pattern: &Value) -> Result<Vec<Point>, String> {
         result.extend_from_slice(&sampled[..sampled.len() - 1]);
     }
     Ok(result)
+}
+
+pub(crate) fn sampled_perimeter(pattern: &Value) -> Result<(Vec<[f64; 2]>, Vec<usize>), String> {
+    let mut vertices = Vec::new();
+    let mut corners = Vec::new();
+    for edge in split_edges(&points(pattern)?) {
+        corners.push(vertices.len());
+        let sampled = curve(&edge, flag(pattern, "sampled_polyline", false));
+        vertices.extend(sampled[..sampled.len() - 1].iter().map(|point| [point.x, point.y]));
+    }
+    Ok((vertices, corners))
 }
 
 fn bounds(pattern: &Value) -> Result<[f64; 4], String> {
@@ -451,14 +467,35 @@ pub(super) fn outline_query(args: &Value, state: &mut Value) -> Reply {
 }
 
 pub(super) fn create(args: &Value, state: &mut Value) -> Reply {
-    let i = array(state, "patterns").len();
+    let patterns = array(state, "patterns");
+    let i = patterns.len();
     let name = args["name"]
         .as_str()
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("Pattern_{}", i + 1));
+        .unwrap_or_else(|| {
+            (i + 1..).map(|suffix| format!("Pattern_{suffix}"))
+                .find(|name| !patterns.iter().any(|pattern| pattern["name"] == name.as_str()))
+                .expect("at most one generated name per pattern")
+        });
     let point = args["arrangement"].as_str().unwrap_or("");
-    let pts = points(args)?;
+    let components = args["points"].as_array().ok_or("points must be an array")?
+        .iter().map(Point::components).collect::<Result<Vec<_>, _>>()?;
+    if components.len() < 3 {
+        return Err("need at least 3 points".into());
+    }
+    let (first_x, first_y, _) = components[0];
+    if components.iter().any(|(_, _, kind)| ![0.0, 2.0, 3.0].contains(&kind.trunc()))
+        || components.iter().all(|&(x, y, _)| x == first_x && y == first_y)
+    {
+        if !point.is_empty() {
+            arrangement(state, point)?;
+        }
+        return Ok(json!({"index": -1, "name": ""}));
+    }
+    let pts = components.into_iter().map(|(x, y, kind)| Point { x, y, kind: kind.trunc() as u64 })
+        .collect::<Vec<_>>();
+    validate_outline(&pts)?;
     let pattern = json!({
         "id": next_id(state)?, "name": name, "points": pts.into_iter().map(Point::record).collect::<Vec<_>>(),
         "arrangement": "", "fabric_index": state["current_fabric"].as_u64().unwrap_or(0)
@@ -485,7 +522,7 @@ fn discard_panel_pose(state: &mut Value, id: &Value) {
     }
 }
 
-fn delete_index(patterns: &[Value], reference: &Value) -> Result<i64, String> {
+fn bridge_pattern_index(patterns: &[Value], reference: &Value) -> Result<i64, String> {
     if let Some(index) = reference.as_i64() {
         return Ok(index);
     }
@@ -510,7 +547,7 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
     let patterns = array(state, "patterns");
     let requested: BTreeSet<_> = refs
         .iter()
-        .map(|reference| delete_index(patterns, reference))
+        .map(|reference| bridge_pattern_index(patterns, reference))
         .collect::<Result<_, _>>()?;
     // CLO sorts descending. A positive overflow fails before any valid deletion,
     // and a negative overflow fails after valid indices have been handled.
@@ -546,9 +583,14 @@ pub(super) fn delete(args: &Value, state: &mut Value) -> Reply {
 }
 
 pub(super) fn arrange(args: &Value, state: &mut Value) -> Reply {
-    let i = pattern_index(state, &args["pattern"])?;
+    let patterns = array(state, "patterns");
+    let raw_index = bridge_pattern_index(patterns, &args["pattern"])?;
     let name = string(args, "point")?;
     arrangement(state, name)?;
+    let index = i32::try_from(raw_index).map_err(|_| "Pattern index must be a 32-bit integer")?;
+    let Some(i) = usize::try_from(index).ok().filter(|&index| index < patterns.len()) else {
+        return Ok(json!({"index": index, "arrangement": {}}));
+    };
     let details = arrangement_details(state, name);
     state["patterns"][i]["arrangement"] = json!(name);
     state["patterns"][i]

@@ -2769,6 +2769,118 @@ async def verify_new_panels_keep_drape():
                       "invalid_arrangement_kept_panel_and_invalidated_snapshot": True}))
 
 
+async def compare_native_pattern_creation():
+    fixture = Path(os.environ["CLO_PATTERN_CREATE_FIXTURE"]).resolve(strict=True)
+    observations = {}
+    triangle = [[250, 0], [330, 0], [270, 60]]
+    curved = [[500, 0, 0], [560, 0, 2], [575, 43, 3], [515, 60, 0]]
+    missing = "__missing_mcp_point__"
+    for backend in ("official", "rust"):
+        async with open_backend(backend) as session:
+            assert (await json_result(session, "clo_status"))["bridge"] == "up"
+            path = str(fixture)
+            if backend == "official":
+                path = (await json_result(session, "scene_info"))["project_path"]
+                assert Path(path).resolve() == fixture, "open the saved fixture in CLO first"
+            request = {"path": path, "mode": "replace"}
+            await json_result(session, "scene_open", request)
+            original = await json_result(session, "scene_info")
+            first, second = [piece["name"] for piece in original["patterns"]]
+            arrangements = await json_result(session, "arrangement_points")
+            assert arrangements["count"] > 1
+            first_point, last_point = arrangements["names"][0], arrangements["names"][-1]
+            generated = []
+            cases = {"arrangement_catalog": arrangements}
+            try:
+                await json_result(session, "clo_api_call", {
+                    "name": "fabric_api.SetCurrentFabricIndex", "args": [1],
+                })
+                for label, args, name, placed in (
+                    ("unnamed", {"points": triangle}, None, "Arrangement Point"),
+                    ("empty_name", {"points": triangle, "name": ""}, None, "Arrangement Point"),
+                    ("duplicate", {"points": triangle, "name": first}, first, "Arrangement Point"),
+                    ("curved", {"points": curved, "name": "Curve Probe"}, "Curve Probe", "Arrangement Point"),
+                    ("arranged", {"points": triangle, "name": "Arranged", "arrangement": first_point}, "Arranged", first_point),
+                ):
+                    created = await json_result(session, "pattern_create", args)
+                    after = await json_result(session, "scene_info")
+                    index = len(original["patterns"]) + len(cases) - 1
+                    assert after["pattern_count"] == index + 1 and created["index"] == index
+                    actual_name = created["name"]
+                    if name is None:
+                        assert re.fullmatch(r"Pattern_\d+", actual_name) and actual_name not in generated
+                        generated.append(actual_name)
+                    else:
+                        assert actual_name == name
+                    row = after["patterns"][-1]
+                    assert row == {"index": index, "name": actual_name, "arrangement": placed, "fabric_index": 1}
+                    assert after["patterns"][:2] == original["patterns"]
+                    assert after["seam_groups"] == original["seam_groups"]
+                    info = await json_result(session, "pattern_info", {"pattern": str(index)})
+                    line_count = len(info["line_info"]["lines"])
+                    assert line_count == (2 if label == "curved" else 3), (backend, label, line_count)
+                    cases[label] = {"pattern": row | {"name": name}, "outline_lines": line_count}
+
+                before = await json_result(session, "scene_info")
+                assert (await session.call_tool("pattern_create", {"points": triangle[:2]})).isError
+                assert await json_result(session, "pattern_create", {
+                    "name": "Rejected", "points": [[250, 0, 7], triangle[1], triangle[2]],
+                }) == {"index": -1, "name": ""}
+                if backend == "rust":
+                    assert await json_result(session, "pattern_create", {
+                        "points": [[0, 0], [0, 0], [0, 0]],
+                    }) == {"index": -1, "name": ""}
+                assert await json_result(session, "scene_info") == before
+                partial = await session.call_tool("pattern_create", {
+                    "name": "Pending", "points": triangle, "arrangement": missing,
+                })
+                assert partial.isError
+                after = await json_result(session, "scene_info")
+                assert after["patterns"][:-1] == before["patterns"]
+                assert after["patterns"][-1] == {
+                    "index": before["pattern_count"], "name": "Pending",
+                    "arrangement": "Arrangement Point", "fabric_index": 1,
+                }
+                cases["failed_creation"] = {"no_creation": True, "named_panel_after_arrangement_error": after["patterns"][-1]}
+
+                for label, index, pattern, point in (("named", 1, second, first_point), ("index", 0, "0", last_point)):
+                    result = await json_result(session, "pattern_set_arrangement", {"pattern": pattern, "point": point})
+                    info = await json_result(session, "pattern_info", {"pattern": str(index)})
+                    assert result == {"index": index, "arrangement": info["arrangement"]}
+                    assert result["arrangement"]["ArrangementName"] == point
+                    cases[f"set_{label}"] = result
+                before = await json_result(session, "scene_info")
+                for reference, index in (("99", 99), ("-1", -1)):
+                    assert await json_result(session, "pattern_set_arrangement", {
+                        "pattern": reference, "point": first_point,
+                    }) == {"index": index, "arrangement": {}}
+                for reference, point in (("0", missing), ("missing MCP panel", first_point), ("+1", first_point)):
+                    assert (await session.call_tool("pattern_set_arrangement", {"pattern": reference, "point": point})).isError
+                assert await json_result(session, "scene_info") == before
+                cases["set_invalid"] = {"out_of_range_empty": 2, "rejected": 3, "scene_unchanged": True}
+                observations[backend] = cases
+            finally:
+                await json_result(session, "scene_open", request)
+    assert observations["official"] == observations["rust"], observations
+    with TemporaryDirectory(prefix="clo-two-corner-") as directory:
+        root = Path(directory)
+        async with open_backend("rust") as session:
+            await json_result(session, "pattern_create", {"name": "Curve Probe", "points": curved})
+            portable = root / "curve.clorust"
+            await json_result(session, "scene_save", {"path": str(portable), "thumbnail": False})
+            await json_result(session, "scene_open", {"path": str(portable)})
+            info = await json_result(session, "pattern_info", {"pattern": "0"})
+            assert len(info["line_info"]["lines"]) == 2
+            await json_result(session, "simulate", {"steps": 0, "particle_distance": 18})
+            glb = root / "curve.glb"
+            await json_result(session, "scene_export", {"path": str(glb)})
+            model, _ = read_gltf_export(glb)
+            primitive = model["meshes"][0]["primitives"][0]
+            assert model["accessors"][primitive["indices"]]["count"] > 0
+    print(json.dumps({"fixture": fixture.name, "cases": observations["rust"],
+                      "two_corner_rust_portable_mesh": True}, ensure_ascii=False))
+
+
 async def compare_native_pattern_delete():
     fixture = Path(os.environ["CLO_PATTERN_DELETE_FIXTURE"]).resolve(strict=True)
     observations = {}
@@ -5083,6 +5195,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-sew-keeps-drape", action="store_const", dest="comparison",
                              const=verify_sew_keeps_drape,
                              help="verify newly added seams solve from the saved drape")
+    comparisons.add_argument("--compare-native-pattern-creation", action="store_const", dest="comparison",
+                             const=compare_native_pattern_creation,
+                             help="compare native pattern creation and arrangement states")
     comparisons.add_argument("--compare-native-pattern-delete", action="store_const", dest="comparison",
                              const=compare_native_pattern_delete,
                              help="compare pattern deletion and scene readback using a live saved fixture")
