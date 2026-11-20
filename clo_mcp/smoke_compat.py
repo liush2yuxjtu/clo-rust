@@ -2189,6 +2189,29 @@ async def verify_sew_keeps_drape():
                 await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
                 return path, json.loads(path.read_text())["scene"]
 
+            async def seam_readback():
+                catalog = await json_result(rust, "seams_list")
+                groups = catalog["groups"]
+                count = len(groups)
+                result = await json_result(rust, "clo_run_python", {"code": "pattern_api.GetSeamlinePairGroupCount()"})
+                assert result["value"] == catalog["count"] == count
+                for index in sorted({0, count // 2, count - 1}) if count else []:
+                    expected = groups[index]
+                    response = await json_result(rust, "clo_api_call", {
+                        "name": "pattern_api.GetSeamlinePairGroupNameW", "args": [index],
+                    })
+                    assert response["value"] == expected["name"]
+                    lookup = await json_result(rust, "clo_api_call", {
+                        "name": "pattern_api.GetSeamlinePairGroupIndexFromName", "args": [expected["name"]],
+                    })
+                    assert lookup["value"] == next(i for i, group in enumerate(groups) if group["name"] == expected["name"])
+                info = await json_result(rust, "pattern_info", {"pattern": "0"})
+                response = await json_result(rust, "clo_api_call", {
+                    "name": "pattern_api.GetSeamlinePairGroupListInPattern", "args": [0],
+                })
+                assert response["value"] == info["seam_groups"]
+                return count
+
             await json_result(rust, "pattern_create", {
                 "name": "Front", "points": [[0, 0], [100, 0], [45, 70]],
             })
@@ -2201,6 +2224,7 @@ async def verify_sew_keeps_drape():
                     "dir_a": True, "dir_b": False}
             joined = await json_result(rust, "sew", seam)
             assert joined == {"ok": True, "seam_groups": 1}
+            assert await seam_readback() == 1
             duplicate = await json_result(rust, "sew", {
                 "pattern_a": "Back", "line_a": 0, "pattern_b": "Front", "line_b": 0,
             })
@@ -2220,12 +2244,13 @@ async def verify_sew_keeps_drape():
             assert solved["simulation"]["meshes"] != before["simulation"]["meshes"]
 
             native_meshes = None
+            native_counts = None
             if fixture := os.environ.get("CLO_DISPLAY_FIXTURE"):
                 await json_result(rust, "scene_open", {"path": fixture})
                 _, source = await save("native")
                 native_meshes = len(source["simulation"]["meshes"])
                 assert native_meshes > 0 and source["simulation"]["source"] == "native_saved_pose"
-                initial_seams = (await json_result(rust, "seams_list"))["count"]
+                initial_seams = await seam_readback()
                 for i in range(1, len(source["patterns"])):
                     result = await json_result(rust, "sew", seam | {"pattern_a": "0", "pattern_b": str(i)})
                     if result["ok"]:
@@ -2235,13 +2260,16 @@ async def verify_sew_keeps_drape():
                 path, native = await save("native-stitched")
                 assert native["simulation"] == source["simulation"]
                 await json_result(rust, "scene_open", {"path": str(path)})
-                assert (await json_result(rust, "seams_list"))["count"] == initial_seams + 1
+                after = await seam_readback()
+                assert after == initial_seams + 1
+                native_counts = [initial_seams, after]
                 _, reopened = await save("native-reopened")
                 assert reopened["simulation"] == source["simulation"]
-    print(json.dumps({"tools": ["sew", "seams_list", "scene_open", "simulate"],
+    print(json.dumps({"tools": ["sew", "seams_list", "scene_open", "simulate", "clo_api_call", "clo_run_python"],
                       "case": "sewing an existing drape", "new_stitch_constraints": constraints["stitch_count"],
                       "continued_step": 4, "pose_and_velocities": "unchanged",
-                      "duplicate_and_out_of_range": "pass", "native_pose_meshes_preserved": native_meshes}))
+                      "duplicate_and_out_of_range": "pass", "native_pose_meshes_preserved": native_meshes,
+                      "native_group_count_before_after": native_counts, "api_order_and_memberships_match": True}))
 
 
 async def verify_display_edits_keep_drape():

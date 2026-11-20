@@ -20,6 +20,13 @@ fn user_seams(state: &Value) -> impl Iterator<Item = &Value> {
         .filter(|seam| seam.get("native_group").is_none())
 }
 
+pub(crate) fn seam_group_names(state: &Value) -> impl Iterator<Item = &Value> {
+    array(state, "native_seam_groups")
+        .iter()
+        .chain(user_seams(state))
+        .map(|group| &group["name"])
+}
+
 pub(super) fn count(state: &Value) -> usize {
     array(state, "native_seam_groups").len() + user_seams(state).count()
 }

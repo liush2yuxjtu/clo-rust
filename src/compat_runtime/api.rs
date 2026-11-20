@@ -1,4 +1,5 @@
 use super::{array, enums, text, DomainCall, ToolResult};
+use crate::compat_scene::seam_group_names;
 use serde_json::{json, Map, Value};
 
 const MODULES: [&str; 7] = [
@@ -1309,14 +1310,16 @@ pub(super) fn invoke(
             let result = domain("arrangement_points", &json!({}),state)?;
             Ok(json!(array(&result["names"]).iter().enumerate().map(|(index,name)| json!({"ArrangementIndex":index.to_string(),"ArrangementName":name})).collect::<Vec<_>>()))
         }
-        "pattern_api.GetSeamlinePairGroupCount" => Ok(json!(array(&state["seams"]).len())),
+        "pattern_api.GetSeamlinePairGroupCount" => Ok(json!(seam_group_names(state).count())),
         "pattern_api.GetSeamlinePairGroupIndexFromName" | "pattern_api.GetSeamlinePairGroupIndexFromNameW" => {
             if !arg[0].is_string() {return Err("Seam group name must be a string".into());}
-            Ok(json!(find_name(array(&state["seams"]),&arg[0]).map(|index| index as i64).unwrap_or(-1)))
+            let index = seam_group_names(state).position(|name| name == &arg[0]);
+            Ok(index.map_or(json!(-1), |index| json!(index)))
         }
         "pattern_api.GetSeamlinePairGroupName" | "pattern_api.GetSeamlinePairGroupNameW" => {
-            let seams = array(&state["seams"]);
-            Ok(property(&seams[index(&arg[0],seams.len(),"seam group")?],"name"))
+            arg[0].as_u64().and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| seam_group_names(state).nth(index))
+                .cloned().ok_or_else(|| format!("Invalid seam group index: {}", arg[0]))
         }
         "pattern_api.MovePatternPoint" => domain("pattern_edit_points", &json!({"pattern":pattern_ref(&arg[0])?,"moves":[{"point":arg[1],"x":arg[2],"y":arg[3]}]}),state).map(|_| Value::Null),
         "pattern_api.SetArrangement" => {

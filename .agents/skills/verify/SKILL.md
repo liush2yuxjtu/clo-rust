@@ -310,6 +310,9 @@ Check that the saved positions and velocities match the pre-sewing
 scene, then advance one simulation step. Verify duplicate and
 out-of-range seam rejection. Set `CLO_DISPLAY_FIXTURE` to check
 sewing and reopening with a native pose archive as well.
+Compare the Python seam-group count, API names and name lookups, and panel
+memberships against `seams_list` and `pattern_info`. Check the native groups
+and the newly authored group on the same archive after reopening.
 
 Run `--verify-delete-keeps-drape` to delete panels by name and index from
 a simulated scene. Check that repeated references are deduplicated,
