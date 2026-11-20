@@ -250,6 +250,10 @@ views. Read the file bytes back and confirm that the mixed-case
 `Three-Quarter` alias uses the same camera as `3/4-right`. A capture error
 leaves the completed build available through `garment_last_spec` and scene
 save. A failed draft preserves the prior build.
+For standalone snapshots, check that empty views and label use the default
+front and oblique PNGs and `snap_` prefix. Export a 3D thumbnail immediately
+after the snapshot and compare its bytes to the final image. Confirm a 2D capture
+and a rejected 3D view leave that camera unchanged.
 
 Run `python -m clo_mcp.smoke_compat --verify-garment-session-history` to
 exercise two builds with different patterns. Within one MCP session,

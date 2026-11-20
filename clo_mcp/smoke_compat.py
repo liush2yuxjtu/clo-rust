@@ -1505,6 +1505,26 @@ async def verify_build_snapshot_workflow():
             a, b = check_images(captures.content, aliases)
             assert a == b, "the three-quarter alias must produce the same camera"
 
+            async def thumbnail(name):
+                path = root / f"{name}.png"
+                report = await json_result(rust, "clo_api_call", {
+                    "name": "export_api.ExportThumbnail3D", "args": [str(path)],
+                })
+                assert report["value"] == str(path)
+                return path.read_bytes()
+
+            defaults_capture = await successful(rust, "snapshot", {"views": [], "label": ""})
+            front, oblique = check_images(defaults_capture.content, ["front", "3/4-right"])
+            assert front != oblique and oblique == b
+            assert all(Path(block.text.split("] ", 1)[1]).name.startswith("snap_")
+                       for block in defaults_capture.content[::2])
+            assert await thumbnail("after-3d") == oblique
+            await successful(rust, "snapshot_2d")
+            assert await thumbnail("after-2d") == oblique
+            invalid_snapshot = await rust.call_tool("snapshot", {"views": ["front", "unknown view"]})
+            assert invalid_snapshot.isError
+            assert await thumbnail("after-invalid") == oblique
+
             before = sorted((output / "snapshots").glob("*.png"))
             invalid = await rust.call_tool("garment_build", {
                 "spec": spec | {"length": "cropped", "color": "navy"},
@@ -1521,7 +1541,7 @@ async def verify_build_snapshot_workflow():
             assert scene["fabrics"][-1]["color"] == [0.1, 0.16, 0.42]
 
             failed_draft = await rust.call_tool("garment_rebuild", {
-                "changes": {"garment": "invalid"}, "snapshots": False,
+                "changes": {"particle_distance": "invalid"}, "snapshots": False,
             })
             assert failed_draft.isError
             assert await json_result(rust, "garment_last_spec") == last
@@ -1538,7 +1558,8 @@ async def verify_build_snapshot_workflow():
     print(json.dumps({"tools": ["garment_build", "garment_rebuild", "garment_last_spec", "snapshot"],
                       "case": "build snapshot workflow", "default_views": defaults,
                       "aliases_and_png_content": "pass", "capture_error_commits_build": "pass",
-                      "draft_error_preserves_previous_build": "pass"}))
+                      "draft_error_preserves_previous_build": "pass",
+                      "thumbnail_matches_last_3d_view": True, "2d_and_errors_keep_camera": True}))
 
 
 async def verify_one_piece_dress_merge():

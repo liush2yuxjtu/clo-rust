@@ -1,7 +1,6 @@
 use super::{
     array,
     solver::{self, cross, dot, sub},
-    string,
     texture::BaseTexture,
 };
 use serde_json::{json, Value};
@@ -580,7 +579,7 @@ pub(crate) fn export_snapshot(path: &Path, state: &Value, flat: bool) -> Result<
     crate::compat_scene::write_artifact(path, &bytes)
 }
 
-pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String> {
+pub fn snapshot(args: &Value, state: &mut Value, flat: bool) -> Result<Value, String> {
     let defaults = if flat {
         vec!["2d"]
     } else {
@@ -605,9 +604,13 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let mut textures = TextureCache::default();
     let drawings = scene_drawings(state, flat, &mut textures)?;
+    let label = args["label"]
+        .as_str()
+        .filter(|label| !label.is_empty())
+        .unwrap_or("snap");
     let mut images = Vec::new();
     for view in &views {
-        match make_image(&drawings, &root, string(args, "label", "snap"), view, flat) {
+        match make_image(&drawings, &root, label, view, flat) {
             Ok(path) => images.push(json!({"view":view,"path":path,"mime_type":"image/png"})),
             Err(err) => {
                 for image in &images {
@@ -625,6 +628,8 @@ pub fn snapshot(args: &Value, state: &Value, flat: bool) -> Result<Value, String
     }
     if flat {
         result["path"] = result["images"][0]["path"].clone();
+    } else if let Some(view) = views.last() {
+        state["runtime"]["ui"]["view"] = json!(view);
     }
     Ok(result)
 }
