@@ -334,9 +334,24 @@ async def verify_fabric_recolor_opacity():
             async def set_map(index, kind):
                 await json_result(rust, "fabric_set_texture", {"fabric_index": index, "map": kind, "image_path": str(image)})
 
-            async def recolor(index):
-                result = await json_result(rust, "fabric_set_color", {"fabric_index": index, "color": "#224466"})
-                assert result == {"rgb": [34 / 255, 68 / 255, 102 / 255], "result": {"ok": [True, True, True]}}
+            async def check_faces(index, rgb):
+                fabric = next(item for item in await materials() if item["index"] == index)
+                rgba = rgb + [1.0]
+                for row in fabric["info"]["material"].get("face_colors", []):
+                    if row["type"] in (0, 1, 2):
+                        assert all(abs(a - b) < 1e-6 for a, b in zip(row["rgba"], rgba, strict=True)), row
+                for face in range(3):
+                    result = await json_result(rust, "clo_api_call", {
+                        "name": "fabric_api.GetFabricPBRMaterialBaseColor", "args": [index, face],
+                    })
+                    assert all(abs(a - b) < 1e-6 for a, b in zip(result["value"], rgba, strict=True)), result
+
+            expected_rgb = [34 / 255, 68 / 255, 102 / 255]
+
+            async def recolor(index, text="#224466", rgb=expected_rgb):
+                result = await json_result(rust, "fabric_set_color", {"fabric_index": index, "color": text})
+                assert result == {"rgb": rgb, "result": {"ok": [True, True, True]}}
+                await check_faces(index, rgb)
 
             indices = []
             for name in ("cotton", "chiffon"):
@@ -347,11 +362,20 @@ async def verify_fabric_recolor_opacity():
                     await set_map(index, kind)
                 await recolor(index)
             opaque, sheer = indices
+            await recolor(sheer, " navy gold ", [0.83, 0.68, 0.22])
+            await recolor(sheer, "#246")
+            before_invalid = await materials()
+            for index, color in ((opaque, "#x24"), (9001, "#246")):
+                rejected = await rust.call_tool("fabric_set_color", {"fabric_index": index, "color": color})
+                assert rejected.isError
+            assert await materials() == before_invalid
             portable = root / "recolored.clorust"
             await json_result(rust, "scene_save", {"path": str(portable)})
             await json_result(rust, "scene_open", {"path": str(portable)})
             assert await maps(opaque) == {"normal": str(image)}
             assert await maps(sheer) == {"normal": str(image), "opacity": str(image)}
+            for index in (opaque, sheer):
+                await check_faces(index, expected_rgb)
 
             native = {}
             for label, fixture_key in (("opaque", "CLO_RECOLOR_OPAQUE_FIXTURE"), ("sheer", "CLO_RECOLOR_SHEER_FIXTURE")):
@@ -371,6 +395,7 @@ async def verify_fabric_recolor_opacity():
                 await json_result(rust, "scene_save", {"path": str(path), "thumbnail": False})
                 await json_result(rust, "scene_open", {"path": str(path)})
                 assert await maps(index) == expected
+                await check_faces(index, expected_rgb)
                 native[label] = {"fabric": fabric["name"], "opacity_kept": "opacity" in expected}
                 if label == "opaque":
                     await json_result(rust, "scene_open", {"path": fixture})
@@ -381,7 +406,8 @@ async def verify_fabric_recolor_opacity():
                     assert Path((await maps(index))["opacity"]).read_bytes() == image.read_bytes()
                     native[label]["later_replacement_kept"] = True
     print(json.dumps({"tool": "fabric_set_color", "case": "recolor opacity policy", "portable_reopen": True,
-                      "opaque_map_cleared": True, "sheer_map_preserved": True, "native": native}))
+                      "opaque_map_cleared": True, "sheer_map_preserved": True, "native": native,
+                      "face_rgba_readback": True, "invalid_recolor_kept_materials": True}))
 
 
 async def verify_fabric_texture_clear():

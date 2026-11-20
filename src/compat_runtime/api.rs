@@ -1015,6 +1015,12 @@ fn color_hex(rgb: &[Value]) -> Result<String, String> {
 }
 
 fn color_channels(color: &Value) -> ToolResult {
+    if let Ok(rgba) = serde_json::from_value::<[f64; 4]>(color.clone()) {
+        return Ok(json!(rgba));
+    }
+    if let Ok([r, g, b]) = serde_json::from_value::<[f64; 3]>(color.clone()) {
+        return Ok(json!([r, g, b, 1.0]));
+    }
     let hex = color
         .as_str()
         .unwrap_or("#ffffff")
@@ -1207,7 +1213,14 @@ pub(super) fn invoke(
             match name {
                 "fabric_api.GetFabricInformation" => Ok(property(fabric,"info")),
                 "fabric_api.GetFabricName" => Ok(property(fabric,"name")),
-                _ => color_channels(&fabric["color"]),
+                _ => {
+                    let face_color = array(&fabric["info"]["face_colors"])
+                        .iter()
+                        .find(|face| face["type"] == arg[1])
+                        .map(|face| &face["rgba"]);
+                    let color = face_color.or_else(|| fabric.get("rgba").filter(|value| !value.is_null()));
+                    color_channels(color.unwrap_or(&fabric["color"]))
+                }
             }
         }
         "fabric_api.SetCurrentFabricIndex" => {

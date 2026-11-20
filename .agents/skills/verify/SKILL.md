@@ -39,6 +39,10 @@ normal and opacity maps, save, and read back both maps. Set
 `CLO_RECOLOR_OPAQUE_FIXTURE` and `CLO_RECOLOR_SHEER_FIXTURE` to native archives
 with opacity maps to check native save and reopen. The opaque case also sets a
 new opacity image after recoloring and checks that its bytes survive the save.
+Check each of faces 0, 1, and 2 through
+`fabric_api.GetFabricPBRMaterialBaseColor` and the native face records when present.
+Compare six-digit hex, shorthand hex, and a compound color name, and check that
+invalid hex and invalid fabric indices leave the material list intact.
 
 Run `--verify-fabric-assignment-workflow` to register a fabric through
 `AddFabric`, then assign it to one panel through Python and apply a different

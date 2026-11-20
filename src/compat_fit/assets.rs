@@ -1038,6 +1038,17 @@ fn update_material_color(fabric: &mut Value, rgb: [f64; 3]) -> bool {
     fabric["color"] = json!(rgb);
     let [r, g, b] = rgb;
     fabric["rgba"] = json!([r, g, b, 1.0]);
+    if let Some(faces) = fabric
+        .get_mut("info")
+        .and_then(|info| info.get_mut("face_colors"))
+        .and_then(Value::as_array_mut)
+    {
+        for face in faces {
+            if matches!(face["type"].as_u64(), Some(0..=2)) {
+                face["rgba"] = json!([r, g, b, 1.0]);
+            }
+        }
+    }
     if let Some(maps) = fabric["texture_maps"].as_object_mut() {
         maps.remove("base");
         if clear_opacity {
