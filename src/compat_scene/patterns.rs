@@ -558,15 +558,36 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value) -> Result<(), St
     if line < -1 || line >= count as i64 {
         return Err("line index is out of range".into());
     }
-    let mut setting = json!({"on": flag(args, "on", true)});
+    let mut update = json!({"on": flag(args, "on", true)});
     if op == "elastic" {
         for key in ["total_length", "strength"] {
             if args.get(key).is_some() {
-                setting[key] = json!(number(args, key)?);
+                let value = number(args, key)?;
+                if value < 0.0 {
+                    return Err(format!("{key} must be nonnegative"));
+                }
+                update[key] = json!(value);
             }
         }
     }
-    pattern["line_properties"][line.to_string()][op] = setting;
+    let fields = update.as_object().expect("line property update object");
+    let properties = &mut pattern["line_properties"];
+    if line == -1 {
+        if let Some(entries) = properties.as_object_mut() {
+            for (index, entry) in entries {
+                if index == "-1" {
+                    continue;
+                }
+                if let Some(setting) = entry.get_mut(op).and_then(Value::as_object_mut) {
+                    setting.retain(|key, _| !fields.contains_key(key));
+                }
+            }
+        }
+    }
+    let setting = &mut properties[line.to_string()][op];
+    for (key, value) in fields {
+        setting[key] = value.clone();
+    }
     Ok(())
 }
 
@@ -711,7 +732,7 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
                 mesh["name"] = pattern["name"].clone();
             }
         }
-    } else {
+    } else if op != "elastic" {
         invalidate_geometry(state);
     }
     state["patterns"][i] = pattern;

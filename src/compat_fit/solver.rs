@@ -765,6 +765,59 @@ fn internal_constraints(mesh: &Mesh, offset: usize) -> Vec<Constraint> {
         .collect()
 }
 
+fn elastic_constraints(
+    mesh: &Mesh,
+    pattern: &Value,
+    offset: usize,
+) -> Result<Vec<Constraint>, String> {
+    let properties = &pattern["line_properties"];
+    if properties.is_null() {
+        return Ok(Vec::new());
+    }
+    let all = &properties["-1"]["elastic"];
+    let segment_length =
+        |pair: &[usize]| distance2(mesh.points[pair[0]], mesh.points[pair[1]]).sqrt();
+    let perimeter: f64 = mesh
+        .sides
+        .iter()
+        .flat_map(|side| side.windows(2))
+        .map(segment_length)
+        .sum();
+    let all_ratio = all["total_length"]
+        .as_f64()
+        .map_or(0.8, |target| target / perimeter);
+    let mut constraints = Vec::new();
+    for (line, side) in mesh.sides.iter().enumerate() {
+        let elastic = &properties[line.to_string()]["elastic"];
+        if !boolean(elastic, "on", boolean(all, "on", false)) {
+            continue;
+        }
+        let length: f64 = side.windows(2).map(segment_length).sum();
+        if length <= 1e-9 {
+            continue;
+        }
+        let ratio = elastic["total_length"]
+            .as_f64()
+            .map_or(all_ratio, |target| target / length);
+        let strength = number(elastic, "strength", number(all, "strength", 10.0));
+        if !ratio.is_finite() || ratio < 0.0 || !strength.is_finite() || strength < 0.0 {
+            return Err("invalid saved elastic length or strength".into());
+        }
+        if strength == 0.0 {
+            continue;
+        }
+        // Map the user-visible relative strength to a bounded CPU projection weight.
+        let stiffness = strength / (strength + 10.0);
+        constraints.extend(side.windows(2).map(|pair| Constraint {
+            a: offset + pair[0],
+            b: offset + pair[1],
+            rest: segment_length(pair) * ratio,
+            stiffness,
+        }));
+    }
+    Ok(constraints)
+}
+
 fn side_samples(
     mesh: &Mesh,
     side: usize,
@@ -964,10 +1017,12 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let mut velocities = Vec::new();
     let mut weights = Vec::new();
     let mut constraints = Vec::new();
-    for mesh in &meshes {
+    let mut elastic = Vec::new();
+    for (mesh, pattern) in meshes.iter().zip(patterns) {
         let offset = positions.len();
         offsets.push(offset);
         constraints.extend(internal_constraints(mesh, offset));
+        elastic.extend(elastic_constraints(mesh, pattern, offset)?);
         positions.extend(mesh.positions.iter().copied());
         velocities.extend(mesh.velocities.iter().copied());
         weights.resize(positions.len(), if mesh.frozen { 0.0 } else { 1.0 });
@@ -1034,7 +1089,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             if use_mesh_collision {
                 start_of_iteration.copy_from_slice(&positions);
             }
-            for c in constraints.iter().chain(&seam_constraints) {
+            for c in constraints.iter().chain(&elastic).chain(&seam_constraints) {
                 apply_constraint(&mut positions, &weights, c);
             }
             for stitch in &native_stitches.constraints {
@@ -1114,7 +1169,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     }
     let mut result = json!({"ok":true,"steps":steps,"seconds":start.elapsed().as_secs_f64(),"solver":"rust_cpu_pbd",
         "vertices":positions.len(),"stitch_count":seam_constraints.len()+native_stitches.constraints.len(),"max_stitch_gap_mm":gap,
-        "mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
+        "elastic_constraint_count":elastic.len(),"mesh_collision_contacts":contacts,"mesh_initial_overlap_corrections":initial_overlap_corrections,"native_interval_seam_groups":native_stitches.groups,"native_unsupported_seam_groups":native_stitches.unsupported,
         "max_constraint_length_mm":effective,"limitations":limitations});
     if use_native {
         result["initialization"] = json!(if saved_pose {
@@ -1145,6 +1200,29 @@ pub fn layout_meshes(state: &Value) -> Result<Vec<Mesh>, String> {
 #[cfg(test)]
 mod native_pose_tests {
     use super::*;
+
+    #[test]
+    fn elastic_total_length_is_distributed_and_disabled_edges_are_excluded() {
+        let pattern = json!({
+            "id": 1,
+            "points": [[0, 0], [100, 0], [100, 50], [0, 50]],
+            "line_properties": {
+                "-1": {"elastic": {"on": true, "total_length": 180, "strength": 20}},
+                "1": {"elastic": {"on": false}},
+                "2": {"elastic": {"on": true, "total_length": 50, "strength": 5}}
+            }
+        });
+        let mesh = new_mesh(&pattern, 17.0, &Value::Null).unwrap();
+        let constraints = elastic_constraints(&mesh, &pattern, 0).unwrap();
+        let sum: f64 = constraints.iter().map(|entry| entry.rest).sum();
+        assert!((sum - 140.0).abs() < 1e-9);
+        assert!(constraints
+            .iter()
+            .any(|entry| (entry.stiffness - 1.0 / 3.0).abs() < 1e-9));
+        assert!(constraints
+            .iter()
+            .any(|entry| (entry.stiffness - 2.0 / 3.0).abs() < 1e-9));
+    }
 
     fn fixture() -> Value {
         let outline = json!([
