@@ -318,6 +318,9 @@ scene while the most recent successful build stays available for
 `garment_rebuild`. Restarting the bridge within that session preserves the
 record. A fresh MCP process can open the saved geometry and starts with
 empty `garment_last_spec`; a rebuild before its first build returns an error.
+Force a solver error during rebuild and save the scene. Verify the newly
+drafted pieces, seams, material, and particle distance are present, with
+no simulated pose, while `garment_last_spec` still reports the prior build.
 Set `CLO_MCP_OFFICIAL_COMMAND` to also check empty history and the no-build
 error on the official MCP server without requiring its live bridge.
 

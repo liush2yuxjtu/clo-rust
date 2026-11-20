@@ -1585,6 +1585,23 @@ async def verify_garment_session_history():
             })
             recent = await json_result(rust, "garment_last_spec")
             assert recent == {"spec": second["spec"], "pieces": ["Front", "Back"]}
+            failed = await rust.call_tool("garment_rebuild", {
+                "changes": {"sleeve": "long", "color": "navy", "particle_distance": 25},
+                "simulate_steps": 3001, "snapshots": False,
+            })
+            assert failed.isError and "0..3000 steps" in failed.content[0].text
+            live = await json_result(rust, "scene_info")
+            assert live["pattern_count"] == len(first_pieces)
+            assert live["seam_groups"] == len(first["seams"])
+            after_error = root / "after-solver-error.clorust"
+            await json_result(rust, "scene_save", {"path": str(after_error), "thumbnail": False})
+            partial = json.loads(after_error.read_text())["scene"]
+            assert [piece["name"] for piece in partial["patterns"]] == first_pieces
+            assert all(piece["particle_distance"] == 25 for piece in partial["patterns"])
+            assert partial["fabrics"][-1]["color"] == [0.1, 0.16, 0.42]
+            assert partial["simulation"] is None
+            assert await json_result(rust, "garment_last_spec") == recent
+
             reopened = await json_result(rust, "scene_open", {"path": str(project), "mode": "replace"})
             assert reopened["pattern_count"] == len(first_pieces)
             assert await json_result(rust, "garment_last_spec") == recent
@@ -1616,6 +1633,7 @@ async def verify_garment_session_history():
                                 "checkpoint_restore", "scene_clear"],
                       "case": "garment session history", "open_and_restore": "pass",
                       "clear_and_bridge_restart": "pass", "independent_client": "pass",
+                      "solver_error_keeps_drafted_scene_and_prior_history": "pass",
                       "official_empty_session": official_baseline}))
 
 

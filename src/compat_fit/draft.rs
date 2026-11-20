@@ -1466,21 +1466,24 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
         .as_i64()
         .or_else(|| draft["simulation"]["steps"].as_i64())
         .unwrap_or(120);
+    // The drafted scene exists before the solver runs. The session record is
+    // published only after simulation finishes, and before snapshots run.
+    *state = next;
     let sim = if steps > 0 {
         let options = if resume {
             json!({"steps":steps})
         } else {
             json!({"steps":steps,"particle_distance":draft["simulation"]["particle_distance"]})
         };
-        let mut simulation = solver::simulate(&options, &mut next)?;
+        let mut simulation = solver::simulate(&options, state)?;
         if array(&draft["pieces"])
             .iter()
             .any(|piece| piece["layer"].as_i64().is_some_and(|layer| layer != 0))
         {
-            for pattern in array_mut(&mut next, "patterns") {
+            for pattern in array_mut(state, "patterns") {
                 pattern["layer"] = json!(0);
             }
-            let relax = solver::simulate(&json!({"steps": (steps / 4).max(30)}), &mut next)?;
+            let relax = solver::simulate(&json!({"steps": (steps / 4).max(30)}), state)?;
             simulation["extra_steps_after_layer_reset"] = relax["steps"].clone();
         }
         let pairs = array(&draft["merge_pairs"]);
@@ -1488,29 +1491,27 @@ pub fn build(args: &Value, state: &mut Value, rebuild: bool) -> Result<Value, St
             let merged = pairs.iter().map(|pair| {
                 let base = pair[0].as_str().expect("drafted merge base");
                 let other = pair[1].as_str().expect("drafted merge partner");
-                match solver::weld::merge_drafted_pair(&mut next, &ids[base], &ids[other]) {
+                match solver::weld::merge_drafted_pair(state, &ids[base], &ids[other]) {
                     Ok(()) => json!({"base":base,"other":other,"ok":true}),
                     Err(error) => json!({"base":base,"other":other,"ok":false,"error":error}),
                 }
             }).collect::<Vec<_>>();
             simulation["merged_pieces"] = json!(merged);
             for (name, piece) in &mut summary {
-                piece["index"] = json!(array(&next["patterns"])
+                piece["index"] = json!(array(&state["patterns"])
                     .iter()
                     .position(|pattern| pattern["id"] == ids[name]));
             }
-            solver::simulate(&json!({"steps":30}), &mut next)?;
+            solver::simulate(&json!({"steps":30}), state)?;
         }
         simulation
     } else {
         Value::Null
     };
-    next["garment_spec"] = draft["spec"].clone();
-    next["garment_piece_names"] = json!(names);
-    next["runtime"]["last_garment"] =
-        json!({"spec":next["garment_spec"],"pieces":next["garment_piece_names"]});
-    // A snapshot runs after the completed build and session record are published.
-    *state = next;
+    state["garment_spec"] = draft["spec"].clone();
+    state["garment_piece_names"] = json!(names);
+    state["runtime"]["last_garment"] =
+        json!({"spec":state["garment_spec"],"pieces":state["garment_piece_names"]});
     let images = if boolean(args, "snapshots", true) {
         let views = if rebuild || array(&args["views"]).is_empty() {
             json!(["front", "3/4-right", "back"])
