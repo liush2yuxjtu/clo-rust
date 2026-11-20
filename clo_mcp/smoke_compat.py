@@ -6142,6 +6142,97 @@ async def verify_shared_colorway_edits(fixture):
             assert await base_images() == [images[1], images[1], images[1]]
 
 
+async def compare_live_scene_open():
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    with_avatar = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    assert all(path.is_file() for path in (project, garment, with_avatar))
+    state_dir = Path(os.environ["CLO_MCP_STATE"])
+    invalid = state_dir / "corrupt-scene-open.zprj"
+    missing = state_dir / "missing-scene-open.zprj"
+    assert state_dir.is_dir() and not missing.exists()
+    cases = (
+        ("empty ZPRJ append", None, project, "append", 2, 2, [1, 1]),
+        ("empty ZPAC append", None, garment, "append", 2, 2, [1, 1]),
+        ("append ZPRJ to project", project, project, "append", 4, 2, [0, 0, 1, 1]),
+        ("append ZPAC to project", project, garment, "append", 4, 2, [0, 0, 1, 1]),
+        ("append embedded avatar", project, with_avatar, "append", 4, 3, [0, 0, 2, 1]),
+        ("retain existing avatar", with_avatar, project, "append", 4, 3, [1, 0, 2, 2]),
+        ("append same avatar", with_avatar, with_avatar, "append", 4, 4, [1, 0, 3, 2]),
+        ("replace garment with avatar present", with_avatar, garment, "replace", 2, 1, [0, 0]),
+        ("missing file", project, missing, "append", 2, 1, [0, 0]),
+        ("unrecognized mode defaults to replace", project, project, "unrecognized", 2, 1, [0, 0]),
+        ("invalid ZPRJ append", project, invalid, "append", 2, 1, [0, 0]),
+        ("invalid ZPRJ replaces scene", project, invalid, "replace", 0, 1, []),
+    )
+    keys = ("project", "project_path", "patterns", "avatars", "colorways", "current_colorway",
+            "pattern_count", "seam_groups", "fabric_count", "fabrics")
+
+    async def read(session):
+        scene = await json_result(session, "scene_info")
+        total = (await json_result(session, "clo_api_call", {
+            "name": "fabric_api.GetFabricCount", "args": [False],
+        }))["value"]
+        fabrics = await json_result(session, "fabric_list")
+        return ({key: scene[key] for key in keys}, fabrics, total,
+                await json_result(session, "seams_list"))
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        reports = []
+        with invalid.open("xb") as handle:
+            handle.write(b"invalid project")
+        try:
+            for session in (clo, rust):
+                await inspect_contract(session)
+            for label, initial, source, mode, count, material_count, assignments in cases:
+                observed = []
+                for backend, session in (("official", clo), ("rust", rust)):
+                    await json_result(session, "scene_clear", {"keep_avatar": False})
+                    if initial:
+                        await json_result(session, "scene_open", {"path": str(initial)})
+                    if mode == "unrecognized":
+                        await json_result(session, "pattern_ops", {
+                            "pattern": "0", "op": "rename", "args": {"name": "sentinel"},
+                        })
+                    before = await read(session)
+                    response = await session.call_tool("scene_open", {"path": str(source), "mode": mode})
+                    after = await read(session)
+                    scene, _, total, _ = after
+                    assert (scene["pattern_count"], total) == (count, material_count), (backend, label, after)
+                    assert [panel["fabric_index"] for panel in scene["patterns"]] == assignments
+                    if source == missing:
+                        assert response.isError and after == before
+                    else:
+                        assert not response.isError, (backend, label, response.content)
+                        reply = response.structuredContent or json.loads(response.content[0].text)
+                        assert {key: reply[key] for key in ("ok", "path", "pattern_count", "avatars")} == {
+                            "ok": True, "path": str(source), "pattern_count": count, "avatars": scene["avatars"]}
+                    if mode == "append":
+                        assert scene["project_path"] == before[0]["project_path"]
+                        assert scene["colorways"] == before[0]["colorways"]
+                    if source == invalid and mode == "append":
+                        assert after == before
+                    if source == garment and mode == "replace":
+                        assert scene["project_path"] == "NULL" and scene["avatars"] == before[0]["avatars"]
+                    if mode == "unrecognized":
+                        assert scene["patterns"][0]["name"] == "Front"
+                    observed.append(after)
+                assert observed[0] == observed[1], (label, observed)
+                reports.append({"case": label, "panels": count, "materials": material_count,
+                                "assignments": assignments, "project_path": observed[0][0]["project_path"],
+                                "avatars": observed[0][0]["avatars"]})
+        finally:
+            invalid.unlink()
+            if original["project_path"] not in ("NULL", "", None):
+                await json_result(clo, "scene_open", {"path": original["project_path"]})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"tool": "scene_open", "cases": reports, "scene_and_fabric_readback": "exact",
+                      "result": "pass"}, ensure_ascii=False))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -6196,15 +6287,26 @@ async def verify_native_append():
             stable = await json_result(session, "scene_info")
             corrupt_path = folder / "corrupt.zprj"
             corrupt_path.write_bytes(b"not a native project")
-            for mode in ("append", "replace"):
-                invalid = await session.call_tool("scene_open", {"path": str(corrupt_path), "mode": mode})
-                assert invalid.isError
-                assert await json_result(session, "scene_info") == stable
+            invalid_append = await json_result(session, "scene_open", {"path": str(corrupt_path), "mode": "append"})
+            assert invalid_append["ok"] and await json_result(session, "scene_info") == stable
+            invalid_replace = await json_result(session, "scene_open", {"path": str(corrupt_path), "mode": "replace"})
+            assert invalid_replace == {"ok": True, "path": str(corrupt_path), "pattern_count": 0, "avatars": []}
+            assert (await json_result(session, "scene_info"))["project_path"] == str(corrupt_path)
             await json_result(session, "scene_clear", {"keep_avatar": False})
             empty_append = await json_result(session, "scene_open", {"path": project, "mode": "append"})
             assert empty_append["native_import"]["saved_pose_loaded"]
             assert empty_append["avatars"] == first["avatars"]
-            assert (await json_result(session, "scene_info"))["colorways"] == first["colorways"]
+            blank_append = await json_result(session, "scene_info")
+            assert blank_append["project_path"] == "NULL"
+            assert blank_append["colorways"] == ["Default Colorway"]
+            assert blank_append["current_colorway"] == 0
+            assert [piece["fabric_index"] for piece in blank_append["patterns"]] == [
+                piece["fabric_index"] + 1 for piece in first["patterns"]]
+            blank_path, blank_state = await save("blank-appended")
+            await json_result(session, "scene_open", {"path": str(blank_path)})
+            _, blank_reopened = await save("blank-reopened")
+            assert blank_reopened["simulation"] == blank_state["simulation"]
+            await json_result(session, "scene_open", {"path": project})
             garment = folder / "copy.zpac"
             await json_result(session, "scene_export", {"path": str(garment)})
             garment_append = await json_result(session, "scene_open", {"path": str(garment), "mode": "append"})
@@ -6260,8 +6362,8 @@ async def verify_native_append():
     print(json.dumps({"tool": "scene_open", "case": "append two saved native poses",
                       "patterns": appended["pattern_count"], "fabrics": appended["fabric_count"],
                       "seam_groups": appended["seam_groups"], "avatars": len(appended["avatars"]),
-                      "pose_meshes_matched": len(meshes), "corrupt_input_preserves_scene": True,
-                      "empty_append_reexports_native": True, "garment_append_keeps_avatar": True,
+                      "pose_meshes_matched": len(meshes), "invalid_append_and_replacement_matched": True,
+                      "empty_append_keeps_receiving_colorway_and_saved_pose": True, "garment_append_keeps_avatar": True,
                       "selective_avatar_only_kept_garment": True,
                       "selective_garment_only_kept_avatars": True, "select_neither_kept_scene": True,
                       "selective_append_and_corrupt_input": "pass"}))
@@ -6560,6 +6662,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-native-colorway-refresh", action="store_const", dest="comparison",
                              const=verify_native_colorway_refresh,
                              help="verify colorway exports after native save and refresh")
+    comparisons.add_argument("--compare-live-scene-open", action="store_const", dest="comparison",
+                             const=compare_live_scene_open,
+                             help="compare native append and replacement with scene and fabric readback")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")

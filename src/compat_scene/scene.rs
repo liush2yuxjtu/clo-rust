@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,8 +14,11 @@ const DEFAULT_COLORWAY: &str = "Default Colorway";
 pub(crate) fn default_fabric() -> Value {
     json!({
         "index": 0, "name": "FABRIC 1", "stiffness": 0.9,
-        "color": [0.85, 0.85, 0.85], "texture_maps": {},
-        "info": {"source": "rust_default"}
+        "color": [1.0, 1.0, 1.0], "texture_maps": {},
+        "info": {
+            "source": "rust_default",
+            "physical_properties": {"thickness": 0.5, "density": 0.0003}
+        }
     })
 }
 
@@ -438,11 +442,7 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
     if !path.is_file() {
         return Err(format!("file not found: {}", path.display()));
     }
-    let append = match args["mode"].as_str().unwrap_or("replace") {
-        "replace" => false,
-        "append" => true,
-        mode => return Err(format!("unknown scene open mode {mode:?}")),
-    };
+    let append = args["mode"].as_str() == Some("append");
     let ext = extension(path);
     if (!load_garment || !load_avatar) && ext != "zprj" {
         return Err("selective project import requires a .zprj file".into());
@@ -509,6 +509,16 @@ fn open_json(path: &Path, append: bool, state: &mut Value) -> Result<bool, Strin
     Ok(true)
 }
 
+fn has_project_signature(path: &Path) -> Result<bool, String> {
+    let mut prefix = [0; 5];
+    let mut file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    match file.read_exact(&mut prefix) {
+        Ok(()) => Ok(&prefix == b" ZPRJ"),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
 fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mut Value) -> Reply {
     match ext {
         "dxf" => merge(state, &formats::read_dxf(path)?, append)?,
@@ -532,27 +542,21 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
         }
         ext @ ("zprj" | "zpac") => {
             let is_project = ext == "zprj";
+            if is_project && load_avatar && !has_project_signature(path)? {
+                // CLO accepts a missing project signature. Replacement still
+                // clears the scene and adopts the requested project name.
+                if !append {
+                    replace_scene(state, empty_project());
+                    set_project(state, path);
+                }
+                return Ok(open_reply(state, path));
+            }
             let mut loaded = formats::clo_native::read(path, is_project)?;
             let prior_count = array(state, "patterns").len();
-            let fresh_append = append
-                && prior_count == 0
-                && state["avatar"].is_null()
-                && state["garment_spec"].is_null()
-                && ["additional_avatars", "imported_meshes", "seams", "native_seam_groups"]
-                    .iter()
-                    .all(|key| array(state, key).is_empty())
-                && match array(state, "fabrics") {
-                    [] => true,
-                    [fabric] => fabric == &default_fabric(),
-                    _ => false,
-                }
-                && state["colorways"].as_array().is_none_or(|names| {
-                    names == &[json!(DEFAULT_COLORWAY)] || names == &[json!("Colorway 1")]
-                });
-            let fabrics = prepare_archived_fabrics(state, &mut loaded, append && !fresh_append)?;
+            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
-            if append && !fresh_append {
+            if append {
                 vec_mut(state, "fabrics").extend(fabrics);
             } else {
                 state["fabrics"] = json!(fabrics);
@@ -581,6 +585,9 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 if !append {
                     set_project(state, path);
                 }
+            } else if !is_project && !append {
+                state["project"] = json!("NULL");
+                state["project_path"] = json!("NULL");
             }
             let pose = array(&loaded, "saved_pose");
             if append {
@@ -592,7 +599,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if load_avatar && (!append || fresh_append) {
+            if load_avatar && !append {
                 formats::native_save::remember(state, path, is_project);
             }
             let mut reply = open_reply(state, path);

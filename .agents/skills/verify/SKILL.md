@@ -935,8 +935,23 @@ can restore the Rust revision. Repeat the overwrite in reverse, then
 cross-restore two automatically named checkpoints. Compare the full list,
 the active project path, materials, colors and seam groups, and vertex,
 triangle and UV readback from each archive. A missing name leaves the scene
-in place. Record malformed native files separately since CLO 2026.1.382
-can clear the scene and report success on an invalid ZPRJ.
+in place. Run the malformed-signature scene cases below in a disposable project.
+Replacement with such a file can clear the scene and still return success.
+
+Run `--compare-live-scene-open` with a live bridge and a fresh disposable
+`CLO_MCP_STATE`. Set `CLO_SCENE_OPEN_PROJECT` to `multi-colorway-colored.zprj`,
+`CLO_SCENE_OPEN_GARMENT` to `multi-colorway-simulated.zpac`, and
+`CLO_SCENE_OPEN_AVATAR_PROJECT` to `scene-clear-avatar-fixture.zprj`. Use the
+same files on both backends. If CLO asks about pose and size on the test
+scene, choose **Maintain Current Avatar's Size & Pose**. Compare return
+fields, assigned and stored fabric indices, full fabric list, seam groups,
+avatar names and active project. Empty append keeps the destination
+default colorway. ZPAC replacement retains the avatar and clears the
+active project path. Use a missing path, an unrecognized mode and a
+short file with no ZPRJ signature. The malformed-signature append leaves
+the scene unchanged. The malformed-signature replacement reinitializes
+the scene and takes the requested file name. A recognizable header with
+invalid or unsupported embedded records requires separate verification.
 
 Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an
@@ -946,8 +961,10 @@ and append affect the requested component, and that a corrupt avatar-only
 import preserves the receiving scene. Check that full append preserves original project
 identity, shifts new panel and fabric indices, and restores both saved meshes
 and embedded avatars. Save and reopen the combined project. Test invalid input
-in both modes. Append to an empty scene, re-export as ZPAC, then append the
-ZPAC and confirm the avatar stays in the scene and both poses are available.
+in both modes. Append to an empty scene and confirm the receiving default
+fabric and colorway remain. Save and reopen the composed scene as CLORUST.
+To check native garment passthrough, replace-open the original ZPRJ and
+export its ZPAC, then append that archive and verify both saved poses.
 Run `--verify-mixed-native-append` with the same fixture to cover a Rust panel
 before and after simulation. Export all panels immediately after append,
 save and reopen the combined project, then call `simulate` with zero steps.
