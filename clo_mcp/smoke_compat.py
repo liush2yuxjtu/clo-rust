@@ -194,6 +194,63 @@ async def check_material_export(session, directory, png):
                 assert read_gltf_export(readback)[0] == appended
 
 
+async def verify_fabric_assignment_workflow():
+    with TemporaryDirectory(prefix="clo-fabric-assignment-") as directory:
+        root = Path(directory)
+        async with open_backend("rust", {"CLO_RUST_FABRIC_DIR": "", "CLO_RUST_AVATAR_DIR": ""}) as rust:
+            await inspect_contract(rust)
+
+            async def saved(name):
+                path = root / f"{name}.clorust"
+                await json_result(rust, "scene_save", {"path": str(path)})
+                return path, json.loads(path.read_text())["scene"]
+
+            async def assignments():
+                rows = (await json_result(rust, "scene_info"))["patterns"]
+                return [row["fabric_index"] for row in rows]
+
+            for name, offset in (("Front", 0), ("Back", 130)):
+                await json_result(rust, "pattern_create", {"name": name,
+                    "points": [[offset, 0], [offset + 100, 0], [offset, 100]]})
+            await json_result(rust, "simulate", {"steps": 3, "particle_distance": 45})
+            _, baseline = await saved("baseline")
+            source = os.environ.get("CLO_FABRIC_ASSIGN_FIXTURE", "denim")
+            new = await json_result(rust, "clo_api_call", {"name": "fabric_api.AddFabric", "args": [source]})
+            new_index = new["value"]
+            assert new_index > 0 and await assignments() == [0, 0]
+            _, added = await saved("added")
+            assert added["simulation"] == baseline["simulation"]
+            assert added["fabrics"][new_index]["index"] == new_index
+
+            assigned = await json_result(rust, "clo_run_python", {
+                "code": f"fabric_api.AssignFabricToPattern({new_index}, 0, 3)",
+            })
+            assert assigned["value"] is True and await assignments() == [new_index, 0]
+            apply = await json_result(rust, "fabric_apply", {"fabric": "cotton", "color": "#224466", "patterns": ["Back"]})
+            back_index = apply["fabric"]["index"]
+            assert await assignments() == [new_index, back_index]
+            bad = await rust.call_tool("clo_api_call", {"name": "fabric_api.AssignFabricToPattern", "args": [new_index, 99, 3]})
+            assert bad.isError and await assignments() == [new_index, back_index]
+            path, updated = await saved("assigned")
+            expected = [mesh | {"fabric_index": index} for mesh, index in
+                        zip(baseline["simulation"]["meshes"], (new_index, back_index), strict=True)]
+            assert updated["simulation"] == baseline["simulation"] | {"meshes": expected}
+
+            await json_result(rust, "scene_open", {"path": str(path)})
+            await json_result(rust, "simulate", {"steps": 0})
+            _, reopened = await saved("reopened")
+            assert reopened["simulation"]["steps"] == 3 and reopened["simulation"]["meshes"] == expected
+            glb = root / "assignment.glb"
+            await json_result(rust, "scene_export", {"path": str(glb)})
+            model, _ = read_gltf_export(glb)
+            material_names = [model["materials"][mesh["primitives"][0]["material"]]["name"] for mesh in model["meshes"]]
+            assert material_names == [updated["fabrics"][index]["name"] for index in (new_index, back_index)]
+    print(json.dumps({"tools": ["fabric_apply", "clo_api_call", "clo_run_python", "simulate", "scene_export"],
+                      "case": "add fabric, assign one panel, preserve drape", "add_kept_assignments": True,
+                      "assigned_indices": [new_index, back_index], "retained_step": 3,
+                      "invalid_assignment_preserved_scene": True, "glb_materials": material_names}))
+
+
 async def verify_fabric_texture_clear():
     with TemporaryDirectory(prefix="clo-clear-texture-") as directory:
         root = Path(directory)
@@ -2990,6 +3047,9 @@ async def verify_mixed_native_append():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     comparisons = parser.add_mutually_exclusive_group()
+    comparisons.add_argument("--verify-fabric-assignment-workflow", action="store_const", dest="comparison",
+                             const=verify_fabric_assignment_workflow,
+                             help="add and assign fabrics separately while retaining a simulated pose")
     comparisons.add_argument("--verify-fabric-texture-clear", action="store_const", dest="comparison",
                              const=verify_fabric_texture_clear,
                              help="clear one fabric map and verify saved scenes and export")
@@ -3139,7 +3199,8 @@ if __name__ == "__main__":
                              const=verify_mixed_native_append,
                              help="verify mixed procedural and native mesh state through append and simulation")
     args = parser.parse_args()
-    if (args.comparison not in (None, verify_fabric_texture_clear, verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
+    if (args.comparison not in (None, verify_fabric_assignment_workflow, verify_fabric_texture_clear,
+                                verify_runtime_pattern_query, verify_runtime_export_workflow, verify_checkpoint_workflow,
                                 verify_native_append, verify_mixed_native_append, verify_tiered_build_relaxation,
                                 verify_one_piece_dress_merge, verify_build_snapshot_workflow,
                                 verify_garment_session_history, verify_build_checkpoints,

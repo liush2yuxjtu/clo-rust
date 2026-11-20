@@ -32,6 +32,13 @@ Set `CLO_TEXTURE_CLEAR_FIXTURE` to a single-colorway `.zprj` or `.zpac` with
 base and normal maps to also check native archive reopen and preservation of the
 other maps. A live CLO reopen is a separate comparison.
 
+Run `--verify-fabric-assignment-workflow` to register a fabric through
+`AddFabric`, then assign it to one panel through Python and apply a different
+fabric to another panel. Check that adding leaves both original assignments
+and the drape intact. Reopen at zero steps, compare positions and velocities,
+and check each GLB mesh's material. Optionally set `CLO_FABRIC_ASSIGN_FIXTURE`
+to the absolute path of a real `.zfab` for the registration step.
+
 For release-download, checksum, or cache changes, use an existing release with the required assets and run `CLO_RUST_RELEASE=<tag> python -m clo_mcp.smoke_release` with GitHub CLI access. The smoke test exercises the actual published download, checksum verification, cache hit, seam audit, and replay through stdio. For new releases, build and test on each target platform, run the binary's `--version`, compute its SHA-256 checksum, and confirm the published tag and assets. Run the release-download smoke test against the published tag.
 
 ### Verify the 48 public CLO MCP tools

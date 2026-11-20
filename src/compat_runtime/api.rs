@@ -1195,8 +1195,7 @@ pub(super) fn invoke(
         "export_api.GetAvatarNameList" => Ok(json!(avatar_names(state))),
         "export_api.GetColorwayNameList" => Ok(state.get("colorways").cloned().unwrap_or_else(|| json!(["Default Colorway"]))),
         "fabric_api.AddFabric" => {
-            let result = domain("fabric_apply", &json!({"fabric":arg[0],"patterns":[]}),state)?;
-            Ok(result.get("fabric_index").or_else(|| result.get("index")).cloned().unwrap_or(json!(current_fabric(state))))
+            domain("__clo_fabric_add", &json!({"fabric":arg[0]}), state)
         }
         "fabric_api.GetCurrentFabricIndex" => Ok(json!(current_fabric(state))),
         "fabric_api.GetFabricCount" => Ok(json!(fabrics.len())),
@@ -1220,11 +1219,7 @@ pub(super) fn invoke(
             Ok(json!(true))
         }
         "fabric_api.AssignFabricToPattern" => {
-            let fabric = index(&arg[0],fabrics.len(),"fabric")?;
-            let pattern = index(&arg[1],patterns.len(),"pattern")?;
-            state["patterns"][pattern]["fabric_index"] = json!(fabric);
-            state["simulation"] = Value::Null;
-            Ok(json!(true))
+            domain("__clo_fabric_assign", &json!({"fabric_index":arg[0],"pattern":pattern_ref(&arg[1])?}), state)
         }
         "fabric_api.SetFabricPBRMaterialBaseColor" => {
             if arg[5].as_f64() != Some(1.0) {

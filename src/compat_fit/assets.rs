@@ -1183,6 +1183,24 @@ pub fn fabric_apply(args: &Value, state: &mut Value) -> Result<Value, String> {
     apply_material(args, state, load_material(string(args, "fabric", ""))?)
 }
 
+pub(super) fn fabric_add(args: &Value, state: &mut Value) -> Result<Value, String> {
+    let (material, _, _) = load_material(string(args, "fabric", ""))?;
+    let preserve_default = array(&state["patterns"]).iter().any(|pattern| {
+        pattern["fabric_index"].as_u64().unwrap_or(0) == 0
+    });
+    Ok(json!(register_material(state, material, preserve_default)?))
+}
+
+pub(super) fn fabric_assign(args: &Value, state: &mut Value) -> Result<Value, String> {
+    let index = args["fabric_index"]
+        .as_u64()
+        .ok_or("fabric_index must be a nonnegative integer")?;
+    find_fabric_mut(state, index)?;
+    let pattern = pattern_index(array(&state["patterns"]), &args["pattern"])?;
+    assign_material(state, &[pattern], index);
+    Ok(json!(true))
+}
+
 pub(super) fn apply_material(
     args: &Value,
     state: &mut Value,
@@ -1216,6 +1234,22 @@ pub(super) fn apply_material(
     let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
         pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&i)
     });
+    let name = material["name"].clone();
+    let index = register_material(state, material, preserve_default)?;
+    assign_material(state, &selected, index);
+    let mut result = json!({"fabric":{"index":index,"name":name},"matched":matched,"file":file,
+        "assigned":{"assigned":vec![true;selected.len()],"patterns":selected}});
+    if let Some(rgb) = rgb {
+        result["rgb"] = json!(rgb);
+        result["color"] = json!({"ok":[true,true,true]});
+    }
+    if base_texture.is_some() {
+        result["texture"] = json!({"ok":true});
+    }
+    Ok(result)
+}
+
+fn register_material(state: &mut Value, mut material: Value, preserve_default: bool) -> Result<u64, String> {
     let fabrics = array_mut(state, "fabrics");
     if fabrics.is_empty() && preserve_default {
         fabrics.push(json!({
@@ -1228,25 +1262,26 @@ pub(super) fn apply_material(
         .iter()
         .filter_map(|f| f["index"].as_u64())
         .max()
-        .map_or(0, |i| i + 1);
+        .map_or(Some(0), |i| i.checked_add(1))
+        .ok_or("fabric index space exhausted")?;
     material["index"] = json!(index);
-    let selected_material = json!({"index":index,"name":material["name"]});
     fabrics.push(material);
-    let patterns = array_mut(state, "patterns");
-    for i in &selected {
-        patterns[*i]["fabric_index"] = json!(index);
-    }
     state["current_fabric"] = json!(index);
-    let mut result = json!({"fabric":selected_material,"matched":matched,"file":file,
-        "assigned":{"assigned":vec![true;selected.len()],"patterns":selected}});
-    if let Some(rgb) = rgb {
-        result["rgb"] = json!(rgb);
-        result["color"] = json!({"ok":[true,true,true]});
+    Ok(index)
+}
+
+fn assign_material(state: &mut Value, selected: &[usize], index: u64) {
+    let patterns = array_mut(state, "patterns");
+    let mut ids = std::collections::HashSet::new();
+    for i in selected {
+        patterns[*i]["fabric_index"] = json!(index);
+        ids.insert(patterns[*i]["id"].clone());
     }
-    if base_texture.is_some() {
-        result["texture"] = json!({"ok":true});
+    if let Some(meshes) = state["simulation"].get_mut("meshes").and_then(Value::as_array_mut) {
+        for mesh in meshes.iter_mut().filter(|mesh| ids.contains(&mesh["id"])) {
+            mesh["fabric_index"] = json!(index);
+        }
     }
-    Ok(result)
 }
 
 fn find_fabric_mut(state: &mut Value, index: u64) -> Result<&mut Value, String> {

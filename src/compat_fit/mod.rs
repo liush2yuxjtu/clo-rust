@@ -29,6 +29,8 @@ pub fn dispatch(name: &str, args: &Value, state: &mut Value) -> Option<Result<Va
         "fabric_library" => Ok(assets::fabric_library(args)),
         "fabric_list" => Ok(assets::fabric_list(state)),
         "fabric_apply" => assets::fabric_apply(args, state),
+        "__clo_fabric_add" => assets::fabric_add(args, state),
+        "__clo_fabric_assign" => assets::fabric_assign(args, state),
         "fabric_set_color" => assets::fabric_set_color(args, state),
         "fabric_set_texture" => assets::fabric_set_texture(args, state),
         "garment_plan_preview" => draft::preview(args, state),
