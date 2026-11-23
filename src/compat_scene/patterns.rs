@@ -264,9 +264,7 @@ fn lines(pattern: &Value) -> Result<Vec<Value>, String> {
     for (line, edge) in split_edges(&points).iter().enumerate() {
         let start = edge[0];
         let end = edge[edge.len() - 1];
-        let length = pattern["native_outline_metrics"][line]["length"]
-            .as_f64()
-            .unwrap_or_else(|| curve_length(edge, flag(pattern, "sampled_polyline", false)));
+        let length = outline_line_length(pattern, line, edge);
         let mid = Point {
             x: (start.x + end.x) / 2.0,
             y: (start.y + end.y) / 2.0,
@@ -314,6 +312,11 @@ fn lines(pattern: &Value) -> Result<Vec<Value>, String> {
         }));
     }
     Ok(result)
+}
+
+pub(super) fn outline_line_length(pattern: &Value, line: usize, edge: &[Point]) -> f64 {
+    pattern["native_outline_metrics"][line]["length"].as_f64()
+        .unwrap_or_else(|| curve_length(edge, flag(pattern, "sampled_polyline", false)))
 }
 
 pub(super) fn pattern_index(state: &Value, reference: &Value) -> Result<usize, String> {
@@ -975,8 +978,16 @@ fn line_properties(pattern: &mut Value, op: &str, args: &Value, on: Option<bool>
                     }
                     if let Some(setting) = entry.get_mut(op).and_then(Value::as_object_mut) {
                         setting.remove(key);
+                        if key == "total_length" {
+                            setting.remove("ratio");
+                        }
                     }
                 }
+            }
+        }
+        if key == "total_length" {
+            if let Some(setting) = properties[&line_key][op].as_object_mut() {
+                setting.remove("ratio");
             }
         }
         properties[&line_key][op][key] = value;

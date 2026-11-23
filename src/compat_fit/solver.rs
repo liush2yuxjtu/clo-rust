@@ -1304,7 +1304,7 @@ fn elastic_constraints(
         }
         let ratio = elastic["total_length"]
             .as_f64()
-            .map_or(all_ratio, |target| target / length);
+            .map_or_else(|| number(elastic, "ratio", all_ratio), |target| target / length);
         let strength = number(elastic, "strength", number(all, "strength", 10.0));
         if !ratio.is_finite() || ratio < 0.0 || !strength.is_finite() || strength < 0.0 {
             return Err("invalid saved elastic length or strength".into());

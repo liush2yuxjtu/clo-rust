@@ -5429,6 +5429,124 @@ async def verify_elastic_parameter_updates():
                       "late_error_kept_enable_and_length": True}))
 
 
+def native_elastic_edges(path):
+    with zipfile.ZipFile(path) as archive:
+        if path.suffix == ".zprj":
+            garment, = [name for name in archive.namelist() if name.endswith(".zpac")]
+            with zipfile.ZipFile(BytesIO(archive.read(garment))) as nested:
+                name, = [name for name in nested.namelist() if name.endswith(".pac")]
+                data = nested.read(name)
+        else:
+            name, = [name for name in archive.namelist() if name.endswith(".pac")]
+            data = archive.read(name)
+
+    def fields(data):
+        count = data[0]
+        lengths = struct.unpack_from(f"<{count}I", data, 1 + 2 * count)
+        offset = 1 + 6 * count
+        result = {}
+        for width, tag, size in zip(data[1:1 + count], data[1 + count:1 + 2 * count], lengths, strict=True):
+            end = offset + width + size
+            result[data[offset:offset + width]] = (tag, data[offset + width:end])
+            offset = end
+        assert offset == len(data)
+        return result
+
+    def items(data):
+        count, tag = struct.unpack_from("<IB", data)
+        assert count > 0 and tag == 22
+        sizes = struct.unpack_from(f"<{count}I", data, 5)
+        offset = 5 + 4 * count
+        for size in sizes:
+            yield fields(data[offset:offset + size])
+            offset += size
+        assert offset == len(data)
+
+    root = fields(data)
+    editor = fields(root[b"mapPatternEditor"][1])
+    panels = fields(editor[b"mapPatternList"][1])
+    panel, = items(panels[b"listPattern"][1])
+    shape = fields(panel[b"mapShape2D"][1])
+    elastic = []
+    for edge in items(shape[b"listLine"][1]):
+        flag = edge.get(b"bRubberBand", (1, bytes([0])))
+        ratio = edge.get(b"fRubberBandRatio", (6, struct.pack("<f", 0.8)))
+        stiffness = edge.get(b"fRubberBandK", (6, struct.pack("<f", 10_000_000.0)))
+        assert flag[0] == 1 and flag[1] in (bytes([0]), bytes([1])) and ratio[0] == stiffness[0] == 6
+        elastic.append((flag[1] == bytes([1]), struct.unpack("<f", ratio[1])[0], struct.unpack("<f", stiffness[1])[0]))
+    return elastic
+
+
+async def compare_live_native_elastic():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    evidence = root / "roundtrip"
+    evidence.mkdir(exist_ok=True)
+    enabled = root / "enabled.zpac"
+    all_edges = root / "all.zpac"
+    disabled = (False, 0.8, 10_000_000.0)
+    shared = (True, 0.16, 23_000_000.0)
+    points = [[0, 0], [140, 0], [140, 160], [0, 160]]
+    cases = (
+        ("disabled-edit", enabled, ".zpac", [disabled, (False, 0.4375, 17_000_000.0), disabled, disabled]),
+        ("shared-length", all_edges, ".zprj", [shared, (True, 0.5, 23_000_000.0), shared, shared]),
+        ("fresh", None, ".zprj", [disabled, (True, 0.4375, 31_000_000.0), disabled, disabled]),
+        ("explicit-zero", enabled, ".zpac", [disabled, (True, 0.0, 0.0), disabled, disabled]),
+    )
+
+    async def edit(session, **args):
+        reply = await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic", "args": args})
+        assert reply == {"index": 0, "op": "elastic", "ok": True}
+
+    async def save(session, path, expected):
+        await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+        actual = native_elastic_edges(path)
+        expected = [(on, struct.unpack("<f", struct.pack("<f", ratio))[0], stiffness)
+                    for on, ratio, stiffness in expected]
+        assert actual == expected, (path, actual, expected)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        results = []
+        try:
+            for label, fixture, suffix, expected in cases:
+                for name, writer in (("official", clo), ("rust", rust)):
+                    if fixture:
+                        await json_result(writer, "scene_open", {"path": str(fixture)})
+                    else:
+                        await json_result(writer, "scene_clear", {"keep_avatar": False})
+                        await json_result(writer, "pattern_create", {"name": "ElasticProbe", "points": points})
+                    if label == "disabled-edit":
+                        await edit(writer, line=1, on=False)
+                        reply = await json_result(writer, "clo_api_call", {
+                            "name": "pattern_api.SetPatternPieceElasticStrength", "args": [0, 1, 17]})
+                        assert reply["value"] is None
+                    elif label == "shared-length":
+                        await edit(writer, line=1, on=True, total_length=80, strength=0)
+                    elif label == "explicit-zero":
+                        await edit(writer, line=1, on=True, total_length="0", strength="0")
+                    else:
+                        await edit(writer, line=1, on=True, total_length=70, strength=31)
+                    output = evidence / f"{label}-{name}{suffix}"
+                    await save(writer, output, expected)
+                    reopened = [(on, ratio, stiffness if on else disabled[2]) for on, ratio, stiffness in expected]
+                    for reader_name, reader in (("official", clo), ("rust", rust)):
+                        opened = await json_result(reader, "scene_open", {"path": str(output)})
+                        assert opened["pattern_count"] == 1, (output, opened)
+                        await save(reader, evidence / f"{output.stem}-opened-{reader_name}.zpac", reopened)
+                    solver = await json_result(rust, "simulate", {"steps": 0})
+                    assert (solver["elastic_constraint_count"] > 0) == any(on and k > 0 for on, _, k in reopened)
+                    results.append({"case": label, "writer": name, "format": suffix, "both_readers": True,
+                                    "elastic_constraint_count": solver["elastic_constraint_count"]})
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"cases": results, "result": "pass"}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -8897,6 +9015,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-calibrated-build-arrangement", action="store_const", dest="comparison",
                              const=verify_calibrated_build_arrangement,
                              help="verify build placement using saved avatar arrangement calibration")
+    comparisons.add_argument("--compare-live-native-elastic", action="store_const", dest="comparison",
+                             const=compare_live_native_elastic,
+                             help="verify native archive elasticity through both writers and readers")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")

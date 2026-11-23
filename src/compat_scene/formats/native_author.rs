@@ -142,9 +142,7 @@ fn panel(
     if ["half_symmetry", "hide", "freeze", "strengthen"]
         .into_iter()
         .any(|field| value[field] == true)
-        || !value["line_properties"]
-            .as_object()
-            .is_none_or(|properties| properties.is_empty())
+        || super::native_elastic::non_elastic(&value["line_properties"]).next().is_some()
         || !array(value, "native_children").is_empty()
     {
         return Err("native authoring cannot preserve these panel properties".into());
@@ -332,6 +330,7 @@ fn panel(
         (b"uiCount", UINT, &ZERO),
         (b"bHalfSymmetric", BOOL, FALSE),
     ])?;
+    let outline = super::native_elastic::update(&Fields::read(&outline)?, value)?.unwrap_or(outline);
     let layer = i32::try_from(value["layer"].as_i64().unwrap_or(0))
         .map_err(|_| "native layer exceeds signed 32-bit range")?;
     let one = 1f32.to_le_bytes();

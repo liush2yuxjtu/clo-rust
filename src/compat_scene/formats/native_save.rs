@@ -3,7 +3,7 @@
 use super::{
     clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, restore_zpac_footer, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
     native_pose::{encode_map, encoded_list, map_list, replace_positions, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_avatar_ids::AvatarIdentities, native_author, native_compose, native_materials, native_recolor, native_textures, write,
+    native_avatar_ids::AvatarIdentities, native_author, native_compose, native_elastic, native_materials, native_recolor, native_textures, write,
 };
 use serde_json::{json, Value};
 use native_textures::{ColorwayTextureEdit, TextureAssets};
@@ -45,9 +45,17 @@ fn hash_except(value: &Value, omitted: &[&str], hash: &mut DefaultHasher) {
     }
 }
 
-fn hash_garment_layout(state: &Value, hash: &mut DefaultHasher) {
+fn hash_garment_layout(state: &Value, hash: &mut DefaultHasher, ignore_elastic: bool) {
     for pattern in super::super::array(state, "patterns") {
-        hash_except(pattern, &["name"], hash);
+        if !ignore_elastic {
+            hash_except(pattern, &["name"], hash);
+            continue;
+        }
+        hash_except(pattern, &["name", "line_properties"], hash);
+        for (index, record) in native_elastic::non_elastic(&pattern["line_properties"]) {
+            index.hash(hash);
+            hash_except(record, &["elastic"], hash);
+        }
     }
     for key in [
         "seams",
@@ -62,19 +70,25 @@ fn hash_garment_layout(state: &Value, hash: &mut DefaultHasher) {
 
 fn layout_fingerprint(state: &Value) -> u64 {
     let mut hash = DefaultHasher::new();
-    hash_garment_layout(state, &mut hash);
+    hash_garment_layout(state, &mut hash, false);
+    hash.finish()
+}
+
+fn garment_fingerprint_inner(state: &Value, ignore_elastic: bool, pose: bool) -> u64 {
+    let mut hash = DefaultHasher::new();
+    hash_garment_layout(state, &mut hash, ignore_elastic);
+    if pose {
+        let simulation = &state["simulation"];
+        hash_except(simulation, &["meshes"], &mut hash);
+        for mesh in super::super::array(simulation, "meshes") {
+            hash_except(mesh, &["name"], &mut hash);
+        }
+    }
     hash.finish()
 }
 
 fn garment_fingerprint(state: &Value) -> u64 {
-    let mut hash = DefaultHasher::new();
-    hash_garment_layout(state, &mut hash);
-    let simulation = &state["simulation"];
-    hash_except(simulation, &["meshes"], &mut hash);
-    for mesh in super::super::array(simulation, "meshes") {
-        hash_except(mesh, &["name"], &mut hash);
-    }
-    hash.finish()
+    garment_fingerprint_inner(state, false, true)
 }
 
 fn fabric_fingerprint(state: &Value) -> u64 {
@@ -222,6 +236,8 @@ pub(in crate::compat_scene) fn remember(state: &mut Value, path: &Path, project:
                 "project": project,
                 "garment": garment_fingerprint(state),
                 "layout": layout_fingerprint(state),
+                "garment_before_elastic": garment_fingerprint_inner(state, true, true),
+                "layout_before_elastic": garment_fingerprint_inner(state, true, false),
                 "fabrics": fabric_fingerprint(state),
                 "assigned_fabrics": assigned_fabric_fingerprint(state),
                 "colorways": colorway_fingerprints(state),
@@ -271,6 +287,8 @@ pub(in crate::compat_scene) fn retained_after_deletion(state: &Value, deleted: &
 pub(in crate::compat_scene) fn remember_panel_deletion(state: &mut Value, retained: Vec<usize>) {
     state[SOURCE]["garment"] = json!(garment_fingerprint(state));
     state[SOURCE]["layout"] = json!(layout_fingerprint(state));
+    state[SOURCE]["garment_before_elastic"] = json!(garment_fingerprint_inner(state, true, true));
+    state[SOURCE]["layout_before_elastic"] = json!(garment_fingerprint_inner(state, true, false));
     state[SOURCE]["assigned_fabrics"] = json!(assigned_fabric_fingerprint(state));
     state[SOURCE]["retained_panels"] = json!(retained);
 }
@@ -475,6 +493,10 @@ fn update_panels(pac: &[u8], state: &Value, pose_count: usize, write_distance: b
             if current.get(b"fEdgeLength", 6)? != bytes {
                 posed = Some(current.replace(b"fEdgeLength", 6, &bytes)?);
             }
+        }
+        let current_record = Fields::read(posed.as_deref().unwrap_or_else(|| record.encoded()))?;
+        if let Some(updated) = native_elastic::update_panel(&current_record, panel)? {
+            posed = Some(updated);
         }
         current += 1;
         let element = record.map(b"mapElement")?;
@@ -1170,9 +1192,12 @@ pub(in crate::compat_scene) fn encode(
                 && verify_colorway_materials(state, source, &recolors, &texture_edits)
     };
     let changed_garment = source["garment"].as_u64() != Some(garment_fingerprint(state));
-    let write_pose = changed_garment && parts.is_empty() && !empty_append
-        && source["layout"].as_u64() == Some(layout_fingerprint(state));
-    if draft.is_none() && (changed_garment && !write_pose || !can_save_materials) {
+    let only_elastic = changed_garment
+        && source["garment_before_elastic"].as_u64() == Some(garment_fingerprint_inner(state, true, true));
+    let write_pose = changed_garment && !only_elastic && parts.is_empty() && !empty_append
+        && (source["layout"].as_u64() == Some(layout_fingerprint(state))
+            || source["layout_before_elastic"].as_u64() == Some(garment_fingerprint_inner(state, true, false)));
+    if draft.is_none() && (changed_garment && !only_elastic && !write_pose || !can_save_materials) {
         return Err("native save requires the original layout, with compatible pose, name and fabric edits".into());
     }
     let original = read_source(source)?;

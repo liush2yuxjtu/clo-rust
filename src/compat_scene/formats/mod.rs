@@ -5,6 +5,7 @@ mod native_materials;
 mod native_author;
 mod native_compose;
 mod native_avatar_ids;
+mod native_elastic;
 pub(super) mod native_fabric;
 mod native_pose;
 mod native_recolor;

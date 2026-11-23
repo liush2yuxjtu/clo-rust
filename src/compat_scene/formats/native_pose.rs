@@ -379,6 +379,9 @@ pub(super) fn restore_panel_settings(pac: &[u8], panels: &mut [Value]) -> Result
         if let Some(children) = child_shapes(record) {
             panel["native_children"] = json!(children);
         }
+        if let Ok(outline) = record.map(b"mapShape2D") {
+            super::native_elastic::restore(&outline, panel)?;
+        }
     }
     Ok(())
 }

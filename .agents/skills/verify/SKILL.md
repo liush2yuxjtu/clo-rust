@@ -913,6 +913,19 @@ Check that numeric zero skips the optional public elastic parameters, while
 a string zero or an explicit API setter stores zero. An invalid strength
 after valid enable and length settings retains those completed changes.
 
+Run `--compare-live-native-elastic` with `CLO_NATIVE_ELASTIC_DIR` pointing
+to a directory visible to both backends. In CLO, create `ElasticProbe` with
+vertices `(0,0)`, `(140,0)`, `(140,160)`, `(0,160)`. Set `elastic` on line
+`1` with `total_length=70` and `strength=31`, and save `enabled.zpac`.
+Set `elastic` on line `-1` with `total_length=96` and `strength=23`, and
+save `all.zpac`. Keep both fixture hashes. The verifier saves ZPAC and ZPRJ
+from both backends, then reopens each in both readers and inspects the
+archived enable flag, length ratio, and stiffness for each edge. Check the
+disabled edge's ratio across reopen and its return to default stiffness.
+Check per-edge overrides after a whole-perimeter setting, explicit string
+zero, and an archive authored from a fresh panel. Rust zero-step readback
+checks that only enabled edges with positive stiffness generate constraints.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the
