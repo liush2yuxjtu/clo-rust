@@ -5855,6 +5855,132 @@ async def compare_live_native_gravity():
                       "free_fall_mm": results}))
 
 
+def native_project_simulation(path):
+    def fields(data):
+        count = data[0]
+        lengths = struct.unpack_from(f"<{count}I", data, 1 + 2 * count)
+        offset = 1 + 6 * count
+        result = {}
+        for width, size in zip(data[1:1 + count], lengths, strict=True):
+            result[data[offset:offset + width]] = data[offset + width:offset + width + size]
+            offset += width + size
+        assert offset == len(data)
+        return result
+
+    def settings(data):
+        root = fields(data)
+        p = fields(root[b"mapDeforMarvelProperty"])
+        return {"profile": root[b"qsSpName2UTF8"].decode(), "dt": struct.unpack("<f", root[b"fEntireTimeStep"])[0],
+                "substeps": struct.unpack("<I", root[b"uiSubStepCount"])[0],
+                "gravity": struct.unpack("<f", p[b"fGravity_y"])[0],
+                "ground": p[b"bGroundCollisionHandling"] == bytes([1]), "height": struct.unpack("<f", p[b"fGroundHeight"])[0]}
+
+    def embedded(archive):
+        name, = [name for name in archive.namelist() if name.endswith(".pac")]
+        return settings(fields(archive.read(name))[b"mapSMP"])
+
+    with zipfile.ZipFile(path) as archive:
+        if path.suffix == ".zpac":
+            return embedded(archive)
+        name, = [name for name in archive.namelist() if name.endswith(".smp")]
+        result = settings(archive.read(name))
+        garment, = [name for name in archive.namelist() if name.endswith(".zpac")]
+        with zipfile.ZipFile(BytesIO(archive.read(garment))) as zipped_garment:
+            assert embedded(zipped_garment) == result, path
+        return result
+
+
+async def compare_live_native_project_simulation():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    source = root / "enabled.zpac"
+    project = root / "ground-height" / "profile-2.zprj"
+    out = root / "project-simulation-verification"
+    out.mkdir(exist_ok=True)
+    setter = "utility_api.SetSimulationGroundHeight"
+    expected = {"profile": "Nonlinear", "dt": struct.unpack("<f", struct.pack("<f", 0.02))[0],
+                "substeps": 8, "gravity": -4900, "ground": False, "height": 12.5}
+    evidence = []
+
+    async def call(session, name, value):
+        reply = await json_result(session, "clo_api_call", {"name": name, "args": [value]})
+        assert reply == {"name": name, "value": None}
+
+    async def save(session, target):
+        await json_result(session, "scene_save", {"path": str(target), "thumbnail": False})
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        try:
+            for backend, session in (("official", clo), ("rust", rust)):
+                assert await json_result(session, "clo_api_describe", {"name": setter}) == {
+                    "name": setter, "doc": "SetSimulationGroundHeight(arg0: float) -> None", "members": []}
+                for starting in (source, project):
+                    await json_result(session, "scene_open", {"path": str(starting)})
+                    await json_result(session, "simulate", {"steps": 0, "quality": 2})
+                    for label, value in (("TimeStep", 0.02), ("NumberOfSimulation", 8),
+                                         ("Gravity", -4900), ("GroundCollision", False)):
+                        await call(session, f"utility_api.SetSimulation{label}", value)
+                    assert await json_result(session, "clo_run_python", {"code": f"{setter}(12.5)"}) == {
+                        "value": None, "stdout": ""}
+                    for args in ([], [None], ["12.5"]):
+                        result = await session.call_tool("clo_api_call", {"name": setter, "args": args})
+                        assert result.isError, (backend, args)
+                    target = out / f"{backend}-{starting.suffix[1:]}.zprj"
+                    await save(session, target)
+                    assert native_project_simulation(target) == expected, target
+                    for reader_label, other in (("official", clo), ("rust", rust)):
+                        await json_result(other, "scene_open", {"path": str(target)})
+                        quality = (await json_result(other, "clo_api_call", {"name": "utility_api.GetSimulationQuality"}))["value"]
+                        assert quality == [2, 0], (target, reader_label, quality)
+                        reopened = out / f"{target.stem}-reopened-{reader_label}.zprj"
+                        await save(other, reopened)
+                        assert native_project_simulation(reopened) == expected, reopened
+                    evidence.append({"writer": backend, "original_format": starting.suffix, "both_readers": True})
+
+                standalone = out / f"{backend}-standalone.zpac"
+                await save(session, standalone)
+                assert native_project_simulation(standalone) == expected
+                for reader_label, other in (("official", clo), ("rust", rust)):
+                    await json_result(other, "scene_open", {"path": str(source)})
+                    api = {"name": "utility_api.GetSimulationQuality"}
+                    assert (await json_result(other, "clo_api_call", api))["value"] == [4, 0]
+                    await json_result(other, "scene_open", {"path": str(standalone)})
+                    assert (await json_result(other, "clo_api_call", api))["value"] == [2, 0]
+                    await json_result(other, "scene_open", {"path": str(source), "mode": "append"})
+                    assert (await json_result(other, "clo_api_call", api))["value"] == [2, 0]
+                    reopened = out / f"{backend}-append-{reader_label}.zpac"
+                    await save(other, reopened)
+                    assert native_project_simulation(reopened) == expected, reopened
+                evidence.append({"writer": backend, "standalone_and_append": True})
+
+                for label, setup, minimum in (("raised", 12.5, 14.0), ("lowered", -2, -0.5), ("reset", 12.5, 1.5)):
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    quality = {"steps": 0, "quality": 0}
+                    await json_result(session, "simulate", quality)
+                    await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic",
+                                                               "args": {"line": 1, "on": False}})
+                    await call(session, setter, setup)
+                    if label == "reset":
+                        await json_result(session, "simulate", quality)
+                    await json_result(session, "simulate", {"steps": 1})
+                    pose = out / f"{backend}-{label}.zpac"
+                    await save(session, pose)
+                    await json_result(reader, "scene_open", {"path": str(pose)})
+                    meshes, _ = await snapshot_composed_archive(reader, pose.with_suffix(".clorust"))
+                    floor = min(vertex[1] for mesh in meshes for vertex in mesh["positions"])
+                    assert abs(floor - minimum) < 0.001, (backend, label, floor)
+                    evidence.append({"backend": backend, "contact_case": label, "min_y_mm": floor})
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+            await json_result(clo, "simulate", {"steps": 0, "quality": 0})
+    print(json.dumps({"native_project_simulation": "pass", "evidence": evidence}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -9338,6 +9464,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-native-gravity", action="store_const", dest="comparison",
                              const=compare_live_native_gravity,
                              help="compare vertical acceleration and CPU quality substep presets")
+    comparisons.add_argument("--compare-live-native-project-simulation", action="store_const", dest="comparison",
+                             const=compare_live_native_project_simulation,
+                             help="compare ground height and simulation settings saved in native projects")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")

@@ -3,7 +3,8 @@
 use super::{
     clo_native::{avatar_members, avatar_payload, bounded_file, member, open_archive, optional_member, restore_zpac_footer, ARCHIVE_LIMIT, AVT, ZPAC, ZPRJ},
     native_pose::{encode_map, encoded_list, map_list, replace_positions, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE},
-    native_avatar_ids::AvatarIdentities, native_author, native_compose, native_elastic, native_materials, native_recolor, native_textures, write,
+    native_avatar_ids::AvatarIdentities, native_author, native_compose, native_elastic, native_materials, native_recolor,
+    native_simulation, native_textures, write,
 };
 use serde_json::{json, Value};
 use native_textures::{ColorwayTextureEdit, TextureAssets};
@@ -730,6 +731,7 @@ fn archive_members<'a>(members: impl IntoIterator<Item = (&'a str, &'a [u8])>) -
 
 fn authored_garment(state: &Value, composable: bool) -> Result<Vec<u8>, String> {
     let native_author::Garment { body, images } = native_author::encode(state, composable)?;
+    let body = native_simulation::update_garment(&body, state)?.unwrap_or(body);
     let manifest = serde_json::to_vec(&std::iter::once("garment.pac")
         .chain(images.keys().map(String::as_str)).map(|name| (name, name))
         .collect::<std::collections::BTreeMap<_, _>>()).map_err(|error| error.to_string())?;
@@ -842,6 +844,16 @@ fn native_project(garment: Option<&[u8]>, state: &Value, thumbnail: bool) -> Res
     if let Some(garment) = garment {
         manifest.insert(GARMENT.into(), json!(GARMENT));
         members.push((GARMENT, garment));
+    }
+    let settings = if native_simulation::has_overrides(state) {
+        Some(native_simulation::encode(None, state)?)
+    } else {
+        None
+    };
+    if let Some(settings) = &settings {
+        let name = native_simulation::FILE_NAME;
+        manifest.insert(name.into(), json!(name));
+        members.push((name, settings));
     }
     let manifest = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
     members.push(("clofiles.json", &manifest));
@@ -1233,7 +1245,9 @@ pub(in crate::compat_scene) fn encode(
     } else {
         0
     };
-    let panel_edits = update_panels(&pac, state, pose_count, draft.is_some())?;
+    let simulation_edits = native_simulation::update_garment(&pac, state)?;
+    let panel_edits = update_panels(simulation_edits.as_deref().unwrap_or(&pac), state, pose_count, draft.is_some())?
+        .or(simulation_edits);
     let (edited, assets) = if !parts.is_empty() || empty_append || draft.is_some() {
         (Some(panel_edits.unwrap_or(pac)), appended_assets)
     } else if write_colorways {
@@ -1293,13 +1307,37 @@ pub(in crate::compat_scene) fn encode(
         native_project(Some(&garment), state, thumbnail)?
     } else if project {
         let avatar_changed = source["avatars"].as_u64() != Some(avatar_fingerprint(state));
-        let avatar_assets = if avatar_changed {
+        let mut assets = if avatar_changed {
             project_avatar_edits(&original, state)?
         } else {
             TextureAssets::default()
         };
-        let project_bytes = if has_edits || avatar_changed {
-            rewrite_archive(&original, ZPRJ, Some((b".zpac", &garment)), avatar_assets)?
+        let mut settings_changed = false;
+        if native_simulation::has_overrides(state) {
+            let mut project = open_archive(Cursor::new(&original), ZPRJ)?;
+            if let Some((name, bytes)) = optional_member(&mut project, "smp")? {
+                let updated = native_simulation::encode(Some(&bytes), state)?;
+                if updated != bytes {
+                    assets.replaced.insert(name, updated);
+                    settings_changed = true;
+                }
+            } else {
+                let name = optional_member(&mut project, "osw")?
+                    .and_then(|(name, _)| name.rsplit_once('.').map(|(base, _)| format!("{base}.smp")))
+                    .unwrap_or_else(|| native_simulation::FILE_NAME.into());
+                assets.added.insert(name, native_simulation::encode(None, state)?);
+                settings_changed = true;
+            }
+            if let Some((name, data)) = optional_member(&mut project, "xml")? {
+                if let Some(updated) = native_simulation::update_environment(&data, state) {
+                    assets.replaced.insert(name, updated);
+                    settings_changed = true;
+                }
+            }
+        }
+        let project_bytes = if has_edits || avatar_changed || settings_changed {
+            let replacement = has_edits.then_some((b".zpac".as_slice(), garment.as_slice()));
+            rewrite_archive(&original, ZPRJ, replacement, assets)?
         } else {
             original
         };

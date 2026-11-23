@@ -561,6 +561,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                         empty["project"] = json!("NULL");
                         empty["project_path"] = json!("NULL");
                         replace_scene(state, empty);
+                        formats::native_simulation::restore(state, None, &Value::Null);
                         return Ok(Some(open_reply(state, path)));
                     }
                     SceneGarment::Loaded { garment, intact: source_intact } => {
@@ -576,6 +577,7 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 if !append {
                     replace_scene(state, empty_project());
                     set_project(state, path);
+                    formats::native_simulation::restore(state, is_project.then_some(path), &Value::Null);
                 }
                 import_project_avatar(state, avatars, append);
                 return Ok(Some(open_reply(state, path)));
@@ -596,6 +598,9 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
+            if !append {
+                formats::native_simulation::restore(state, is_project.then_some(path), &loaded["native_simulation"]);
+            }
             if append {
                 vec_mut(state, "fabrics").extend(fabrics);
                 state["current_fabric"] = json!(0);

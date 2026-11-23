@@ -961,6 +961,16 @@ CPU preset restores the default acceleration. The native default is
 override and use one substep as a control. Compare each backend's three
 archived samples and retain the remaining distance differences.
 
+Run `--compare-live-native-project-simulation` with `enabled.zpac` and a
+native `ground-height/profile-2.zprj` saved from it after selecting CPU
+quality 2. Use a new output directory for the two writers and readers.
+Inspect the simulation record embedded in the garment and the ZPRJ's SMP
+member. Both must store the same profile, time step, substeps, gravity,
+ground switch and ground height. Reopen and resave on both backends so
+the native Environment XML cannot silently override the ground fields.
+Check standalone ZPAC replacement and append, and step the fixture against
+raised, lowered and reset ground planes.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the

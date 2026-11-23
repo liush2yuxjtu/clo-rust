@@ -530,6 +530,7 @@ fn parse(pac: &[u8]) -> Result<Option<Value>, String> {
         "patterns": patterns, "seams": sewing.constraints,
         "native_seam_groups": sewing.annotations, "native_import": native_import,
         "saved_pose": pose, "fabrics": fabrics,
+        "native_simulation": super::native_simulation::garment_settings(pac),
         "colorways": colorways.as_ref().map(|(names, _)| names),
         "current_colorway": colorways.map(|(_, current)| current)
     })))

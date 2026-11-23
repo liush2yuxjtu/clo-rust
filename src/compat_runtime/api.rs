@@ -601,6 +601,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Set vertical acceleration in millimetres per second squared."
     ),
     (
+        "utility_api.SetSimulationGroundHeight",
+        "(arg0)",
+        "Set the ground plane height in millimetres."
+    ),
+    (
         "utility_api.SetZoomView",
         "(zoom=None)",
         "Set the workbench zoom."
@@ -688,6 +693,7 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.SetSimulationTimeStep" => Some("SetSimulationTimeStep(arg0: float) -> None"),
         "utility_api.SetSimulationNumberOfSimulation" => Some("SetSimulationNumberOfSimulation(arg0: int) -> None"),
         "utility_api.SetSimulationGravity" => Some("SetSimulationGravity(arg0: float) -> None"),
+        "utility_api.SetSimulationGroundHeight" => Some("SetSimulationGroundHeight(arg0: float) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1589,11 +1595,11 @@ pub(super) fn invoke(
             state["runtime"]["simulation_ground_collision"] = json!(enabled);
             Ok(Value::Null)
         }
-        "utility_api.SetSimulationTimeStep" | "utility_api.SetSimulationGravity" => {
-            let (setting, label) = if name == "utility_api.SetSimulationTimeStep" {
-                ("simulation_time_step", "time step")
-            } else {
-                ("simulation_gravity", "gravity")
+        "utility_api.SetSimulationTimeStep" | "utility_api.SetSimulationGravity" | "utility_api.SetSimulationGroundHeight" => {
+            let (setting, label) = match name {
+                "utility_api.SetSimulationTimeStep" => ("simulation_time_step", "time step"),
+                "utility_api.SetSimulationGravity" => ("simulation_gravity", "gravity"),
+                _ => ("simulation_ground_height", "ground height"),
             };
             let value = arg[0].as_f64().or_else(|| arg[0].as_bool().map(|value| f64::from(u8::from(value))))
                 .map(|value| value as f32).filter(|value| value.is_finite())
@@ -1653,6 +1659,7 @@ fn returns_none(name: &str) -> bool {
             | "utility_api.SetSimulationTimeStep"
             | "utility_api.SetSimulationNumberOfSimulation"
             | "utility_api.SetSimulationGravity"
+            | "utility_api.SetSimulationGroundHeight"
             | "utility_api.SetZoomView"
     )
 }

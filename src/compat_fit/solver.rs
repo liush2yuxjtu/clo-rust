@@ -1501,6 +1501,7 @@ pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result
             runtime.remove("simulation_ground_collision");
             runtime.remove("simulation_substeps");
             runtime.remove("simulation_gravity");
+            runtime.remove("simulation_ground_height");
         }
     }
     Ok(())
@@ -1687,7 +1688,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let colliders = [primary_triangles.as_ref(), additional_triangles.as_ref()];
     let flat_scene = primary_avatar.is_null() && array(&state["additional_avatars"]).is_empty();
     let ground_collision = state["runtime"]["simulation_ground_collision"].as_bool().unwrap_or(true);
-    let ground_height = if flat_scene { 1.5 } else { 2.0 };
+    let ground_height = state["runtime"]["simulation_ground_height"].as_f64()
+        .map_or(if flat_scene { 1.5 } else { 2.0 }, |height| height + 1.5);
     let body = if primary_triangles.is_some() {
         &Value::Null
     } else {

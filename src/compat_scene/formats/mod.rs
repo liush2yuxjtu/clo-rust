@@ -10,6 +10,7 @@ pub(super) mod native_fabric;
 mod native_pose;
 mod native_recolor;
 pub(super) mod native_save;
+pub(super) mod native_simulation;
 mod native_textures;
 mod native_seams;
 
