@@ -926,6 +926,16 @@ Check per-edge overrides after a whole-perimeter setting, explicit string
 zero, and an archive authored from a fresh panel. Rust zero-step readback
 checks that only enabled edges with positive stiffness generate constraints.
 
+Run `--compare-live-elastic-motion` with the same `enabled.zpac` on both
+backends. Verify `SetSimulationGroundCollision` through typed calls and
+Python, then compare the exported 114-vertex poses with the plane enabled
+and disabled. In the avatar-free fixture, enabled contact holds the lowest
+vertex at 1.5 mm on the first step. With contact disabled it passes below zero.
+Read back the nine samples on the elastic edge at steps 0, 1, 5, and 20.
+Keep the segment sum and the endpoint distance in the report so folding
+and actual edge contraction are visible separately. The report records the
+trajectory delta alongside the ground-control verdict.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the

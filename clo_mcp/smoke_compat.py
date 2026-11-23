@@ -5547,6 +5547,78 @@ async def compare_live_native_elastic():
     print(json.dumps({"cases": results, "result": "pass"}))
 
 
+async def compare_live_elastic_motion():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    source = root / "enabled.zpac"
+    out = root / "motion-verification"
+    out.mkdir(exist_ok=True)
+    setter = "utility_api.SetSimulationGroundCollision"
+    signature = "SetSimulationGroundCollision(arg0: bool) -> None"
+    results = {}
+
+    async def geometry(session, reader, label):
+        path = out / f"{label}.zpac"
+        await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+        opened = await json_result(reader, "scene_open", {"path": str(path)})
+        assert opened["pattern_count"] == 1
+        portable = path.with_suffix(".clorust")
+        await json_result(reader, "scene_save", {"path": str(portable), "thumbnail": False})
+        mesh, = json.loads(portable.read_text())["scene"]["simulation"]["meshes"]
+        right = max(uv[0] for uv in mesh["texcoords"])
+        edge = sorted((uv[1], xyz) for uv, xyz in zip(mesh["texcoords"], mesh["positions"], strict=True)
+                      if abs(uv[0] - right) < 0.001)
+        assert len(mesh["positions"]) == 114 and len(edge) == 9
+        return {"edge_length_mm": sum(math.dist(a[1], b[1]) for a, b in zip(edge, edge[1:])),
+                "endpoint_span_mm": math.dist(edge[0][1], edge[-1][1]),
+                "min_y_mm": min(p[1] for p in mesh["positions"])}
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        try:
+            for name, session in (("official", clo), ("rust", rust)):
+                description = await json_result(session, "clo_api_describe", {"name": setter})
+                assert description == {"name": setter, "doc": signature, "members": []}
+                for value in (False, True, 0, 1, 2, None):
+                    reply = await json_result(session, "clo_api_call", {"name": setter, "args": [value]})
+                    assert reply == {"name": setter, "value": None}
+                for args in ([], ["false"]):
+                    result = await session.call_tool("clo_api_call", {"name": setter, "args": args})
+                    assert result.isError, (name, args)
+                rows = {}
+                for label, elastic, ground in (("control", False, True), ("elastic", True, True), ("free", False, False)):
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic",
+                                                               "args": {"line": 1, "on": elastic}})
+                    await json_result(session, "simulate", {"steps": 0, "quality": 0})
+                    reply = await json_result(session, "clo_run_python", {"code": f"{setter}({ground})"})
+                    assert reply == {"value": None, "stdout": ""}
+                    trajectory = {0: await geometry(session, reader, f"{name}-{label}-0")}
+                    assert abs(trajectory[0]["edge_length_mm"] - 160.0) < 0.001
+                    times = ((1, 1), (5, 4), (20, 15)) if ground else ((1, 1),)
+                    for time, advance in times:
+                        outcome = await json_result(session, "simulate", {"steps": advance})
+                        assert outcome["ok"] is True and outcome["steps"] == advance
+                        frame = await geometry(session, reader, f"{name}-{label}-{time}")
+                        assert frame["min_y_mm"] >= 1.499 if ground else frame["min_y_mm"] < 0.0, (name, label, frame)
+                        trajectory[time] = frame
+                    rows[label] = trajectory
+                assert abs(rows["control"][1]["min_y_mm"] - 1.5) < 0.001
+                assert rows["elastic"][20]["edge_length_mm"] < rows["control"][20]["edge_length_mm"]
+                results[name] = rows
+        finally:
+            await json_result(clo, "clo_run_python", {"code": f"{setter}(True)"})
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    delta = max(abs(results["official"]["elastic"][time]["edge_length_mm"] -
+                    results["rust"]["elastic"][time]["edge_length_mm"]) for time in (1, 5, 20))
+    print(json.dumps({"ground_control": "pass", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                      "max_elastic_trajectory_delta_mm": delta, "observations": results}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -9018,6 +9090,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-native-elastic", action="store_const", dest="comparison",
                              const=compare_live_native_elastic,
                              help="verify native archive elasticity through both writers and readers")
+    comparisons.add_argument("--compare-live-elastic-motion", action="store_const", dest="comparison",
+                             const=compare_live_elastic_motion,
+                             help="compare ground contact and measure the elastic-edge trajectory on the same mesh")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")

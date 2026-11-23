@@ -581,6 +581,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Set the subsequent simulation quality."
     ),
     (
+        "utility_api.SetSimulationGroundCollision",
+        "(enabled)",
+        "Enable or disable the ground plane in subsequent simulation steps."
+    ),
+    (
         "utility_api.SetZoomView",
         "(zoom=None)",
         "Set the workbench zoom."
@@ -664,6 +669,7 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.GetSimulationQuality" => Some("GetSimulationQuality() -> Tuple[int, int]"),
         "utility_api.SetCurrentColorwayIndex" => Some("SetCurrentColorwayIndex(arg0: int) -> None"),
         "utility_api.SetSimulationQuality" => Some("SetSimulationQuality(arg0: int, arg1: int) -> None"),
+        "utility_api.SetSimulationGroundCollision" => Some("SetSimulationGroundCollision(arg0: bool) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1555,6 +1561,16 @@ pub(super) fn invoke(
             crate::compat_fit::set_simulation_quality(state, &arg[0])?;
             Ok(Value::Null)
         }
+        "utility_api.SetSimulationGroundCollision" => {
+            let enabled = match &arg[0] {
+                Value::Bool(value) => *value,
+                Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+                Value::Null => false,
+                _ => return Err("ground collision requires a boolean".into()),
+            };
+            state["runtime"]["simulation_ground_collision"] = json!(enabled);
+            Ok(Value::Null)
+        }
         "utility_api.SetZoomView" => {
             let zoom = if arg[0].is_null() {1.0} else {arg[0].as_f64().filter(|value| *value > 0.0).ok_or("Zoom must be positive")?};
             state["runtime"]["ui"]["zoom"] = json!(zoom.clamp(0.2,6.0));
@@ -1597,6 +1613,7 @@ fn returns_none(name: &str) -> bool {
             | "utility_api.ResetClothArrangement"
             | "utility_api.SetCamViewPoint"
             | "utility_api.SetSimulationQuality"
+            | "utility_api.SetSimulationGroundCollision"
             | "utility_api.SetZoomView"
     )
 }

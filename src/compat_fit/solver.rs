@@ -1138,7 +1138,6 @@ fn project_ellipse(p: &mut Point, radii: Point2) {
 }
 
 fn project_proxy(p: &mut Point, body: &Value, proxies: &[Proxy]) {
-    p[1] = p[1].max(2.0);
     if body.is_null() {
         return;
     }
@@ -1676,6 +1675,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     );
     let colliders = [primary_triangles.as_ref(), additional_triangles.as_ref()];
     let flat_scene = primary_avatar.is_null() && array(&state["additional_avatars"]).is_empty();
+    let ground_collision = state["runtime"]["simulation_ground_collision"].as_bool().unwrap_or(true);
     let body = if primary_triangles.is_some() {
         &Value::Null
     } else {
@@ -1784,11 +1784,14 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             }
             for (i, (p, &weight)) in positions.iter_mut().zip(&weights).enumerate() {
                 if weight > 0.0 {
+                    if ground_collision && !flat_scene {
+                        p[1] = p[1].max(2.0);
+                    }
                     project_proxy(p, body, &proxies);
                     if use_mesh_collision {
                         contacts += reserve_contact(start_of_iteration[i], p, i);
                     }
-                    if flat_scene {
+                    if ground_collision && flat_scene {
                         p[1] = p[1].max(1.5);
                     }
                 }
