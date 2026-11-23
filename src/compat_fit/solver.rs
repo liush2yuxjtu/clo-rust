@@ -1491,6 +1491,10 @@ pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result
     }
     if (0..=2).contains(&quality) {
         state["runtime"]["quality"] = json!(quality);
+        if let Some(runtime) = state["runtime"].as_object_mut() {
+            runtime.remove("simulation_time_step");
+            runtime.remove("simulation_ground_collision");
+        }
     }
     Ok(())
 }
@@ -1676,6 +1680,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
     let colliders = [primary_triangles.as_ref(), additional_triangles.as_ref()];
     let flat_scene = primary_avatar.is_null() && array(&state["additional_avatars"]).is_empty();
     let ground_collision = state["runtime"]["simulation_ground_collision"].as_bool().unwrap_or(true);
+    let ground_height = if flat_scene { 1.5 } else { 2.0 };
     let body = if primary_triangles.is_some() {
         &Value::Null
     } else {
@@ -1710,7 +1715,8 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         2 => 12,
         _ => 4,
     };
-    let dt = 1.0 / 30.0;
+    let dt = state["runtime"]["simulation_time_step"].as_f64().unwrap_or(1.0 / 30.0).max(0.001);
+    let half_gravity_step = 0.5 * 9810.0 * dt;
     let mut contacts = 0usize;
     let use_mesh_collision = colliders.iter().any(Option::is_some);
     let frictions: Vec<_> = if use_mesh_collision {
@@ -1758,7 +1764,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 *v = [0.0; 3];
                 continue;
             }
-            v[1] -= 9810.0 * dt;
+            v[1] -= half_gravity_step;
             for i in 0..3 {
                 p[i] += v[i] * dt;
             }
@@ -1785,21 +1791,29 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             for (i, (p, &weight)) in positions.iter_mut().zip(&weights).enumerate() {
                 if weight > 0.0 {
                     if ground_collision && !flat_scene {
-                        p[1] = p[1].max(2.0);
+                        p[1] = p[1].max(ground_height);
                     }
                     project_proxy(p, body, &proxies);
                     if use_mesh_collision {
                         contacts += reserve_contact(start_of_iteration[i], p, i);
                     }
                     if ground_collision && flat_scene {
-                        p[1] = p[1].max(1.5);
+                        p[1] = p[1].max(ground_height);
                     }
                 }
             }
         }
-        for ((p, prev), v) in positions.iter().zip(&old).zip(velocities.iter_mut()) {
+        for (((p, prev), v), weight) in positions.iter().zip(&old).zip(velocities.iter_mut()).zip(&weights) {
+            if *weight == 0.0 {
+                continue;
+            }
             let delta = sub(*p, *prev);
-            *v = delta.map(|x| (x / dt * 0.84).clamp(-1800.0, 1800.0));
+            let mut corrected = delta.map(|axis| axis / dt);
+            corrected[1] -= half_gravity_step;
+            if ground_collision && p[1] <= ground_height {
+                corrected[1] = corrected[1].max(0.0);
+            }
+            *v = corrected.map(|axis| (axis * 0.84).clamp(-1800.0, 1800.0));
         }
     }
     let gap = seam_constraints

@@ -5619,6 +5619,92 @@ async def compare_live_elastic_motion():
                       "max_elastic_trajectory_delta_mm": delta, "observations": results}))
 
 
+async def compare_live_native_time_step():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    source = root / "enabled.zpac"
+    out = root / "time-step-verification"
+    out.mkdir(exist_ok=True)
+    clock = "utility_api.SetSimulationTimeStep"
+    ground = "utility_api.SetSimulationGroundCollision"
+    results = {}
+
+    async def average_height(session, reader, label):
+        archive = out / f"{label}.zpac"
+        await json_result(session, "scene_save", {"path": str(archive), "thumbnail": False})
+        await json_result(reader, "scene_open", {"path": str(archive)})
+        portable = archive.with_suffix(".clorust")
+        await json_result(reader, "scene_save", {"path": str(portable), "thumbnail": False})
+        mesh, = json.loads(portable.read_text())["scene"]["simulation"]["meshes"]
+        y = [position[1] for position in mesh["positions"]]
+        assert len(y) == 114
+        return math.fsum(y) / len(y), min(y)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        try:
+            for label, session in (("official", clo), ("rust", rust)):
+                async def call(name, value):
+                    reply = await json_result(session, "clo_api_call", {"name": name, "args": [value]})
+                    assert reply == {"name": name, "value": None}
+
+                async def reset():
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic",
+                                                               "args": {"line": 1, "on": False}})
+                    await json_result(session, "simulate", {"steps": 0, "quality": 0})
+
+                assert await json_result(session, "clo_api_describe", {"name": clock}) == {
+                    "name": clock, "doc": "SetSimulationTimeStep(arg0: float) -> None", "members": []}
+                for value in (1, True):
+                    await call(clock, value)
+                values = {}
+                for name, dt in (("default", None), ("small", 0.01), ("medium", 0.02), ("large", 0.04),
+                                 ("minimum", 0.001), ("zero", 0), ("negative", -0.01), ("quality-reset", 0.01)):
+                    await reset()
+                    await call(ground, False)
+                    if dt is not None:
+                        if name == "medium":
+                            actual = await json_result(session, "clo_run_python", {"code": f"{clock}({dt})"})
+                            assert actual == {"value": None, "stdout": ""}
+                            for args in ([], ["0.03"], [None]):
+                                invalid = await session.call_tool("clo_api_call", {"name": clock, "args": args})
+                                assert invalid.isError, (label, args)
+                        else:
+                            await call(clock, dt)
+                    if name == "quality-reset":
+                        await json_result(session, "simulate", {"steps": 1, "quality": 0})
+                        _, floor = await average_height(session, reader, f"{label}-restored-floor")
+                        assert abs(floor - 1.5) < 0.001
+                        await reset()
+                        await call(clock, dt)
+                        await json_result(session, "simulate", {"steps": 0, "quality": 0})
+                        await call(ground, False)
+                    start, _ = await average_height(session, reader, f"{label}-{name}-0")
+                    steps = (1, 2, 3) if name == "default" else (1,)
+                    drops = []
+                    for step in steps:
+                        reply = await json_result(session, "simulate", {"steps": 1})
+                        assert reply["ok"] and reply["steps"] == 1
+                        height, _ = await average_height(session, reader, f"{label}-{name}-{step}")
+                        drops.append(start - height)
+                    values[name] = drops
+                assert abs(values["medium"][0] / values["small"][0] - 4) < 0.01
+                assert abs(values["large"][0] / values["medium"][0] - 4) < 0.01
+                assert abs(values["default"][0] - values["quality-reset"][0]) < 0.001
+                assert all(abs(values[case][0] - values["minimum"][0]) < 0.0001 for case in ("zero", "negative"))
+                results[label] = values
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+            await json_result(clo, "simulate", {"steps": 0, "quality": 0})
+    print(json.dumps({"controls": "pass", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                      "free_fall_mm": results}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -9093,6 +9179,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-elastic-motion", action="store_const", dest="comparison",
                              const=compare_live_elastic_motion,
                              help="compare ground contact and measure the elastic-edge trajectory on the same mesh")
+    comparisons.add_argument("--compare-live-native-time-step", action="store_const", dest="comparison",
+                             const=compare_live_native_time_step,
+                             help="compare explicit simulation time steps, clamps, and CPU quality resets")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")

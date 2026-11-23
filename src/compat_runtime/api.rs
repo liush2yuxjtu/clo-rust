@@ -586,6 +586,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Enable or disable the ground plane in subsequent simulation steps."
     ),
     (
+        "utility_api.SetSimulationTimeStep",
+        "(arg0)",
+        "Set the time step in seconds used for subsequent simulation."
+    ),
+    (
         "utility_api.SetZoomView",
         "(zoom=None)",
         "Set the workbench zoom."
@@ -670,6 +675,7 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.SetCurrentColorwayIndex" => Some("SetCurrentColorwayIndex(arg0: int) -> None"),
         "utility_api.SetSimulationQuality" => Some("SetSimulationQuality(arg0: int, arg1: int) -> None"),
         "utility_api.SetSimulationGroundCollision" => Some("SetSimulationGroundCollision(arg0: bool) -> None"),
+        "utility_api.SetSimulationTimeStep" => Some("SetSimulationTimeStep(arg0: float) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1571,6 +1577,13 @@ pub(super) fn invoke(
             state["runtime"]["simulation_ground_collision"] = json!(enabled);
             Ok(Value::Null)
         }
+        "utility_api.SetSimulationTimeStep" => {
+            let seconds = arg[0].as_f64().or_else(|| arg[0].as_bool().map(|value| f64::from(u8::from(value))))
+                .map(|value| value as f32).filter(|value| value.is_finite())
+                .ok_or("time step must be a finite 32-bit float")?;
+            state["runtime"]["simulation_time_step"] = json!(seconds);
+            Ok(Value::Null)
+        }
         "utility_api.SetZoomView" => {
             let zoom = if arg[0].is_null() {1.0} else {arg[0].as_f64().filter(|value| *value > 0.0).ok_or("Zoom must be positive")?};
             state["runtime"]["ui"]["zoom"] = json!(zoom.clamp(0.2,6.0));
@@ -1614,6 +1627,7 @@ fn returns_none(name: &str) -> bool {
             | "utility_api.SetCamViewPoint"
             | "utility_api.SetSimulationQuality"
             | "utility_api.SetSimulationGroundCollision"
+            | "utility_api.SetSimulationTimeStep"
             | "utility_api.SetZoomView"
     )
 }

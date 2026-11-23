@@ -936,6 +936,15 @@ Keep the segment sum and the endpoint distance in the report so folding
 and actual edge contraction are visible separately. The report records the
 trajectory delta alongside the ground-control verdict.
 
+Run `--compare-live-native-time-step` on the same fixture. Use direct API
+calls, Python and `simulate` to compare 0.01, 0.02 and 0.04 seconds,
+the 0.001-second lower bound, invalid arguments, and a CPU-quality reset.
+Check the 114-vertex average fall from the native archives. Each doubling
+of the time step should quadruple the first-step distance on this fixture.
+Check separately that reselecting the preset restores the default time step
+and re-enables the ground plane. Keep both backends' actual three-step
+default trajectories in the report.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the
