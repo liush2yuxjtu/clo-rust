@@ -1264,6 +1264,11 @@ pub(super) fn invoke(
                 .map(|result| success(&result))
         }
         "import_api.ImportDXF" | "import_api.ImportZpac" | "import_api.ImportZprj" => {
+            if name == "import_api.ImportZprj"
+                && arg[0].as_str().is_some_and(|path| !std::path::Path::new(path).is_file())
+            {
+                return Ok(json!(false));
+            }
             let option = &arg[1];
             let append = ["bAdd","bAppend","m_bAppend"].iter().any(|key| option[*key] == json!(true));
             let mode = if append { "append" } else { "replace" };

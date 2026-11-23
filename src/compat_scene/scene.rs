@@ -464,10 +464,26 @@ fn open_with_components(args: &Value, state: &mut Value, load_garment: bool, loa
         return Err("selective project import requires a .zprj file".into());
     }
     if !load_garment {
-        let avatar = crate::compat_fit::project_avatar(path)?;
+        let avatar = if load_avatar {
+            crate::compat_fit::project_avatar(path)?
+        } else {
+            formats::clo_native::validate_project_archive(path)?;
+            Vec::new()
+        };
+        if !append {
+            replace_scene(state, empty_project());
+            set_project(state, path);
+            formats::native_simulation::restore(state, Some(path), &Value::Null);
+            crate::compat_runtime::clear_scene_ui(state, true);
+        }
         if load_avatar {
             import_project_avatar(state, avatar, append);
-            crate::compat_runtime::invalidate_scene_ui_snapshot(state);
+            if append {
+                crate::compat_runtime::invalidate_scene_ui_snapshot(state);
+            }
+        }
+        if !append || load_avatar {
+            super::refresh_colorway_exports(state);
         }
         return Ok(open_reply(state, path));
     }
@@ -633,16 +649,20 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             }
             let mut avatar_error = None;
             let mut embedded_avatar = false;
-            if is_project && load_avatar {
-                match crate::compat_fit::project_avatar(path) {
-                    Ok(avatar) => {
-                        embedded_avatar = !avatar.is_empty();
-                        import_project_avatar(state, avatar, append);
+            if is_project {
+                if load_avatar {
+                    match crate::compat_fit::project_avatar(path) {
+                        Ok(avatar) => {
+                            embedded_avatar = !avatar.is_empty();
+                            import_project_avatar(state, avatar, append);
+                        }
+                        Err(error) => {
+                            import_project_avatar(state, Vec::new(), append);
+                            avatar_error = Some(error);
+                        }
                     }
-                    Err(error) => {
-                        import_project_avatar(state, Vec::new(), append);
-                        avatar_error = Some(error);
-                    }
+                } else if !append {
+                    import_project_avatar(state, Vec::new(), false);
                 }
                 if !append {
                     set_project(state, path);
@@ -661,8 +681,14 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
             } else if !pose.is_empty() {
                 state["simulation"] = json!({"source": "native_saved_pose", "meshes": pose});
             }
-            if load_avatar && !append {
+            if !append {
                 formats::native_save::remember(state, path, is_project, recovered_zpac);
+                if !load_avatar {
+                    // The input project may contain avatars absent from the loaded scene.
+                    if let Some(source) = state[formats::native_save::SOURCE].as_object_mut() {
+                        source.remove("avatars");
+                    }
+                }
             } else if empty_receiver && !array(state, "patterns").is_empty() {
                 formats::native_save::remember_empty_append(state, path, is_project, recovered_zpac);
             } else if let Some(parts) = composition {

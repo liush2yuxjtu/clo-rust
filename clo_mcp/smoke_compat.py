@@ -9352,6 +9352,108 @@ async def compare_live_texture_collisions():
                       "tests": reports, "result": "pass"}))
 
 
+async def compare_live_selective_import_zprj():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    source = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
+    receiver = root / "receiving.zprj"
+    missing = root / "missing.zprj"
+    contents = source.read_bytes()
+    receiver.write_bytes(contents)
+    api = "import_api.ImportZprj"
+    option_type = "ApiTypes.ImportZPRJOption"
+    cases = [
+        ("both", {}, ["Front", "Back"], 1),
+        ("avatar-only", {"bLoadGarment": False}, [], 1),
+        ("garment-only", {"bLoadAvatar": False}, ["Front", "Back"], 0),
+        ("neither", {"bLoadGarment": False, "bLoadAvatar": False}, [], 0),
+        ("both-append", {"bAppend": True}, ["Receiver", "Back", "Front", "Back"], 2),
+        ("avatar-append", {"bAppend": True, "bLoadGarment": False}, ["Receiver", "Back"], 2),
+        ("garment-append", {"bAppend": True, "bLoadAvatar": False}, ["Receiver", "Back", "Front", "Back"], 1),
+        ("neither-append", {"bAppend": True, "bLoadGarment": False, "bLoadAvatar": False}, ["Receiver", "Back"], 1),
+        ("missing", {"bLoadGarment": False}, ["Receiver", "Back"], 1),
+    ]
+
+    async def readback(session):
+        scene = await json_result(session, "scene_info")
+        for field in ("clo_version", "temp_folder", "asset_folder"):
+            scene.pop(field)
+        panels = await json_result(session, "pattern_list", {"detail": True})
+        seams = await json_result(session, "seams_list")
+        return scene, panels, seams
+
+    async def exercise(session, method, case, fields, names, avatar_count):
+        await json_result(session, "scene_open", {"path": str(receiver)})
+        before = await json_result(session, "pattern_ops", {"pattern": "Front", "op": "rename",
+                                                           "args": {"name": "Receiver"}})
+        assert before["ok"]
+        path = str(missing if case == "missing" else source)
+        if case in ("missing", "neither-append"):
+            state_before_call = await readback(session)
+        if method == "typed":
+            result = await json_result(session, "clo_api_call", {
+                "name": api, "args": [path, {"$type": option_type, "fields": fields}],
+            })
+            assert result == {"name": api, "value": case != "missing"}, result
+        else:
+            code = "\n".join([f"option = {option_type}()", *(f"option.{k} = {v!r}" for k, v in fields.items()),
+                              f"result = {api}({path!r}, option)"])
+            result = await json_result(session, "clo_run_python", {"code": code})
+            assert result == {"value": case != "missing", "stdout": ""}, result
+        observed = await readback(session)
+        scene = observed[0]
+        assert [panel["name"] for panel in scene["patterns"]] == names, (case, scene)
+        assert len(scene["avatars"]) == avatar_count, (case, scene)
+        expected_path = receiver if fields.get("bAppend") or case == "missing" else source
+        assert scene["project_path"] == str(expected_path), (case, scene)
+        if case in ("missing", "neither-append"):
+            assert observed == state_before_call
+        return observed
+
+    rows = []
+    archives = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        status = await json_result(clo, "clo_status")
+        assert status["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"])
+        assert prior.is_file() or not (original["patterns"] or original["avatars"]), original
+        try:
+            for session in (clo, rust):
+                option = await json_result(session, "clo_api_describe", {"name": option_type})
+                assert {"bLoadGarment", "bLoadAvatar", "bAppend"} <= {item["name"] for item in option["members"]}
+            for method in ("typed", "python"):
+                for case, fields, names, avatar_count in cases:
+                    reference = await exercise(clo, method, case, fields, names, avatar_count)
+                    candidate = await exercise(rust, method, case, fields, names, avatar_count)
+                    assert reference == candidate, (method, case, reference, candidate)
+                    rows.append({"method": method, "case": case, "panels": names, "avatars": avatar_count,
+                                 "return": case != "missing", "project": candidate[0]["project"]})
+            for case, fields, names, avatar_count in cases[1:3]:
+                backends = (("official", clo), ("rust", rust))
+                for writer, session in backends:
+                    expected = await exercise(session, "typed", case, fields, names, avatar_count)
+                    output = root / f"{case}-{writer}.zprj"
+                    await json_result(session, "scene_save", {"path": str(output), "thumbnail": False})
+                    with zipfile.ZipFile(output) as native:
+                        suffixes = [Path(name).suffix.lower() for name in native.namelist()]
+                        assert suffixes.count(".avt") == avatar_count
+                        assert suffixes.count(".zpac") == bool(names)
+                    for reader, other in backends:
+                        await json_result(other, "scene_open", {"path": str(output)})
+                        result = await readback(other)
+                        assert result[0] == expected[0] | {"project": output.stem, "project_path": str(output)}
+                        assert result[1:] == expected[1:]
+                        archives.append({"case": case, "writer": writer, "reader": reader})
+        finally:
+            if prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert receiver.read_bytes() == source.read_bytes() == contents
+    print(json.dumps({"clo": status["clo"], "comparisons": rows, "archive_reopens": archives,
+                      "fixture_sha256": hashlib.sha256(contents).hexdigest()}))
+
+
 async def verify_native_append():
     fixture = os.environ.get("CLO_NATIVE_APPEND_FIXTURE")
     assert fixture, "set CLO_NATIVE_APPEND_FIXTURE to a saved .zprj with an avatar and pose"
@@ -9442,7 +9544,7 @@ async def verify_native_append():
 
             await json_result(session, "scene_open", {"path": str(path)})
             _, before_selective = await save("before-selective")
-            no_components = await import_project({"bLoadGarment": False, "bLoadAvatar": False})
+            no_components = await import_project({"bAppend": True, "bLoadGarment": False, "bLoadAvatar": False})
             assert no_components["value"] is True
             _, unchanged = await save("no-components")
             for field in ("patterns", "fabrics", "native_seam_groups", "simulation", "avatar", "additional_avatars"):
@@ -9450,18 +9552,18 @@ async def verify_native_append():
 
             code = f"opt = ApiTypes.ImportZPRJOption(); opt.bLoadGarment = False; result = import_api.ImportZprj({project!r}, opt)"
             assert (await json_result(session, "clo_run_python", {"code": code}))["value"] is True
-            assert (await json_result(session, "scene_info"))["avatars"] == first["avatars"]
+            avatar_only_info = await json_result(session, "scene_info")
+            assert avatar_only_info["avatars"] == first["avatars"] and avatar_only_info["project_path"] == project
             _, avatar_only = await save("only-avatar")
-            for field in ("patterns", "fabrics", "native_seam_groups", "simulation"):
-                assert avatar_only[field] == before_selective[field], field
+            assert avatar_only["patterns"] == avatar_only["native_seam_groups"] == []
+            assert avatar_only["simulation"] is None
 
             await json_result(session, "scene_open", {"path": str(path)})
             assert (await import_project({"bLoadAvatar": False}))["value"] is True
             state = await json_result(session, "scene_info")
-            assert state["pattern_count"] == count and state["avatars"] == first["avatars"] * 2
+            assert state["pattern_count"] == count and state["avatars"] == []
             _, garment_only = await save("only-garment")
-            for field in ("avatar", "additional_avatars"):
-                assert garment_only[field] == before_selective[field], field
+            assert garment_only["avatar"] is None and garment_only["additional_avatars"] == []
             assert garment_only["simulation"]["meshes"] == before["simulation"]["meshes"]
             before_error = await json_result(session, "scene_info")
             rejected = await session.call_tool("clo_api_call", {
@@ -9474,7 +9576,7 @@ async def verify_native_append():
 
             assert (await import_project({"bAppend": True, "bLoadGarment": False}))["value"] is True
             after_avatars = await json_result(session, "scene_info")
-            assert after_avatars["pattern_count"] == count and after_avatars["avatars"] == first["avatars"] * 3
+            assert after_avatars["pattern_count"] == count and after_avatars["avatars"] == first["avatars"]
             assert (await import_project({"bAppend": True, "bLoadAvatar": False}))["value"] is True
             after_garment = await json_result(session, "scene_info")
             assert after_garment["pattern_count"] == count * 2 and after_garment["avatars"] == after_avatars["avatars"]
@@ -9483,8 +9585,8 @@ async def verify_native_append():
                       "seam_groups": appended["seam_groups"], "avatars": len(appended["avatars"]),
                       "pose_meshes_matched": len(meshes), "invalid_append_and_replacement_matched": True,
                       "empty_append_keeps_receiving_colorway_and_saved_pose": True, "garment_append_keeps_avatar": True,
-                      "selective_avatar_only_kept_garment": True,
-                      "selective_garment_only_kept_avatars": True, "select_neither_kept_scene": True,
+                      "selective_avatar_only_cleared_garment": True,
+                      "selective_garment_only_cleared_avatars": True, "append_neither_kept_scene": True,
                       "selective_append_and_corrupt_input": "pass"}))
 
 
@@ -9874,6 +9976,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-texture-collisions", action="store_const", dest="comparison",
                              const=compare_live_texture_collisions,
                              help="verify conflicting texture payloads and their colorway bindings")
+    comparisons.add_argument("--compare-live-selective-import-zprj", action="store_const", dest="comparison",
+                             const=compare_live_selective_import_zprj,
+                             help="compare typed and Python selective project import workflows")
     comparisons.add_argument("--verify-native-append", action="store_const", dest="comparison",
                              const=verify_native_append,
                              help="verify pose, avatar, fabric and sew group readback on Rust native append")

@@ -1303,14 +1303,28 @@ Set `CLO_NATIVE_APPEND_FIXTURE=/path/to/saved.zprj` and run
 `--verify-native-append` with a native project that has fabrics, seams, an
 avatar and a complete saved pose. Exercise typed `ImportZprj` and Python
 with `bLoadGarment` or `bLoadAvatar` disabled. Check that partial replacement
-and append affect the requested component, and that a corrupt avatar-only
-import preserves the receiving scene. Check that full append preserves original project
+sets the incoming project path and drops unselected components. Partial
+append preserves existing components and the receiving path. Check that a
+corrupt avatar-only import preserves the receiving scene. Check that full append preserves original project
 identity, shifts new panel and fabric indices, and restores both saved meshes
 and embedded avatars. Save and reopen the combined project. Test invalid input
 in both modes. Append to an empty scene and confirm the receiving default
 fabric and colorway remain. Save and reopen the composed scene as CLORUST.
 To check native garment passthrough, replace-open the original ZPRJ and
 export its ZPAC, then append that archive and verify both saved poses.
+
+Run `--compare-live-selective-import-zprj` with a live official bridge,
+a fresh shared `CLO_MCP_STATE`, and `CLO_SCENE_OPEN_AVATAR_PROJECT` set
+to `scene-clear-avatar-fixture.zprj`. Use a disposable copy with a different
+project name and rename its first panel. Call `clo_api_call` and
+`clo_run_python` with `ApiTypes.ImportZPRJOption`. Check all four avatar
+and garment selections in replace and append mode. Check that a missing
+SDK path returns `false` and preserves the scene. Compare detailed patterns,
+seams, colorways, material indices, avatars and active project path after
+every call. For avatar-only and garment-only replacement, each backend saves
+a ZPRJ. Confirm the matching archive members and reopen each with both
+backends to detect accidental inclusion of an unselected component.
+
 Use the same native fixtures and a fresh `CLO_MCP_STATE` for
 `python -m clo_mcp.smoke_compat --compare-live-composed-zpac`.
 Set `CLO_COMPOSED_ZPAC_CASE=empty` to isolate the empty-receiver ZPAC case

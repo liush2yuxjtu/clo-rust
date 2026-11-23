@@ -701,6 +701,10 @@ pub(in crate::compat_scene) fn read_project_garment(path: &Path) -> Result<Value
         .ok_or_else(|| "native PAC has no recognized editable panel records".into())
 }
 
+pub(in crate::compat_scene) fn validate_project_archive(path: &Path) -> Result<(), String> {
+    open_archive(bounded_file(path)?, ZPRJ).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
