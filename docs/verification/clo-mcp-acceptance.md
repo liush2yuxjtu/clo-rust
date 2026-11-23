@@ -2,31 +2,31 @@
 
 ## 怎么验证
 
-2026-11-20 复跑了以下三项。仓库根目录的完整命令与证据字段见 [`/verify` 技能](../../.agents/skills/verify/SKILL.md#verify-the-48-public-clo-mcp-tools)。
+2026-11-23 在 Boat 复跑了以下四项。完整命令与证据字段见 [`/verify` 技能](../../.agents/skills/verify/SKILL.md#verify-the-48-public-clo-mcp-tools)。
 
 | 检查 | 实际做法 | 复跑结果 |
 | --- | --- | --- |
 | 工具契约 | `smoke_compat --verify-tool-contracts` 直接读取参考 MCP 与两个适配器的 `tools/list`，逐项核对固定清单中的名称、描述和输入输出结构。 | 三个入口均通过 48 项检查。 |
 | Rust 实调 | `sweep_compat` 在临时场景里向每项工具发送真正的 `tools/call`，逐项记录错误标记及内容类型。 | 48／48，缺失、额外调用、MCP 错误均为 0。 |
 | 双端行为示例 | `smoke_compat --compare-strapped-draft-preview` 向两端发送相同的 7 组规格，逐字段比较纸样、缝线等返回值，再发送 `{"spec": []}` 并读回最后规格。 | 7 组相同，两端均拒绝无效输入，最后规格保持原值。此结果覆盖列出的起版用例。 |
+| 官方现场行为示例 | `smoke_compat --compare-live-checkpoint-roundtrip` 让官方 CLO 与 Rust 轮流保存、恢复和覆盖同一共享目录里的检查点，再打开实际归档核对几何。 | 5 次跨端恢复、2 次同名覆盖通过。保留 52 个顶点、三角索引、UV 和同名便携档。缺失名称均报错并保留当前场景。 |
 
 每个现场用例从相同输入开始。调用后对照结构化返回值，再读回受影响的场景对象或重新打开导出文件。错误用例也要读回状态，例如空规格应保留上次有效规格，有分阶段写入的工具可能保留已完成的步骤。测试记录附两端版本、工具参数、素材校验和与逐项断言。全量行为验收仍未完成。本次复跑三项均通过。原生场景另用 Boat 上的 CLO 2026.1.382，验证前确认 `clo_status.bridge=up`。
 
-本次复跑的 Rust 代码来自 `3a5928cb7d873384c8fa0833b9b1a352716092d0`。三个命令退出码均为 0，另通过 MCP 读到 Boat 上的 CLO 2026.1.382 桥接为 `up`。桥接状态用于确认现场可用性。起版预览使用 `use_scene_measurements=false`，独立于现场工程。
+本次复跑使用 GitHub Rust 提交 `0b9555f06e1da84d64ee1b1c5761a2a86982b0d6` 的代码树 `931e28a354615ea0b245cbaa89bdcf20729f4f0f`。四个比较命令均通过。官方 CLO 为 2026.1.382，`clo_status.bridge=up`。起版预览使用 `use_scene_measurements=false`，可独立于现场工程复跑。检查点的共享路径使用 `C:/…`，由两个后端访问同一文件。
 
 以其中一条为例，给两端发送 `garment_plan_preview({"spec":{"silhouette":"strapless","length":"mini"},"use_scene_measurements":false})`，两端都返回 4 片纸样、6 组缝线，比较器还断言每个返回字段相等。再向两端发送 `{"spec":[]}`，均收到 MCP 错误，随后各自读回的 `garment_last_spec` 与请求前相同。这个验收结果计入该起版场景。逐项证据看下方的 48 项记录。
 
 ### 复跑证据
 
-本轮用 Rust 提交 `9876e172cfebc6396d20981b3de6804bab991152` 和参考 MCP
-`d1af0b151e7f20be205102ffcb39d99f7c42d15d` 复跑。三个命令退出码均为 0。
-验收输出中的关键字段如下。
+本轮记录的机器输出如下。每项适用的双端用例通过后，该工具才计入行为匹配。
 
 | 记录 | 实际输出 |
 | --- | --- |
 | `contracts.json` | `public_tool_count=48`，参考 MCP、官方适配器、Rust 适配器均为 `pass` |
 | `rust-tool-calls.json` | 预期、实调、成功均为 48，缺失、额外调用和错误列表均为空 |
 | `strapped-preview.json` | 7 组通过，`invalid_spec_error=pass`，`last_spec_unchanged=true` |
+| `live-checkpoint.json` | `cross_backend_restores=5`，`same_file_overwrites=2`，`mesh_vertices_preserved=52`，`native_name_precedes_portable=true`，`scene_identity_follows_checkpoint=true`，`missing_keeps_scene=true` |
 
 原生文件还要验收重新打开后的实际内容。Boat 上的 CLO 2026.1.382
 曾在打开只保留内嵌 ZPAC 的矩形测试工程时返回 `isError=false`，

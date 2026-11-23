@@ -248,6 +248,58 @@ the three results separately and link the case evidence behind the behavioral ta
 
 #### Worked example from a live CLO scene
 
+For a save and restore example, reproduce the shared-checkpoint comparison on
+Boat. Use the already configured official stdio command, the freshly built
+Rust binary, and a dedicated CLO desktop session. Both adapters must resolve
+the state directory and fixture to the same on-disk files. Under Wine, run
+from the checkout with its `C:` drive mapping and pass the same `C:/...` spelling
+to both adapters. A Linux-only path can resolve through Wine under another
+spelling and fail the current-project path comparison.
+
+```sh
+export CLO_CHECKPOINT_FIXTURE=C:/boat-native-parity/multi-colorway-colored.zprj
+export CLO_MCP_STATE="$(mktemp -d C:/boat-native-parity/verify-live.XXXXXX)" || exit 1
+unset CLO_RUST_CHECKPOINT_DIR
+printf '%s  %s\n' 9903da2422ecb310568a0448d1286005d48faed288f156ac4729e9eb1edf5ec7 \
+  "$CLO_CHECKPOINT_FIXTURE" | sha256sum -c - || exit 1
+python - > "$CLO_MCP_STATE/bridge-status.json" <<'PY' || exit 1
+import asyncio
+import json
+from clo_mcp.smoke_compat import json_result, open_backend
+
+async def check():
+    async with open_backend("official") as session:
+        status = await json_result(session, "clo_status")
+        print(json.dumps(status))
+        assert status["bridge"] == "up", status
+
+asyncio.run(check())
+PY
+code=0
+python -m clo_mcp.smoke_compat --compare-live-checkpoint-roundtrip \
+  > "$CLO_MCP_STATE/live-checkpoint.json" 2> "$CLO_MCP_STATE/live-checkpoint.log" || code=$?
+printf '%s\n' "$code" > "$CLO_MCP_STATE/live-checkpoint.exit"
+printf 'Evidence directory %s\n' "$CLO_MCP_STATE"
+test "$code" -eq 0 || exit "$code"
+jq -e '.cross_backend_restores == 5 and .same_file_overwrites == 2 and
+       .mesh_vertices_preserved == 52 and .native_name_precedes_portable and
+       .scene_identity_follows_checkpoint and .missing_keeps_scene' \
+  "$CLO_MCP_STATE/live-checkpoint.json"
+```
+
+The recipe sends real MCP calls. CLO saves a named checkpoint, Rust restores
+it, renames a panel, and saves under the same name. CLO restores the change,
+renames the panel again, and saves for Rust to restore. Each backend also
+restores an automatically named checkpoint from the other. The assertions
+cover ordered listings, active project path, panels, fabrics, seams, colorways,
+and archived vertex coordinates, triangles and UVs. Both backends must reject
+a missing name and retain the prior scene. Keep the JSON, stderr log, exit
+code, fixture hash, revision, and runtime versions. Credit this case to
+`checkpoint_save`, `checkpoint_list`, and `checkpoint_restore` in the
+[case record](../../../docs/verification/clo-mcp-acceptance.md#boat-共享检查点双向恢复).
+
+For an export and readback example, use the following two-colorway scene.
+
 Use independent copies of the two-colorway ZPRJ from the
 [Boat evidence record](../../../docs/verification/clo-mcp-acceptance.md#boat-原生多色组导出基准).
 Confirm both starting archives match the recorded SHA-256 and both scenes
@@ -1142,7 +1194,7 @@ Run `--compare-live-checkpoint-roundtrip` with a live bridge, the same
 On Boat the Rust and official MCP processes can run on Linux and share the
 Wine drive through a relative `C:` mapping. Save a Unicode name from CLO,
 restore in Rust, change the front panel's name and save the same name.
-Check the native file changes, the portable shadow is absent, and CLO
+Check the native file changes, the same-name portable shadow keeps its bytes, and CLO
 can restore the Rust revision. Repeat the overwrite in reverse, then
 cross-restore two automatically named checkpoints. Compare the full list,
 the active project path, materials, colors and seam groups, and vertex,
