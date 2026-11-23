@@ -2,7 +2,8 @@
 
 use super::clo_native::find;
 use super::native_materials::{
-    colorway_materials, face_records, face_type, material, read_colorways, select_colorway,
+    colorway_materials, face_records, face_type, material, missing_active_colorway, read_colorways,
+    select_colorway,
 };
 use super::native_pose::{encode_map, encoded_list, map_list, Fields, BYTE_TYPE, LIST_TYPE, MAP_TYPE};
 use super::native_recolor::edit_materials_in_active_colorway;
@@ -390,7 +391,13 @@ pub(super) fn hydrate<R: Read + Seek>(
         })();
         match variants {
             Ok(variants) => {
+                let use_first_variant = root.map(b"mapColorWay").is_ok_and(|table| missing_active_colorway(&table));
                 for (index, (values, chips)) in variants.into_iter().enumerate() {
+                    if use_first_variant {
+                        if let Some(first) = values.first() {
+                            state["fabrics"][index] = first.clone();
+                        }
+                    }
                     state["fabrics"][index]["native_colorway_materials"] =
                         json!({"names": names, "values": values, "chips": chips});
                 }

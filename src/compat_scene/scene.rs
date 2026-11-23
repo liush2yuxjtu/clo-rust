@@ -47,10 +47,15 @@ fn open_reply(state: &Value, path: &Path) -> Value {
     json!({"ok": true, "path": path, "pattern_count": array(state, "patterns").len(), "avatars": avatar_names(state)})
 }
 
+pub(crate) fn pattern_fabric_index(pattern: &Value) -> Option<u64> {
+    let index = &pattern["fabric_index"];
+    (index.as_i64() != Some(-1)).then(|| index.as_u64().unwrap_or(0))
+}
+
 pub(crate) fn assigned_fabrics(state: &Value) -> impl Iterator<Item = &Value> {
     let assignments = array(state, "patterns")
         .iter()
-        .map(|pattern| pattern["fabric_index"].as_u64().unwrap_or(0))
+        .filter_map(pattern_fabric_index)
         .collect::<HashSet<_>>();
     array(state, "fabrics")
         .iter()
@@ -356,7 +361,7 @@ fn append_portable(state: &mut Value, mut loaded: Value) -> Result<(), String> {
         .iter()
         .enumerate()
         .map(|(i, material)| material["index"].as_u64().unwrap_or(i as u64))
-        .chain(array(state, "patterns").iter().map(|panel| panel["fabric_index"].as_u64().unwrap_or(0)))
+        .chain(array(state, "patterns").iter().filter_map(pattern_fabric_index))
         .chain(array(state, "imported_meshes").iter().filter_map(|mesh| mesh["fabric_index"].as_u64()))
         .max();
     let mut last = max_material_id;
@@ -373,11 +378,14 @@ fn append_portable(state: &mut Value, mut loaded: Value) -> Result<(), String> {
     for (i, material) in vec_mut(&mut loaded, "fabrics").iter_mut().enumerate() {
         material["index"] = remap_material(material["index"].as_u64().unwrap_or(i as u64))?;
     }
-    for field in ["patterns", "imported_meshes"] {
-        for piece in vec_mut(&mut loaded, field) {
-            if let Some(id) = piece["fabric_index"].as_u64().or_else(|| (field == "patterns").then_some(0)) {
-                piece["fabric_index"] = remap_material(id)?;
-            }
+    for panel in vec_mut(&mut loaded, "patterns") {
+        if let Some(id) = pattern_fabric_index(panel) {
+            panel["fabric_index"] = remap_material(id)?;
+        }
+    }
+    for mesh in vec_mut(&mut loaded, "imported_meshes") {
+        if let Some(id) = mesh["fabric_index"].as_u64() {
+            mesh["fabric_index"] = remap_material(id)?;
         }
     }
     let prior_count = array(state, "patterns").len();
@@ -595,7 +603,15 @@ fn open_path(path: &Path, ext: &str, append: bool, load_avatar: bool, state: &mu
                 && array(state, "imported_meshes").is_empty()
                 && state["colorways"] == json!([DEFAULT_COLORWAY])
                 && !array(&loaded, "fabrics").is_empty();
-            let fabrics = prepare_archived_fabrics(state, &mut loaded, append)?;
+            let fabrics = if append && prior_count != 0 && loaded["colorway_table_missing"] == true {
+                // The source has no colorway slots to bind to the existing scene.
+                for panel in vec_mut(&mut loaded, "patterns") {
+                    panel["fabric_index"] = json!(-1);
+                }
+                Vec::new()
+            } else {
+                prepare_archived_fabrics(state, &mut loaded, append)?
+            };
             let old_pose = append.then(|| state["simulation"].clone());
             merge(state, &loaded, append)?;
             if !append {

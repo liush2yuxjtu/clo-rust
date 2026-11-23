@@ -1246,6 +1246,20 @@ mesh positions, topology and UV after reopening it in Rust. Missing files
 return an MCP error and preserve the scene. Compare the response and the
 scene, panel and seam readback on both backends.
 
+Run `--compare-live-partial-garment-records` with the two-panel
+`CLO_SCENE_OPEN_PROJECT` and `CLO_SCENE_OPEN_GARMENT` from the multi-colorway
+reference and a fresh shared `CLO_MCP_STATE`. Leave
+`CLO_RUST_CHECKPOINT_DIR` unset. The test writes disposable copies with four
+omissions inside otherwise readable PAC maps and executes 22 matched
+append, replace and checkpoint cases. Compare the scene and detailed panels,
+seam groups, fabric assignments, active RGBA and simulation quality. With the
+active colorway field absent, replace and restore select the first surviving
+colorway and its material. With the table absent, append to the populated
+fixture leaves the new panels unassigned and imports no new fabric.
+Append to a cleared scene retains the incoming base material. Verify original
+and fixture bytes, and reopen the Rust portable scene in both modes to check
+that unassigned indices remain `-1`.
+
 Run `--compare-live-empty-native-save` with a live bridge, a fresh shared
 `CLO_MCP_STATE`, and `CLO_SCENE_OPEN_AVATAR_PROJECT` pointing to the project with
 a saved avatar. Unset `CLO_RUST_CHECKPOINT_DIR`. Use an empty scene and a scene

@@ -384,12 +384,16 @@ fn arrangement_details(state: &Value, name: &str) -> Value {
     }
 }
 
+fn fabric_index(pattern: &Value) -> Value {
+    super::pattern_fabric_index(pattern).map_or_else(|| json!(-1), |index| json!(index))
+}
+
 pub(super) fn summary(pattern: &Value, i: usize) -> Value {
     let arrangement = pattern["arrangement"].as_str().filter(|name| !name.is_empty())
         .unwrap_or("Arrangement Point");
     json!({
         "index": i, "name": pattern["name"], "arrangement": arrangement,
-        "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0)
+        "fabric_index": fabric_index(pattern)
     })
 }
 
@@ -521,7 +525,7 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
                 "maxX": right, "maxY": top, "width": right - left, "height": top - bottom}},
         "input_info": {"Pattern InputInformation": [{"Pattern index": "0", "Pattern name": pattern["name"],
             "PointList": records, "LineList": line_list, "Children Information": input_children(pattern, &records, &line_list)?}]},
-        "fabric_index": pattern["fabric_index"].as_u64().unwrap_or(0),
+        "fabric_index": fabric_index(pattern),
         "arrangement": arrangement,
         "seam_groups": group_indices(state, pattern), "layer": pattern["layer"].as_i64().unwrap_or(0),
         "particle_distance": pattern["particle_distance"].as_f64().unwrap_or(20.0)

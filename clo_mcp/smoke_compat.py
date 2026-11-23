@@ -5429,6 +5429,19 @@ async def verify_elastic_parameter_updates():
                       "late_error_kept_enable_and_length": True}))
 
 
+def native_map_fields(data):
+    count = data[0]
+    lengths = struct.unpack_from(f"<{count}I", data, 1 + 2 * count)
+    offset = 1 + 6 * count
+    result = {}
+    for width, tag, size in zip(data[1:1 + count], data[1 + count:1 + 2 * count], lengths, strict=True):
+        end = offset + width + size
+        result[data[offset:offset + width]] = (tag, data[offset + width:end])
+        offset = end
+    assert offset == len(data)
+    return result
+
+
 def native_elastic_edges(path):
     with zipfile.ZipFile(path) as archive:
         if path.suffix == ".zprj":
@@ -5440,33 +5453,21 @@ def native_elastic_edges(path):
             name, = [name for name in archive.namelist() if name.endswith(".pac")]
             data = archive.read(name)
 
-    def fields(data):
-        count = data[0]
-        lengths = struct.unpack_from(f"<{count}I", data, 1 + 2 * count)
-        offset = 1 + 6 * count
-        result = {}
-        for width, tag, size in zip(data[1:1 + count], data[1 + count:1 + 2 * count], lengths, strict=True):
-            end = offset + width + size
-            result[data[offset:offset + width]] = (tag, data[offset + width:end])
-            offset = end
-        assert offset == len(data)
-        return result
-
     def items(data):
         count, tag = struct.unpack_from("<IB", data)
         assert count > 0 and tag == 22
         sizes = struct.unpack_from(f"<{count}I", data, 5)
         offset = 5 + 4 * count
         for size in sizes:
-            yield fields(data[offset:offset + size])
+            yield native_map_fields(data[offset:offset + size])
             offset += size
         assert offset == len(data)
 
-    root = fields(data)
-    editor = fields(root[b"mapPatternEditor"][1])
-    panels = fields(editor[b"mapPatternList"][1])
+    root = native_map_fields(data)
+    editor = native_map_fields(root[b"mapPatternEditor"][1])
+    panels = native_map_fields(editor[b"mapPatternList"][1])
     panel, = items(panels[b"listPattern"][1])
-    shape = fields(panel[b"mapShape2D"][1])
+    shape = native_map_fields(panel[b"mapShape2D"][1])
     elastic = []
     for edge in items(shape[b"listLine"][1]):
         flag = edge.get(b"bRubberBand", (1, bytes([0])))
@@ -6693,6 +6694,124 @@ async def compare_live_damaged_projects():
                       "fixture_sha256": hashlib.sha256(original_bytes).hexdigest()}))
 
 
+async def compare_live_partial_garment_records():
+    root = Path(os.environ["CLO_MCP_STATE"])
+    project = Path(os.environ["CLO_SCENE_OPEN_PROJECT"])
+    garment = Path(os.environ["CLO_SCENE_OPEN_GARMENT"])
+    assert "CLO_RUST_CHECKPOINT_DIR" not in os.environ
+    checkpoints = root / "checkpoints"
+    checkpoints.mkdir()
+    sources = {".zprj": project.read_bytes(), ".zpac": garment.read_bytes()}
+    omissions = {
+        "missing-seams": (b"mapPatternEditor", b"mapSeamLinePairGroup", b"mapSeamLinePairGroupWithHalfSymmetry"),
+        "missing-active-colorway": (b"mapColorWay", b"uiCurrentCoordinationIndex"),
+        "missing-colorways": (None, b"mapColorWay"),
+        "missing-simulation": (None, b"mapSMP"),
+    }
+
+    def encode(fields):
+        lengths = b"".join(struct.pack("<I", len(value)) for _, value in fields.values())
+        data = b"".join(key + value for key, (_, value) in fields.items())
+        return bytes([len(fields), *map(len, fields), *(tag for tag, _ in fields.values())]) + lengths + data
+
+    def omit(data, section, keys):
+        fields = native_map_fields(data)
+        target = native_map_fields(fields[section][1]) if section else fields
+        for key in keys:
+            del target[key]
+        if section:
+            fields[section] = fields[section][0], encode(target)
+        return encode(fields)
+
+    def replace_member(data, extension, change):
+        output = BytesIO(data[:16])
+        with zipfile.ZipFile(BytesIO(data)) as source, zipfile.ZipFile(output, "a") as target:
+            name, = [name for name in source.namelist() if name.endswith(extension)]
+            for member in source.infolist():
+                payload = source.read(member)
+                target.writestr(member, change(payload) if member.filename == name else payload)
+        return output.getvalue()
+
+    async def observe(session, case, operation, path):
+        if operation == "empty-append":
+            await json_result(session, "scene_clear", {"keep_avatar": False})
+        else:
+            await json_result(session, "scene_open", {"path": str(project)})
+        if operation == "checkpoint":
+            reply = await json_result(session, "checkpoint_restore", {"name": case})
+        else:
+            mode = "append" if operation == "empty-append" else operation
+            reply = await json_result(session, "scene_open", {"path": str(path), "mode": mode})
+        scene = await json_result(session, "scene_info")
+        for field in ("clo_version", "asset_folder", "temp_folder"):
+            scene.pop(field)
+        assert {key: reply[key] for key in ("ok", "path", "pattern_count", "avatars")} == {
+            "ok": True, "path": str(path), "pattern_count": scene["pattern_count"], "avatars": scene["avatars"],
+        }
+        panels = await json_result(session, "pattern_list", {"detail": True})
+        seams = await json_result(session, "seams_list")
+        quality = await json_result(session, "clo_api_call", {"name": "utility_api.GetSimulationQuality"})
+        colors = [(await json_result(session, "clo_api_call", {
+            "name": "fabric_api.GetFabricPBRMaterialBaseColor", "args": [index, 0],
+        }))["value"] for index in range(scene["fabric_count"])]
+        return (scene, panels, seams, quality), colors
+
+    results = []
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        status = await json_result(clo, "clo_status")
+        assert status["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"])
+        assert prior.is_file() or not (original["patterns"] or original["avatars"]), original
+        try:
+            for case, (section, *keys) in omissions.items():
+                def rewrite(data):
+                    return replace_member(data, ".pac", lambda pac: omit(pac, section, keys))
+
+                for extension, data in ((".zpac", rewrite(sources[".zpac"])),
+                                        (".zprj", replace_member(sources[".zprj"], ".zpac", rewrite))):
+                    path = (checkpoints if extension == ".zprj" else root) / f"{case}{extension}"
+                    path.write_bytes(data)
+                    operations = ["append", "replace"]
+                    if extension == ".zprj":
+                        operations.append("checkpoint")
+                    if case == "missing-colorways":
+                        operations.append("empty-append")
+                    for operation in operations:
+                        reference, official_colors = await observe(clo, case, operation, path)
+                        candidate, rust_colors = await observe(rust, case, operation, path)
+                        assert candidate == reference, (case, extension, operation, candidate, reference)
+                        for left, right in zip(rust_colors, official_colors, strict=True):
+                            assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(left, right, strict=True))
+                        scene = candidate[0]
+                        indices = [panel["fabric_index"] for panel in scene["patterns"]]
+                        if case == "missing-colorways" and operation == "append":
+                            assert indices == [0, 0, -1, -1] and scene["fabric_count"] == 1
+                        if case == "missing-active-colorway" and operation != "append":
+                            assert scene["colorways"] == ["Original", "Alternate"] and scene["current_colorway"] == 0
+                            assert math.isclose(rust_colors[0][0], 0.6, abs_tol=1e-6)
+                        assert path.read_bytes() == data
+                        results.append({"case": case, "format": extension, "operation": operation,
+                                        "panels": len(indices), "seams": scene["seam_groups"],
+                                        "fabric_indices": indices, "active_colorway": scene["current_colorway"]})
+            await observe(rust, "missing-colorways", "append", root / "missing-colorways.zpac")
+            portable = root / "unassigned.clorust"
+            await json_result(rust, "scene_save", {"path": str(portable), "thumbnail": False})
+            for mode in ("replace", "append"):
+                await json_result(rust, "scene_open", {"path": str(portable), "mode": mode})
+                scene = await json_result(rust, "scene_info")
+                assert [panel["fabric_index"] for panel in scene["patterns"][-2:]] == [-1, -1]
+        finally:
+            if prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    assert project.read_bytes() == sources[".zprj"] and garment.read_bytes() == sources[".zpac"]
+    assert len(results) == 22
+    print(json.dumps({"clo": status["clo"], "comparisons": results, "portable_keeps_unassigned": True,
+                      "source_sha256": {ext: hashlib.sha256(data).hexdigest() for ext, data in sources.items()}}))
+
+
 async def compare_live_damaged_garments():
     root = Path(os.environ["CLO_MCP_STATE"])
     project = Path(os.environ["CLO_SCENE_OPEN_AVATAR_PROJECT"])
@@ -7153,7 +7272,11 @@ async def verify_native_colorway_exports():
                     save = root / "readback.clorust"
                     await json_result(imported, "scene_save", {"path": str(save), "thumbnail": False})
                     readback = json.loads(save.read_text())["scene"]
-                    return readback["fabrics"][0]["color"], sum(len(mesh["triangles"]) for mesh in readback["imported_meshes"])
+                    meshes = readback["imported_meshes"]
+                    materials = {fabric["index"]: fabric for fabric in readback["fabrics"]}
+                    color = materials[meshes[0]["fabric_index"]]["color"]
+                    assert all(materials[mesh["fabric_index"]]["color"] == color for mesh in meshes)
+                    return color, sum(len(mesh["triangles"]) for mesh in meshes)
 
             report = {}
             for ext in ("obj", "fbx", "glb", "gltf"):
@@ -7169,7 +7292,9 @@ async def verify_native_colorway_exports():
                 for i, output in enumerate(outputs):
                     color, triangles = await read_export(output)
                     expected_rgb = [v ** 2.2 for v in expected[i][:3]] if ext in ("glb", "gltf") else expected[i][:3]
-                    assert all(abs(a - b) < 1e-6 for a, b in zip(color, expected_rgb, strict=True))
+                    assert all(abs(a - b) < 1e-6 for a, b in zip(color, expected_rgb, strict=True)), (
+                        output.name, color, expected_rgb,
+                    )
                     assert triangles == 68
                     if ext == "gltf":
                         assert json.loads(output.read_text())["buffers"][0]["uri"] == companions[i].name
@@ -9671,6 +9796,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-checkpoint-roundtrip", action="store_const", dest="comparison",
                              const=compare_live_checkpoint_roundtrip,
                              help="save, overwrite, list and restore native checkpoints across both live backends")
+    comparisons.add_argument("--compare-live-partial-garment-records", action="store_const", dest="comparison",
+                             const=compare_live_partial_garment_records,
+                             help="compare archive open and checkpoint restore when optional garment records are missing")
     comparisons.add_argument("--compare-live-damaged-garments", action="store_const", dest="comparison",
                              const=compare_live_damaged_garments,
                              help="compare damaged standalone ZPAC append and replacement")

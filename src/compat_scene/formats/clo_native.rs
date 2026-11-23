@@ -459,6 +459,7 @@ fn outline_boundary(
 fn parse(pac: &[u8]) -> Result<Option<Value>, String> {
     let mut patterns = Vec::new();
     let mut edge_counts = Vec::new();
+    let colorway_table_missing;
     let (mut rest_vertices, mut triangles) = (0usize, 0usize);
     let mut append_outline = |name: &str, outline: Result<(Vec<Value>, usize, usize), String>|
         -> Result<(), String> {
@@ -476,10 +477,12 @@ fn parse(pac: &[u8]) -> Result<Option<Value>, String> {
         Ok(())
     };
     if let Ok(root) = Fields::read(pac) {
+        colorway_table_missing = !root.fields().any(|(name, _, _)| name == b"mapColorWay");
         for (_, name, record) in editable_records(&root)? {
             append_outline(name, typed_outline(&record))?;
         }
     } else {
+        colorway_table_missing = false;
         // Older partially decoded payloads can still contain ordered panel and mesh records.
         let tags = panel_tags(pac)?;
         if tags.is_empty() {
@@ -531,6 +534,7 @@ fn parse(pac: &[u8]) -> Result<Option<Value>, String> {
         "native_seam_groups": sewing.annotations, "native_import": native_import,
         "saved_pose": pose, "fabrics": fabrics,
         "native_simulation": super::native_simulation::garment_settings(pac),
+        "colorway_table_missing": colorway_table_missing,
         "colorways": colorways.as_ref().map(|(names, _)| names),
         "current_colorway": colorways.map(|(_, current)| current)
     })))

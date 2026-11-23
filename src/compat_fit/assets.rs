@@ -1254,7 +1254,7 @@ pub(super) fn fabric_add(args: &Value, state: &mut Value) -> Result<Value, Strin
         material["name"] = json!(name);
     }
     let preserve_default = array(&state["patterns"]).iter().any(|pattern| {
-        pattern["fabric_index"].as_u64().unwrap_or(0) == 0
+        crate::compat_scene::pattern_fabric_index(pattern) == Some(0)
     });
     Ok(json!(register_material(state, material, preserve_default)?))
 }
@@ -1289,7 +1289,7 @@ pub(super) fn apply_material(
     // the native assignment one by one, where an invalid value can fail late.
     let selected = selection.as_deref().unwrap_or_default();
     let preserve_default = patterns.iter().enumerate().any(|(i, pattern)| {
-        pattern["fabric_index"].as_u64().unwrap_or(0) == 0 && !selected.contains(&(i as i64))
+        crate::compat_scene::pattern_fabric_index(pattern) == Some(0) && !selected.contains(&(i as i64))
     });
     let name = material["name"].clone();
     let index = register_material(state, material, preserve_default)?;

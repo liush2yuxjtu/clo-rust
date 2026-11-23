@@ -11,7 +11,10 @@ pub(crate) use patterns::{bridge_pattern_index, internal_strokes, layout_outline
 pub(crate) use patterns::sampled_perimeter;
 pub(crate) use annotations::seam_group_names;
 pub(crate) use formats::write as write_artifact;
-pub(crate) use scene::{assigned_fabric_count, assigned_fabrics, avatar_names, checkpoint_before_build, clear_patterns, default_fabric, empty_project};
+pub(crate) use scene::{
+    assigned_fabric_count, assigned_fabrics, avatar_names, checkpoint_before_build, clear_patterns,
+    default_fabric, empty_project, pattern_fabric_index,
+};
 pub(crate) use formats::native_fabric::read as read_native_fabric;
 pub(crate) use formats::native_save::{draft_append_start, remember_draft_append};
 

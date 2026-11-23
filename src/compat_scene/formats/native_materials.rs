@@ -8,10 +8,15 @@ use std::collections::HashMap;
 const INT_TYPE: u8 = 4;
 const UINT_TYPE: u8 = 5;
 const VEC4_TYPE: u8 = 12;
+const ACTIVE_COLORWAY: &[u8] = b"uiCurrentCoordinationIndex";
 
 pub(super) struct Materials {
     pub entries: Vec<Value>,
     pub assignments: Vec<usize>,
+}
+
+pub(super) fn missing_active_colorway(table: &Fields<'_>) -> bool {
+    !table.fields().any(|(name, _, _)| name == ACTIVE_COLORWAY)
 }
 
 pub(super) fn read_colorways(pac: &[u8]) -> Result<(Vec<String>, usize), String> {
@@ -34,11 +39,15 @@ pub(super) fn read_colorways(pac: &[u8]) -> Result<(Vec<String>, usize), String>
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let current = u32::from_le_bytes(
-        root.get(b"uiCurrentCoordinationIndex", UINT_TYPE)?
-            .try_into()
-            .map_err(|_| "invalid colorway index width")?,
-    ) as usize;
+    let current = if missing_active_colorway(&root) {
+        0
+    } else {
+        u32::from_le_bytes(
+            root.get(ACTIVE_COLORWAY, UINT_TYPE)?
+                .try_into()
+                .map_err(|_| "invalid colorway index width")?,
+        ) as usize
+    };
     if current >= names.len() {
         return Err("native active colorway index is out of range".into());
     }
@@ -189,7 +198,7 @@ pub(super) fn select_colorway(pac: &[u8], index: u32) -> Result<Vec<u8>, String>
     let fabrics = fabrics.iter().zip(selected)
         .map(|(fabric, variant)| select_fabric_material(fabric, &variant.material).map(Cow::Owned))
         .collect::<Result<Vec<_>, _>>()?;
-    let table = table.replace(b"uiCurrentCoordinationIndex", UINT_TYPE, &index.to_le_bytes())?;
+    let table = table.set(ACTIVE_COLORWAY, UINT_TYPE, &index.to_le_bytes())?;
     let root = root.replace(b"mapColorWay", MAP_TYPE, &table)?;
     Fields::read(&root)?.replace(b"listFabric", LIST_TYPE, &encoded_list(&fabrics)?)
 }
@@ -221,7 +230,7 @@ pub(super) fn default_append_colorway(pac: &[u8], name: &str) -> Result<Vec<u8>,
     let new_colorway = new_colorway.replace(b"listColorway", LIST_TYPE, &record_list(&colorway)?)?;
     let table = table.replace(b"mapNewColorway", MAP_TYPE, &new_colorway)?;
     let table = Fields::read(&table)?.replace(b"listColorway", LIST_TYPE, &record_list(&legacy)?)?;
-    let table = Fields::read(&table)?.replace(b"uiCurrentCoordinationIndex", UINT_TYPE, &0u32.to_le_bytes())?;
+    let table = Fields::read(&table)?.set(ACTIVE_COLORWAY, UINT_TYPE, &0u32.to_le_bytes())?;
     root.replace(b"mapColorWay", MAP_TYPE, &table)
 }
 
