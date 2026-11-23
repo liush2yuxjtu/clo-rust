@@ -437,6 +437,12 @@ fn input_line(index: usize, length: &Value, straight: bool) -> Value {
     json!({"Line index": index.to_string(), "Line length": length, "Line type": kind})
 }
 
+fn outline_line_is_straight(pattern: &Value, index: usize, edge: &[Point]) -> bool {
+    pattern["native_outline_metrics"][index]["straight"]
+        .as_bool()
+        .unwrap_or(edge.len() == 2)
+}
+
 fn input_children(pattern: &Value, outline_points: &[Value], outline_lines: &[Value]) -> Result<Vec<Value>, String> {
     let outline_copy = json!({"type": "Base Line", "outline_copy": true});
     let children = pattern["native_children"].as_array().map(Vec::as_slice)
@@ -493,10 +499,7 @@ pub(super) fn info(args: &Value, state: &mut Value) -> Reply {
     let lines = lines(pattern)?;
     let mut line_list = vec![json!({"Line count": lines.len().to_string()})];
     line_list.extend(lines.iter().zip(edges).enumerate().map(|(n, (line, edge))| {
-        let straight = pattern["native_outline_metrics"][n]["straight"]
-            .as_bool()
-            .unwrap_or(edge.len() == 2);
-        input_line(n, &line["length"], straight)
+        input_line(n, &line["length"], outline_line_is_straight(pattern, n, &edge))
     }));
     let limits = bounds(pattern)?;
     let [left, bottom, right, top] =
@@ -904,14 +907,15 @@ fn move_2d(pattern: &mut Value, args: &Value, copy: bool) -> Result<(), String> 
     Ok(())
 }
 
-fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<(), String> {
+fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<bool, String> {
     let pts = points(pattern)?;
     let corners = corner_offsets(&pts);
     let start = *corners.get(line).ok_or("unfold line is out of range")?;
     let end = corners[(line + 1) % corners.len()];
     let edges = split_edges(&pts);
-    if edges[line].len() != 2 {
-        return Err("unfold requires a straight line".into());
+    if !outline_line_is_straight(pattern, line, &edges[line]) {
+        // CLO acknowledges this request after showing an informational dialog.
+        return Ok(false);
     }
     let a = pts[start];
     let b = pts[end];
@@ -932,7 +936,7 @@ fn expand(pattern: &mut Value, line: usize, half_symmetry: bool) -> Result<(), S
         .collect();
     set_points(pattern, outline);
     pattern["half_symmetry"] = json!(half_symmetry);
-    Ok(())
+    Ok(true)
 }
 
 fn option_truth(value: &Value) -> bool {
@@ -1129,7 +1133,9 @@ pub(super) fn operate(request: &Value, state: &mut Value) -> Reply {
             let Some(fold) = usize::try_from(fold).ok().filter(|&fold| fold < count) else {
                 return Ok(json!({"ok": false}));
             };
-            expand(&mut pattern, fold, flag(args, "half_symmetry", true))?;
+            if !expand(&mut pattern, fold, flag(args, "half_symmetry", true))? {
+                return Ok(json!({"ok": true}));
+            }
             let mapping: Vec<_> = (0..count)
                 .map(|line| (line != fold).then(|| line + usize::from(line > fold) * (count - 2)))
                 .collect();

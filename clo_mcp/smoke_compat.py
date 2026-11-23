@@ -3882,6 +3882,82 @@ async def compare_live_pattern_ops():
                       "geometry_tolerance_mm": tolerance, "result": "pass"}, ensure_ascii=False))
 
 
+async def compare_live_curved_unfold():
+    fixture = Path(os.environ["CLO_CURVED_UNFOLD_FIXTURE"])
+    assert fixture.is_file(), fixture
+    bezier = [[500, 0, 0], [530, -35, 3], [560, -25, 3], [600, 0, 0], [600, 100, 0], [500, 100, 0]]
+    spline = [[500, 0, 0], [525, -20, 2], [565, -20, 2], [600, 0, 0], [600, 100, 0], [500, 100, 0]]
+    cases = (
+        ("bezier-default", bezier, {"line": 0}, False),
+        ("bezier-full", bezier, {"line": 0, "half_symmetry": False}, False),
+        ("spline-default", spline, {"line": 0}, False),
+        ("spline-full", spline, {"line": 0, "half_symmetry": False}, False),
+        ("straight-on-bezier", bezier, {"line": 1, "half_symmetry": False}, True),
+        ("archived-curve", None, {}, False),
+    )
+    tolerance = 0.01
+    max_delta = 0.0
+
+    async def read(session, pattern):
+        return (await json_result(session, "pattern_info", {"pattern": pattern}),
+                await json_result(session, "pattern_list"), await json_result(session, "seams_list"))
+
+    def geometry(panel):
+        info = panel["input_info"]["Pattern InputInformation"][0]
+        return ([item["Line type"] for item in info["LineList"][1:]],
+                [float(panel["bbox"][axis]) for axis in ("Width", "Height")] + panel["pos_2d"] +
+                [point[key] for point in info["PointList"][1:] for key in ("Point positionX", "Point positionY")] +
+                [line["Line length"] for line in info["LineList"][1:]])
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        results = []
+        try:
+            for case, points, options, expands in cases:
+                observations = []
+                for session in (clo, rust):
+                    args = dict(options)
+                    if points is None:
+                        await json_result(session, "scene_open", {"path": str(fixture)})
+                        listing = await json_result(session, "pattern_list")
+                        assert listing["count"] == 3 and listing["seam_groups"] > 0
+                        pattern = str(listing["patterns"][-1]["index"])
+                    else:
+                        await json_result(session, "scene_clear", {"keep_avatar": False})
+                        created = await json_result(session, "pattern_create", {"name": "UnfoldProbe", "points": points})
+                        pattern = str(created["index"])
+                    before = await read(session, pattern)
+                    kinds, _ = geometry(before[0])
+                    if points is None:
+                        args["line"] = next(i for i, kind in enumerate(kinds) if kind != "Straight type")
+                    assert (kinds[args["line"]] == "Straight type") == expands, (case, kinds)
+                    reply = await json_result(session, "pattern_ops", {"pattern": pattern, "op": "unfold", "args": args})
+                    assert reply == {"ok": True}, (case, reply)
+                    after = await read(session, pattern)
+                    if expands:
+                        assert len(kinds) == 4 and len(geometry(after[0])[0]) == 6, (case, after)
+                    else:
+                        assert before == after, (case, before, after)
+                    observations.append((args, geometry(after[0]), after[2]))
+                (left_args, (left_kinds, left_values), left_seams), (right_args, (right_kinds, right_values), right_seams) = observations
+                assert left_args == right_args and left_kinds == right_kinds and left_seams == right_seams, case
+                delta = max(abs(a - b) for a, b in zip(left_values, right_values, strict=True))
+                assert delta <= tolerance, (case, delta)
+                max_delta = max(max_delta, delta)
+                results.append({"case": case, "args": left_args, "expanded": expands, "line_count": len(left_kinds),
+                                "preserved_seam_groups": left_seams["count"]})
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(), "cases": results,
+                      "max_geometry_delta_mm": max_delta, "result": "pass"}))
+
+
 async def compare_live_pattern_delete_line_indices():
     fixture = Path(os.environ["CLO_PATTERN_DELETE_LINE_FIXTURE"])
     assert fixture.is_file(), fixture
@@ -8833,6 +8909,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-pattern-ops", action="store_const", dest="comparison",
                              const=compare_live_pattern_ops,
                              help="compare public pattern operations with native CLO and read back the affected state")
+    comparisons.add_argument("--compare-live-curved-unfold", action="store_const", dest="comparison",
+                             const=compare_live_curved_unfold,
+                             help="compare curved and straight unfold axes on new and native patterns")
     comparisons.add_argument("--compare-live-pattern-delete-line-indices", action="store_const", dest="comparison",
                              const=compare_live_pattern_delete_line_indices,
                              help="compare outline and out-of-range deletion on a panel with native child shapes")

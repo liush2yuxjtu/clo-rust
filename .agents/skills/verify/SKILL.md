@@ -595,8 +595,18 @@ after unfolding, and no changes after rejected requests. Deleting an outline
 line removes the whole piece. Deleting a triangle corner also removes the
 piece. An out-of-range deletion returns success with the scene unchanged.
 Invalid unfold indices return `ok=false`. Coordinate tolerance is 0.001 mm
-for the native single-precision geometry. Verify curved folds and
-post-simulation behavior separately.
+for the native single-precision geometry. Verify post-simulation behavior
+separately.
+
+Run `--compare-live-curved-unfold` with `CLO_CURVED_UNFOLD_FIXTURE` pointing
+to the same `two-corner-curve.zprj` on both backends. In CLO, dismiss the
+informational notice about a curved segment for each of the five curved-axis
+requests. Verify that cubic Bézier and spline axes return `{"ok": true}`
+and preserve the full paper-pattern readback and sewing with default or
+disabled half symmetry. On the saved two-corner piece, check the archived
+shape and its project's sewing group. As a positive control, unfold the
+new Bézier panel along an adjacent straight edge and verify the outline
+grows from four to six edges. Keep the fixture hash and JSON report.
 
 Run `--compare-live-pattern-delete-line-indices` with
 `CLO_PATTERN_DELETE_LINE_FIXTURE` pointing to the same native ZPRJ on both
