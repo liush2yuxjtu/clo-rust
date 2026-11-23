@@ -10,7 +10,7 @@ mod texture;
 pub(crate) use assets::{preserves_opacity_on_recolor, project_avatar};
 pub(crate) use render::{export_snapshot, native_previews, native_primary_preview, set_camera_preset};
 pub(crate) use solver::{
-    archive_pose_mesh, avatar_geometry, particle_distance, place_archive_mesh, set_simulation_quality, simulation_quality,
+    archive_pose_mesh, avatar_geometry, particle_distance, place_archive_mesh, set_simulation_quality, set_simulation_substeps, simulation_quality,
     uv_coordinates, ArchivePoseMesh,
 };
 pub(crate) use texture::png_for_export;

@@ -1483,6 +1483,11 @@ pub(crate) fn simulation_quality(state: &Value) -> u64 {
         .unwrap_or(4)
 }
 
+pub(crate) fn set_simulation_substeps(state: &mut Value, count: i32) {
+    // The native setting constrains an unsigned count to [1, 64].
+    state["runtime"]["simulation_substeps"] = json!((count as u32).clamp(1, 64));
+}
+
 pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result<(), String> {
     let quality = value.as_i64().and_then(|n| i32::try_from(n).ok())
         .ok_or("quality must be a 32-bit integer")?;
@@ -1494,6 +1499,7 @@ pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result
         if let Some(runtime) = state["runtime"].as_object_mut() {
             runtime.remove("simulation_time_step");
             runtime.remove("simulation_ground_collision");
+            runtime.remove("simulation_substeps");
         }
     }
     Ok(())
@@ -1715,7 +1721,10 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         2 => 12,
         _ => 4,
     };
-    let dt = state["runtime"]["simulation_time_step"].as_f64().unwrap_or(1.0 / 30.0).max(0.001);
+    let substeps = state["runtime"]["simulation_substeps"].as_u64().unwrap_or(1).clamp(1, 64);
+    let dt = state["runtime"]["simulation_time_step"].as_f64().unwrap_or(1.0 / 30.0).max(0.001)
+        / substeps as f64;
+    let damping = 0.84_f64.powf(1.0 / substeps as f64);
     let half_gravity_step = 0.5 * 9810.0 * dt;
     let mut contacts = 0usize;
     let use_mesh_collision = colliders.iter().any(Option::is_some);
@@ -1750,7 +1759,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         }
     }
     let mut old = positions.clone();
-    for _ in 0..steps {
+    for _ in 0..steps * substeps {
         if start.elapsed() >= std::time::Duration::from_secs(1800) {
             return Err("simulation exceeded the MCP response window".into());
         }
@@ -1813,7 +1822,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             if ground_collision && p[1] <= ground_height {
                 corrected[1] = corrected[1].max(0.0);
             }
-            *v = corrected.map(|axis| (axis * 0.84).clamp(-1800.0, 1800.0));
+            *v = corrected.map(|axis| (axis * damping).clamp(-1800.0, 1800.0));
         }
     }
     let gap = seam_constraints

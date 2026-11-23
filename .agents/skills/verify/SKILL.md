@@ -945,6 +945,14 @@ Check separately that reselecting the preset restores the default time step
 and re-enables the ground plane. Keep both backends' actual three-step
 default trajectories in the report.
 
+Run `--compare-live-native-substeps` on the same fixture at a 0.02-second
+time step with ground and elastic disabled. Exercise the substep setter
+through the typed API and Python. Check requested counts 0 and 1, the 64
+limit using 64, 128 and −3, invalid argument types, and reset by CPU
+quality 0. `simulate(steps=1)` still reports one public step. Keep the
+measured fall for counts 1, 2 and 8 over three successive calls. The
+control verdict and the two numerical trajectories are recorded together.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the

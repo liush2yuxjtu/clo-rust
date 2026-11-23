@@ -5705,6 +5705,81 @@ async def compare_live_native_time_step():
                       "free_fall_mm": results}))
 
 
+async def compare_live_native_substeps():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    source = root / "enabled.zpac"
+    out = root / "substep-verification"
+    out.mkdir(exist_ok=True)
+    setter = "utility_api.SetSimulationNumberOfSimulation"
+    clock = "utility_api.SetSimulationTimeStep"
+    ground = "utility_api.SetSimulationGroundCollision"
+    results = {}
+
+    async def height(session, reader, label):
+        path = out / f"{label}.zpac"
+        await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+        await json_result(reader, "scene_open", {"path": str(path)})
+        meshes, _ = await snapshot_composed_archive(reader, path.with_suffix(".clorust"))
+        ys = [vertex[1] for vertex in meshes[0]["positions"]]
+        assert len(meshes) == 1 and len(ys) == 114
+        return math.fsum(ys) / len(ys)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        try:
+            for label, session in (("official", clo), ("rust", rust)):
+                async def call(name, value):
+                    reply = await json_result(session, "clo_api_call", {"name": name, "args": [value]})
+                    assert reply == {"name": name, "value": None}
+
+                assert await json_result(session, "clo_api_describe", {"name": setter}) == {
+                    "name": setter, "doc": "SetSimulationNumberOfSimulation(arg0: int) -> None", "members": []}
+                await call(setter, True)
+                recorded = {}
+                for count in (1, 2, 8, 0, -3, 64, 128, "preset-reset"):
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic",
+                                                               "args": {"line": 1, "on": False}})
+                    await json_result(session, "simulate", {"steps": 0, "quality": 0})
+                    if count == "preset-reset":
+                        await call(setter, 8)
+                        await json_result(session, "simulate", {"steps": 0, "quality": 0})
+                    elif count == 2:
+                        actual = await json_result(session, "clo_run_python", {"code": f"{setter}(2)"})
+                        assert actual == {"value": None, "stdout": ""}
+                    else:
+                        await call(setter, count)
+                    if count == 8:
+                        for args in ([], [1.5], ["2"], [None], [2147483648]):
+                            invalid = await session.call_tool("clo_api_call", {"name": setter, "args": args})
+                            assert invalid.isError, (label, args)
+                    await call(clock, 0.02)
+                    await call(ground, False)
+                    start = await height(session, reader, f"{label}-{count}-0")
+                    drops = []
+                    for step in range(1, 4 if count in (1, 2, 8) else 2):
+                        reply = await json_result(session, "simulate", {"steps": 1})
+                        assert reply["ok"] is True and reply["steps"] == 1
+                        drops.append(start - await height(session, reader, f"{label}-{count}-{step}"))
+                    recorded[str(count)] = drops
+                for count in ("0", "preset-reset"):
+                    assert abs(recorded[count][0] - recorded["1"][0]) < 0.001
+                for count in ("-3", "128"):
+                    assert abs(recorded[count][0] - recorded["64"][0]) < 0.001
+                assert abs(recorded["8"][2] - recorded["1"][2]) > 0.02
+                results[label] = recorded
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+            await json_result(clo, "simulate", {"steps": 0, "quality": 0})
+    print(json.dumps({"substep_control": "pass", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                      "free_fall_mm": results}))
+
+
 async def verify_outline_edit_remaps():
     with TemporaryDirectory(prefix="clo-outline-edit-") as directory:
         root = Path(directory)
@@ -9182,6 +9257,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-native-time-step", action="store_const", dest="comparison",
                              const=compare_live_native_time_step,
                              help="compare explicit simulation time steps, clamps, and CPU quality resets")
+    comparisons.add_argument("--compare-live-native-substeps", action="store_const", dest="comparison",
+                             const=compare_live_native_substeps,
+                             help="compare native substep controls and record free-fall trajectories")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")

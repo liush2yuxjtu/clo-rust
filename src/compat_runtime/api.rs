@@ -591,6 +591,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Set the time step in seconds used for subsequent simulation."
     ),
     (
+        "utility_api.SetSimulationNumberOfSimulation",
+        "(arg0)",
+        "Set the number of internal simulation substeps per step."
+    ),
+    (
         "utility_api.SetZoomView",
         "(zoom=None)",
         "Set the workbench zoom."
@@ -676,6 +681,7 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.SetSimulationQuality" => Some("SetSimulationQuality(arg0: int, arg1: int) -> None"),
         "utility_api.SetSimulationGroundCollision" => Some("SetSimulationGroundCollision(arg0: bool) -> None"),
         "utility_api.SetSimulationTimeStep" => Some("SetSimulationTimeStep(arg0: float) -> None"),
+        "utility_api.SetSimulationNumberOfSimulation" => Some("SetSimulationNumberOfSimulation(arg0: int) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1584,6 +1590,12 @@ pub(super) fn invoke(
             state["runtime"]["simulation_time_step"] = json!(seconds);
             Ok(Value::Null)
         }
+        "utility_api.SetSimulationNumberOfSimulation" => {
+            let count = arg[0].as_i64().or_else(|| arg[0].as_bool().map(i64::from))
+                .and_then(|value| i32::try_from(value).ok()).ok_or("substep count must be a 32-bit integer")?;
+            crate::compat_fit::set_simulation_substeps(state, count);
+            Ok(Value::Null)
+        }
         "utility_api.SetZoomView" => {
             let zoom = if arg[0].is_null() {1.0} else {arg[0].as_f64().filter(|value| *value > 0.0).ok_or("Zoom must be positive")?};
             state["runtime"]["ui"]["zoom"] = json!(zoom.clamp(0.2,6.0));
@@ -1628,6 +1640,7 @@ fn returns_none(name: &str) -> bool {
             | "utility_api.SetSimulationQuality"
             | "utility_api.SetSimulationGroundCollision"
             | "utility_api.SetSimulationTimeStep"
+            | "utility_api.SetSimulationNumberOfSimulation"
             | "utility_api.SetZoomView"
     )
 }
