@@ -595,8 +595,26 @@ after unfolding, and no changes after rejected requests. Deleting an outline
 line removes the whole piece. Deleting a triangle corner also removes the
 piece. An out-of-range deletion returns success with the scene unchanged.
 Invalid unfold indices return `ok=false`. Coordinate tolerance is 0.001 mm
-for the native single-precision geometry. Verify curved folds, internal-line
-deletion and post-simulation behavior separately.
+for the native single-precision geometry. Verify curved folds and
+post-simulation behavior separately.
+
+Run `--compare-live-pattern-delete-line-indices` with
+`CLO_PATTERN_DELETE_LINE_FIXTURE` pointing to the same native ZPRJ on both
+backends. In a disposable empty CLO project, create a square named
+`DeleteLineProbe` with vertices `(0,0)`, `(150,0)`, `(150,150)`, `(0,150)`.
+Call `clo_run_python` with the following code, then save the project as ZPRJ.
+
+```python
+pattern_api.CreateInternalShapeWithPoints(0, [(25.0, 25.0, 0), (35.0, 35.0, 0), (55.0, 35.0, 0)], False)
+pattern_api.CreateInternalShapeWithPoints(0, [(60.0, 60.0, 0), (90.0, 90.0, 0)], False)
+```
+
+After reopening, verify the two internal shapes have two and one segments
+respectively. Read back `pattern_list`, `pattern_info`, and `seams_list` after
+each `pattern_ops(delete_line)` call. Indices `4` through `7`, `-1`, `99`,
+and numeric string `"5"` return success and preserve all three reads. Missing
+and nonnumeric indices return an MCP error and preserve them. Outline index
+`1` removes the entire piece. Keep the fixture SHA-256 and JSON result.
 
 Run `--verify-display-edits-keep-drape` to verify that 2D movement,
 3D visibility and strengthening preserve an existing pose and velocities.

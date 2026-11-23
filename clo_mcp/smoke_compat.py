@@ -3882,6 +3882,79 @@ async def compare_live_pattern_ops():
                       "geometry_tolerance_mm": tolerance, "result": "pass"}, ensure_ascii=False))
 
 
+async def compare_live_pattern_delete_line_indices():
+    fixture = Path(os.environ["CLO_PATTERN_DELETE_LINE_FIXTURE"])
+    assert fixture.is_file(), fixture
+    target = "DeleteLineProbe"
+    cases = [4, 5, 6, 7, -1, 99, "5", "invalid", None, 1]
+    tolerance = 0.00001
+    largest = 0.0
+
+    async def read(session):
+        listing = await json_result(session, "pattern_list", {"detail": True})
+        panel = await json_result(session, "pattern_info", {"pattern": target}) if listing["count"] else None
+        return {"listing": listing, "panel": panel, "seams": await json_result(session, "seams_list")}
+
+    def compare(official, rust, path=()):
+        nonlocal largest
+        if isinstance(official, dict) and isinstance(rust, dict):
+            assert official.keys() == rust.keys(), path
+            for key in official:
+                compare(official[key], rust[key], (*path, key))
+        elif isinstance(official, list) and isinstance(rust, list):
+            assert len(official) == len(rust), path
+            for i, (a, b) in enumerate(zip(official, rust, strict=True)):
+                compare(a, b, (*path, i))
+        elif isinstance(official, float) and isinstance(rust, (float, int)):
+            delta = abs(official - rust)
+            assert delta <= tolerance, (path, official, rust)
+            largest = max(largest, delta)
+        else:
+            assert official == rust, (path, official, rust)
+
+    async with open_backend("official") as clo, open_backend("rust") as rust:
+        assert (await json_result(clo, "clo_status"))["bridge"] == "up"
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert prior and prior.is_file() or not (original["patterns"] or original["avatars"]), original
+        evidence = []
+        try:
+            for session in (clo, rust):
+                await json_result(session, "scene_open", {"path": str(fixture)})
+            baselines = [await read(session) for session in (clo, rust)]
+            compare(*baselines)
+            shapes = baselines[0]["panel"]["input_info"]["Pattern InputInformation"][0]
+            assert shapes["LineList"][0]["Line count"] == "4"
+            assert [(shape["Shape type"], shape["LineList"][0]["Line count"])
+                    for shape in shapes["Children Information"][1:]] == [
+                        ("InnerShape", "2"), ("InnerShape", "1"), ("Base Line", "4")]
+            for line in cases:
+                args = {"pattern": target, "op": "delete_line", "args": {"line": line} if line is not None else {}}
+                after = []
+                for session, before in zip((clo, rust), baselines, strict=True):
+                    result = await session.call_tool("pattern_ops", args)
+                    if line in ("invalid", None):
+                        assert result.isError, (args, result)
+                    else:
+                        reply = result.structuredContent or json.loads(result.content[0].text)
+                        assert not result.isError and reply == {"index": 0, "op": "delete_line", "ok": True}, (args, result)
+                    after.append(await read(session))
+                    if line == 1:
+                        assert after[-1]["listing"]["count"] == 0 and after[-1]["seams"]["count"] == 0
+                    else:
+                        assert after[-1] == before, (args, before, after[-1])
+                compare(*after)
+                evidence.append({"args": args["args"], "error": line in ("invalid", None),
+                                 "patterns_after": after[0]["listing"]["count"]})
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+    print(json.dumps({"fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                      "cases": evidence, "max_geometry_delta_mm": largest, "result": "pass"}))
+
+
 async def verify_display_edits_keep_drape():
     with TemporaryDirectory(prefix="clo-display-edits-") as directory:
         root = Path(directory)
@@ -8760,6 +8833,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-pattern-ops", action="store_const", dest="comparison",
                              const=compare_live_pattern_ops,
                              help="compare public pattern operations with native CLO and read back the affected state")
+    comparisons.add_argument("--compare-live-pattern-delete-line-indices", action="store_const", dest="comparison",
+                             const=compare_live_pattern_delete_line_indices,
+                             help="compare outline and out-of-range deletion on a panel with native child shapes")
     comparisons.add_argument("--verify-display-edits-keep-drape", action="store_const", dest="comparison",
                              const=verify_display_edits_keep_drape,
                              help="verify layout, visibility and strength edits preserve saved drape")
