@@ -1500,6 +1500,7 @@ pub(crate) fn set_simulation_quality(state: &mut Value, value: &Value) -> Result
             runtime.remove("simulation_time_step");
             runtime.remove("simulation_ground_collision");
             runtime.remove("simulation_substeps");
+            runtime.remove("simulation_gravity");
         }
     }
     Ok(())
@@ -1721,11 +1722,13 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
         2 => 12,
         _ => 4,
     };
-    let substeps = state["runtime"]["simulation_substeps"].as_u64().unwrap_or(1).clamp(1, 64);
+    let preset_substeps = if matches!(quality, 1 | 2) { 5 } else { 1 };
+    let substeps = state["runtime"]["simulation_substeps"].as_u64().unwrap_or(preset_substeps).clamp(1, 64);
     let dt = state["runtime"]["simulation_time_step"].as_f64().unwrap_or(1.0 / 30.0).max(0.001)
         / substeps as f64;
     let damping = 0.84_f64.powf(1.0 / substeps as f64);
-    let half_gravity_step = 0.5 * 9810.0 * dt;
+    let gravity = state["runtime"]["simulation_gravity"].as_f64().unwrap_or(-9800.0);
+    let half_gravity_step = 0.5 * gravity * dt;
     let mut contacts = 0usize;
     let use_mesh_collision = colliders.iter().any(Option::is_some);
     let frictions: Vec<_> = if use_mesh_collision {
@@ -1773,7 +1776,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
                 *v = [0.0; 3];
                 continue;
             }
-            v[1] -= half_gravity_step;
+            v[1] += half_gravity_step;
             for i in 0..3 {
                 p[i] += v[i] * dt;
             }
@@ -1818,7 +1821,7 @@ pub fn simulate(args: &Value, state: &mut Value) -> Result<Value, String> {
             }
             let delta = sub(*p, *prev);
             let mut corrected = delta.map(|axis| axis / dt);
-            corrected[1] -= half_gravity_step;
+            corrected[1] += half_gravity_step;
             if ground_collision && p[1] <= ground_height {
                 corrected[1] = corrected[1].max(0.0);
             }

@@ -953,6 +953,14 @@ quality 0. `simulate(steps=1)` still reports one public step. Keep the
 measured fall for counts 1, 2 and 8 over three successive calls. The
 control verdict and the two numerical trajectories are recorded together.
 
+Run `--compare-live-native-gravity` on the same fixture with ground and
+elastic disabled. Verify zero, signed and half-strength gravity through
+direct API calls and Python, reject malformed input, and check that a new
+CPU preset restores the default acceleration. The native default is
+−9800 mm/s². Compare quality 1 and 2 against an explicit five-substep
+override and use one substep as a control. Compare each backend's three
+archived samples and retain the remaining distance differences.
+
 Run `--verify-avatar-changes-keep-drape` to add and replace avatars around
 already simulated cloth. Reopen and compare the original positions and
 velocities, then run a positive step to verify overlap correction by the

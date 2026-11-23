@@ -596,6 +596,11 @@ const FUNCTIONS: &[Entry] = functions![
         "Set the number of internal simulation substeps per step."
     ),
     (
+        "utility_api.SetSimulationGravity",
+        "(arg0)",
+        "Set vertical acceleration in millimetres per second squared."
+    ),
+    (
         "utility_api.SetZoomView",
         "(zoom=None)",
         "Set the workbench zoom."
@@ -682,6 +687,7 @@ fn native_function_doc(name: &str) -> Option<&'static str> {
         "utility_api.SetSimulationGroundCollision" => Some("SetSimulationGroundCollision(arg0: bool) -> None"),
         "utility_api.SetSimulationTimeStep" => Some("SetSimulationTimeStep(arg0: float) -> None"),
         "utility_api.SetSimulationNumberOfSimulation" => Some("SetSimulationNumberOfSimulation(arg0: int) -> None"),
+        "utility_api.SetSimulationGravity" => Some("SetSimulationGravity(arg0: float) -> None"),
         "utility_api.UpdateColorways" => Some("UpdateColorways(bUpdateSnapshot: bool = True) -> None"),
         _ => None,
     }
@@ -1583,11 +1589,16 @@ pub(super) fn invoke(
             state["runtime"]["simulation_ground_collision"] = json!(enabled);
             Ok(Value::Null)
         }
-        "utility_api.SetSimulationTimeStep" => {
-            let seconds = arg[0].as_f64().or_else(|| arg[0].as_bool().map(|value| f64::from(u8::from(value))))
+        "utility_api.SetSimulationTimeStep" | "utility_api.SetSimulationGravity" => {
+            let (setting, label) = if name == "utility_api.SetSimulationTimeStep" {
+                ("simulation_time_step", "time step")
+            } else {
+                ("simulation_gravity", "gravity")
+            };
+            let value = arg[0].as_f64().or_else(|| arg[0].as_bool().map(|value| f64::from(u8::from(value))))
                 .map(|value| value as f32).filter(|value| value.is_finite())
-                .ok_or("time step must be a finite 32-bit float")?;
-            state["runtime"]["simulation_time_step"] = json!(seconds);
+                .ok_or_else(|| format!("{label} must be a finite 32-bit float"))?;
+            state["runtime"][setting] = json!(value);
             Ok(Value::Null)
         }
         "utility_api.SetSimulationNumberOfSimulation" => {
@@ -1641,6 +1652,7 @@ fn returns_none(name: &str) -> bool {
             | "utility_api.SetSimulationGroundCollision"
             | "utility_api.SetSimulationTimeStep"
             | "utility_api.SetSimulationNumberOfSimulation"
+            | "utility_api.SetSimulationGravity"
             | "utility_api.SetZoomView"
     )
 }

@@ -5705,6 +5705,16 @@ async def compare_live_native_time_step():
                       "free_fall_mm": results}))
 
 
+async def native_average_height(session, reader, path):
+    await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
+    await json_result(reader, "scene_open", {"path": str(path)})
+    meshes, _ = await snapshot_composed_archive(reader, path.with_suffix(".clorust"))
+    mesh, = meshes
+    ys = [vertex[1] for vertex in mesh["positions"]]
+    assert len(ys) == 114
+    return math.fsum(ys) / len(ys)
+
+
 async def compare_live_native_substeps():
     root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
     source = root / "enabled.zpac"
@@ -5714,15 +5724,6 @@ async def compare_live_native_substeps():
     clock = "utility_api.SetSimulationTimeStep"
     ground = "utility_api.SetSimulationGroundCollision"
     results = {}
-
-    async def height(session, reader, label):
-        path = out / f"{label}.zpac"
-        await json_result(session, "scene_save", {"path": str(path), "thumbnail": False})
-        await json_result(reader, "scene_open", {"path": str(path)})
-        meshes, _ = await snapshot_composed_archive(reader, path.with_suffix(".clorust"))
-        ys = [vertex[1] for vertex in meshes[0]["positions"]]
-        assert len(meshes) == 1 and len(ys) == 114
-        return math.fsum(ys) / len(ys)
 
     async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
         original = await json_result(clo, "scene_info")
@@ -5757,12 +5758,12 @@ async def compare_live_native_substeps():
                             assert invalid.isError, (label, args)
                     await call(clock, 0.02)
                     await call(ground, False)
-                    start = await height(session, reader, f"{label}-{count}-0")
+                    start = await native_average_height(session, reader, out / f"{label}-{count}-0.zpac")
                     drops = []
                     for step in range(1, 4 if count in (1, 2, 8) else 2):
                         reply = await json_result(session, "simulate", {"steps": 1})
                         assert reply["ok"] is True and reply["steps"] == 1
-                        drops.append(start - await height(session, reader, f"{label}-{count}-{step}"))
+                        drops.append(start - await native_average_height(session, reader, out / f"{label}-{count}-{step}.zpac"))
                     recorded[str(count)] = drops
                 for count in ("0", "preset-reset"):
                     assert abs(recorded[count][0] - recorded["1"][0]) < 0.001
@@ -5777,6 +5778,80 @@ async def compare_live_native_substeps():
                 await json_result(clo, "scene_clear", {"keep_avatar": False})
             await json_result(clo, "simulate", {"steps": 0, "quality": 0})
     print(json.dumps({"substep_control": "pass", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                      "free_fall_mm": results}))
+
+
+async def compare_live_native_gravity():
+    root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
+    source = root / "enabled.zpac"
+    out = root / "gravity-verification"
+    out.mkdir(exist_ok=True)
+    gravity = "utility_api.SetSimulationGravity"
+    ground = "utility_api.SetSimulationGroundCollision"
+    substeps = "utility_api.SetSimulationNumberOfSimulation"
+    cases = [("default", 0, None, None), ("zero", 0, 0, None), ("downward", 0, -9800, None),
+             ("upward", 0, 9800, None), ("half", 0, -4900, None), ("reset", 0, 0, None)]
+    cases.extend((f"q{quality}-{count or 'default'}", quality, None, count)
+                 for quality in (1, 2) for count in (None, 1, 5))
+    results = {}
+
+    async with open_backend("official") as clo, open_backend("rust") as rust, open_backend("rust") as reader:
+        original = await json_result(clo, "scene_info")
+        prior = Path(original["project_path"]) if original["project_path"] else None
+        assert (prior and prior.is_file()) or not (original["patterns"] or original["avatars"]), original
+        try:
+            for label, session in (("official", clo), ("rust", rust)):
+                async def call(name, value):
+                    reply = await json_result(session, "clo_api_call", {"name": name, "args": [value]})
+                    assert reply == {"name": name, "value": None}
+
+                assert await json_result(session, "clo_api_describe", {"name": gravity}) == {
+                    "name": gravity, "doc": "SetSimulationGravity(arg0: float) -> None", "members": []}
+                await call(gravity, True)
+                recorded = {}
+                for name, quality, acceleration, count in cases:
+                    await json_result(session, "scene_open", {"path": str(source)})
+                    await json_result(session, "pattern_ops", {"pattern": "ElasticProbe", "op": "elastic",
+                                                               "args": {"line": 1, "on": False}})
+                    await json_result(session, "simulate", {"steps": 0, "quality": quality})
+                    if name == "half":
+                        reply = await json_result(session, "clo_run_python", {"code": f"{gravity}(-4900.0)"})
+                        assert reply == {"value": None, "stdout": ""}
+                        for args in ([], ["-9800"], [None]):
+                            invalid = await session.call_tool("clo_api_call", {"name": gravity, "args": args})
+                            assert invalid.isError, (label, args)
+                    elif acceleration is not None:
+                        await call(gravity, acceleration)
+                    if name == "reset":
+                        await json_result(session, "simulate", {"steps": 0, "quality": quality})
+                    if count is not None:
+                        await call(substeps, count)
+                    await call(ground, False)
+                    start = await native_average_height(session, reader, out / f"{label}-{name}-0.zpac")
+                    drops = []
+                    for step in (1, 2, 3):
+                        reply = await json_result(session, "simulate", {"steps": 1})
+                        assert reply["ok"] is True and reply["steps"] == 1
+                        drops.append(start - await native_average_height(session, reader, out / f"{label}-{name}-{step}.zpac"))
+                    recorded[name] = drops
+                for i, default in enumerate(recorded["default"]):
+                    assert abs(recorded["zero"][i]) < 0.001
+                    assert abs(recorded["reset"][i] - default) < 0.001
+                    assert abs(recorded["downward"][i] - default) < 0.001
+                    assert abs(recorded["upward"][i] + default) < 0.001
+                    assert abs(2 * recorded["half"][i] - default) < 0.01
+                for quality in (1, 2):
+                    baseline = recorded[f"q{quality}-default"]
+                    assert max(abs(a - b) for a, b in zip(baseline, recorded[f"q{quality}-5"], strict=True)) < 0.001
+                    assert abs(baseline[-1] - recorded[f"q{quality}-1"][-1]) > 0.02
+                results[label] = recorded
+        finally:
+            if prior and prior.is_file():
+                await json_result(clo, "scene_open", {"path": str(prior)})
+            else:
+                await json_result(clo, "scene_clear", {"keep_avatar": False})
+            await json_result(clo, "simulate", {"steps": 0, "quality": 0})
+    print(json.dumps({"gravity_and_presets": "pass", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                       "free_fall_mm": results}))
 
 
@@ -9260,6 +9335,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--compare-live-native-substeps", action="store_const", dest="comparison",
                              const=compare_live_native_substeps,
                              help="compare native substep controls and record free-fall trajectories")
+    comparisons.add_argument("--compare-live-native-gravity", action="store_const", dest="comparison",
+                             const=compare_live_native_gravity,
+                             help="compare vertical acceleration and CPU quality substep presets")
     comparisons.add_argument("--verify-elastic-parameter-updates", action="store_const", dest="comparison",
                              const=verify_elastic_parameter_updates,
                              help="verify elastic parameter writes preserve enable flags and solver behavior")
