@@ -63,12 +63,49 @@ pub(super) fn garment_settings(data: &[u8]) -> Option<serde_json::Map<String, Va
     read(root.get(GARMENT_SETTINGS, MAP_TYPE).ok()?)
 }
 
-pub(in crate::compat_scene) fn restore(state: &mut Value, project: Option<&Path>, garment: &Value) {
+pub(in crate::compat_scene) fn checkpoint_settings(state: &Value) -> Value {
+    let runtime = &state["runtime"];
+    Value::Object(RUNTIME_KEYS.iter().filter_map(|&key| {
+        runtime.get(key).filter(|value| !value.is_null()).map(|value| (key.into(), value.clone()))
+    }).collect())
+}
+
+pub(in crate::compat_scene) fn validate_checkpoint_settings(
+    data: &Value,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let data = data.as_object().ok_or("checkpoint simulation settings must be an object")?;
+    let mut validated = serde_json::Map::new();
+    for &key in RUNTIME_KEYS {
+        let Some(value) = data.get(key) else { continue };
+        let valid = match key {
+            "quality" => matches!(value.as_u64(), Some(0..=2 | 4)),
+            "simulation_substeps" => matches!(value.as_u64(), Some(1..=64)),
+            "simulation_ground_collision" => value.is_boolean(),
+            _ => value.as_f64().is_some_and(|number| (number as f32).is_finite()),
+        };
+        if !valid {
+            return Err(format!("invalid checkpoint simulation setting: {key}"));
+        }
+        validated.insert(key.into(), value.clone());
+    }
+    Ok(validated)
+}
+
+pub(in crate::compat_scene) fn apply_settings(
+    state: &mut Value,
+    settings: serde_json::Map<String, Value>,
+) {
     if let Some(runtime) = state["runtime"].as_object_mut() {
         for key in RUNTIME_KEYS {
             runtime.remove(*key);
         }
     }
+    for (key, value) in settings {
+        state["runtime"][key] = value;
+    }
+}
+
+pub(in crate::compat_scene) fn restore(state: &mut Value, project: Option<&Path>, garment: &Value) {
     let mut settings = garment.as_object().cloned();
     let archive = project.and_then(|path| open_archive(bounded_file(path).ok()?, ZPRJ).ok());
     if let Some(mut archive) = archive {
@@ -89,9 +126,7 @@ pub(in crate::compat_scene) fn restore(state: &mut Value, project: Option<&Path>
             }
         }
     }
-    for (key, value) in settings.into_iter().flatten() {
-        state["runtime"][key] = value;
-    }
+    apply_settings(state, settings.unwrap_or_default());
 }
 
 fn environment_field(xml: &str, tag: &str) -> Option<std::ops::Range<usize>> {

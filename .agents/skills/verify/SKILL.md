@@ -1201,6 +1201,23 @@ the active project path, materials, colors and seam groups, and vertex,
 triangle and UV readback from each archive. A missing name leaves the scene
 in place.
 
+The same live test configures CPU quality 2, a 0.02 s time step, 8 substeps,
+gravity −4900, ground collision off, and ground height 12.5. Before each
+restore it selects quality 0. After each restore it reads the quality through
+MCP and saves a disposable native project to check all six settings in both
+the outer SMP and embedded garment record. It checks the three checkpoints
+themselves for the same settings.
+
+Run `--verify-portable-checkpoint-simulation` with the same
+`CLO_CHECKPOINT_FIXTURE`. The test uses an isolated `CLO_RUST_CHECKPOINT_DIR`
+and needs only Rust. Change the preset after named and automatic saves,
+restore, and check the six settings in native re-exports. Malformed setting
+values must return an MCP error and retain the active scene and preset.
+Older portable checkpoints without these fields retain the current runtime
+overrides. A new checkpoint captured before any overrides clears them on
+restore. The shared-folder comparison also restores the preset from a
+portable fallback containing an imported OBJ mesh.
+
 Run `--compare-live-damaged-projects` with a live bridge and a fresh
 `CLO_MCP_STATE` directory visible to both adapters. Set
 `CLO_SCENE_OPEN_PROJECT` to the shared two-panel ZPRJ and

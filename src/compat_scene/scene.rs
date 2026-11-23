@@ -882,6 +882,8 @@ fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
             return Err("the shared checkpoint name already refers to a native project; save this scene under a new name".into());
         }
         let mut document = scene_document(state)?;
+        document["checkpoint_simulation_settings"] =
+            formats::native_simulation::checkpoint_settings(state);
         if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
             // Preserve the source and edit records so an undo can still be exported as native.
             document[formats::native_save::SOURCE] = source.clone();
@@ -921,6 +923,10 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
     let document = formats::read_json(&path)?;
+    let settings = document
+        .get("checkpoint_simulation_settings")
+        .map(formats::native_simulation::validate_checkpoint_settings)
+        .transpose()?;
     let source = document.get(formats::native_save::SOURCE).filter(|v| v.is_object()).cloned();
     let mut restored = recognized_state(document)?;
     if let Some(source) = source {
@@ -929,6 +935,9 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     set_project(&mut restored, &path);
     restored["current_fabric"] = json!(0);
     replace_scene(state, restored);
+    if let Some(settings) = settings {
+        formats::native_simulation::apply_settings(state, settings);
+    }
     crate::compat_runtime::clear_scene_ui(state, true);
     Ok(open_reply(state, &path))
 }

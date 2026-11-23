@@ -5890,6 +5890,74 @@ def native_project_simulation(path):
         return result
 
 
+async def configure_checkpoint_simulation(session):
+    for command, args in (("Quality", [2, 0]), ("TimeStep", [0.02]),
+                          ("NumberOfSimulation", [8]), ("Gravity", [-4900]),
+                          ("GroundCollision", [False]), ("GroundHeight", [12.5])):
+        name = f"utility_api.SetSimulation{command}"
+        assert await json_result(session, "clo_api_call", {"name": name, "args": args}) == {
+            "name": name, "value": None,
+        }
+    return {"profile": "Nonlinear", "dt": struct.unpack("<f", struct.pack("<f", 0.02))[0],
+            "substeps": 8, "gravity": -4900, "ground": False, "height": 12.5}
+
+
+async def verify_portable_checkpoint_simulation():
+    fixture = Path(os.environ["CLO_CHECKPOINT_FIXTURE"])
+    quality = {"name": "utility_api.GetSimulationQuality"}
+    with TemporaryDirectory(prefix="clo-checkpoint-simulation-") as scratch:
+        folder = Path(scratch)
+        settings = {"CLO_RUST_CHECKPOINT_DIR": str(folder / "checkpoints")}
+        async with open_backend("rust", settings) as rust:
+            defaults = await json_result(rust, "checkpoint_save", {"name": "defaults"})
+            await json_result(rust, "scene_open", {"path": str(fixture)})
+            expected = await configure_checkpoint_simulation(rust)
+            named = await json_result(rust, "checkpoint_save", {"name": "simulation"})
+            automatic = await json_result(rust, "checkpoint_save")
+
+            async def restore(name):
+                return await json_result(rust, "checkpoint_restore", {"name": name})
+
+            async def select_preset(value):
+                await json_result(rust, "clo_api_call", {
+                    "name": "utility_api.SetSimulationQuality", "args": [value, 0],
+                })
+                assert (await json_result(rust, "clo_api_call", quality))["value"] == [value, 0]
+
+            for saved in (named, automatic):
+                assert Path(saved["path"]).suffix == ".clorust"
+                await select_preset(0)
+                assert (await restore(saved["name"]))["pattern_count"] == 2
+                readback = await json_result(rust, "clo_api_call", quality)
+                assert readback["value"] == [2, 0], (saved["name"], readback)
+                target = folder / (saved["name"] + ".zprj")
+                await json_result(rust, "scene_save", {"path": str(target), "thumbnail": False})
+                assert native_project_simulation(target) == expected
+
+            named_path = Path(named["path"])
+            document = json.loads(named_path.read_text())
+            before = await json_result(rust, "scene_info")
+            for key, bad_value in (("simulation_substeps", 0), ("simulation_ground_collision", "false")):
+                malformed = document | {"checkpoint_simulation_settings": {
+                    **document["checkpoint_simulation_settings"], key: bad_value,
+                }}
+                named_path.with_stem("malformed").write_text(json.dumps(malformed))
+                failure = await rust.call_tool("checkpoint_restore", {"name": "malformed"})
+                assert failure.isError and key in failure.content[0].text
+                assert await json_result(rust, "scene_info") == before
+                assert (await json_result(rust, "clo_api_call", quality))["value"] == [2, 0]
+
+            document.pop("checkpoint_simulation_settings")
+            named_path.with_stem("legacy").write_text(json.dumps(document))
+            await select_preset(1)
+            assert (await restore("legacy"))["pattern_count"] == 2
+            assert (await json_result(rust, "clo_api_call", quality))["value"] == [1, 0]
+            assert (await restore(defaults["name"]))["pattern_count"] == 0
+            assert (await json_result(rust, "clo_api_call", quality))["value"] == [4, 0]
+    print(json.dumps({"portable_roundtrips": 2, "settings": expected, "malformed_atomic": 2,
+                      "legacy_keeps_runtime_overrides": True, "defaults_clear_overrides": True}))
+
+
 async def compare_live_native_project_simulation():
     root = Path(os.environ["CLO_NATIVE_ELASTIC_DIR"])
     source = root / "enabled.zpac"
@@ -6407,9 +6475,21 @@ async def compare_live_checkpoint_roundtrip():
 
     async def restore(session, checkpoint, expected):
         await json_result(session, "scene_clear", {"keep_avatar": False})
+        await json_result(session, "clo_api_call", {
+            "name": "utility_api.SetSimulationQuality", "args": [0, 0],
+        })
         result = await json_result(session, "checkpoint_restore", {"name": checkpoint["name"]})
         assert result == {"ok": True, "path": checkpoint["path"],
                           "pattern_count": expected["pattern_count"], "avatars": expected["avatars"]}
+        assert await scene(session) == expected
+        assert (await json_result(session, "clo_api_call", {
+            "name": "utility_api.GetSimulationQuality",
+        }))["value"] == [2, 0]
+        readback = directory.parent / "simulation-readback.zprj"
+        readback.unlink(missing_ok=True)
+        await json_result(session, "scene_save", {"path": str(readback), "thumbnail": False})
+        assert native_project_simulation(readback) == simulation
+        await json_result(session, "scene_open", {"path": checkpoint["path"]})
         assert await scene(session) == expected
 
     async with open_backend("official") as clo, open_backend("rust") as rust:
@@ -6419,6 +6499,7 @@ async def compare_live_checkpoint_roundtrip():
                 await inspect_contract(session)
             assert await listing(clo) == await listing(rust) == []
             await json_result(clo, "scene_open", {"path": str(fixture)})
+            simulation = await configure_checkpoint_simulation(clo)
             baseline = await scene(clo)
             assert baseline["pattern_count"] == 2 and baseline["seam_groups"] == 1
             saved = await json_result(clo, "checkpoint_save", {"name": name})
@@ -6488,11 +6569,13 @@ async def compare_live_checkpoint_roundtrip():
             geometry = await archived_meshes(fixture)
             assert len(geometry) == 2
             for row in rust_rows:
+                assert native_project_simulation(Path(row["path"])) == simulation
                 assert await archived_meshes(row["path"]) == geometry, row
     print(json.dumps({"fixture": fixture.name, "checkpoints": rust_rows, "cross_backend_restores": 5,
                       "same_file_overwrites": 2, "original_sha256": source_hash,
                       "native_name_precedes_portable": True, "portable_shadow_sha256": shadow_hash,
                       "scene_identity_follows_checkpoint": True, "missing_keeps_scene": True,
+                      "simulation_settings": simulation,
                       "mesh_vertices_preserved": sum(len(mesh["positions"]) for mesh in geometry)},
                      ensure_ascii=False))
 
@@ -6820,6 +6903,7 @@ async def compare_shared_checkpoint_folder():
             mesh = Path(scratch) / "portable-only.obj"
             mesh.write_text("v 0 0 0\nv 50 0 0\nv 0 50 0\nf 1 2 3\n")
             await json_result(rust, "scene_open", {"path": str(mesh)})
+            await configure_checkpoint_simulation(rust)
             auto_portable = await json_result(rust, "checkpoint_save")
             auto_portable_path = Path(auto_portable["path"])
             assert auto_portable_path.suffix == ".clorust"
@@ -6834,8 +6918,14 @@ async def compare_shared_checkpoint_folder():
             clo_name, = [row for row in await listing(clo) if row["name"] == "native-drape"]
             assert rust_name == clo_name and clo_name["path"] == str(native)
             assert (await json_result(rust, "checkpoint_restore", {"name": "native-drape"}))["pattern_count"] == direct["pattern_count"]
+            await json_result(rust, "clo_api_call", {
+                "name": "utility_api.SetSimulationQuality", "args": [0, 0],
+            })
             await json_result(rust, "checkpoint_restore", {"name": auto_portable["name"]})
             assert len((await saved_scene("portable-readback"))["imported_meshes"]) == 1
+            assert (await json_result(rust, "clo_api_call", {
+                "name": "utility_api.GetSimulationQuality",
+            }))["value"] == [2, 0]
             await json_result(rust, "checkpoint_restore", {"name": "native-drape"})
             original_portable = auto_portable_path.read_bytes()
             promoted = await json_result(rust, "checkpoint_save", {"name": auto_portable["name"]})
@@ -6850,6 +6940,7 @@ async def compare_shared_checkpoint_folder():
                       "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
                       "missing_preserves_scene": True, "corrupt_native_clears_scene": True,
                       "native_name_precedence_in_shared_folder": True, "portable_only_recovers": True,
+                      "portable_fallback_restores_quality": True,
                       "native_promotion_preserves_portable": True, "unsupported_overwrite_preserves_scene": True,
                       "rust_native_checkpoint_listed_by_reference": True,
                       "auto_native_checkpoints_listed_by_reference": 2,
@@ -9457,6 +9548,9 @@ if __name__ == "__main__":
     comparisons.add_argument("--verify-checkpoint-workflow", action="store_const", dest="comparison",
                              const=verify_checkpoint_workflow,
                              help="verify Rust checkpoint ordering, restore, errors and optional native re-export")
+    comparisons.add_argument("--verify-portable-checkpoint-simulation", action="store_const", dest="comparison",
+                             const=verify_portable_checkpoint_simulation,
+                             help="verify Rust portable checkpoint simulation settings and legacy restore")
     comparisons.add_argument("--verify-build-checkpoints", action="store_const", dest="comparison",
                              const=verify_build_checkpoints,
                              help="verify automatic pre-build checkpoints and replacement cleanup")
