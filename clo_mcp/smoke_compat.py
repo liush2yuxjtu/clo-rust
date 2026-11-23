@@ -6427,6 +6427,11 @@ async def compare_live_checkpoint_roundtrip():
             initial = baseline | {"project": name, "project_path": str(target)}
             assert await scene(clo) == initial
             before = digest(target)
+            shadow = target.with_suffix(".clorust")
+            await json_result(rust, "pattern_create", {"name": "Portable Revision", "points": [[0, 0], [100, 0], [0, 100]]})
+            await json_result(rust, "scene_save", {"path": str(shadow), "thumbnail": False})
+            shadow_hash = digest(shadow)
+            assert await listing(rust) == await listing(clo)
             await restore(rust, saved, initial)
 
             await json_result(rust, "pattern_ops", {
@@ -6435,7 +6440,7 @@ async def compare_live_checkpoint_roundtrip():
             expected_rust = await scene(rust)
             assert await json_result(rust, "checkpoint_save", {"name": name}) == saved
             assert await scene(rust) == expected_rust
-            assert not target.with_suffix(".clorust").exists()
+            assert digest(shadow) == shadow_hash
             assert digest(target) != before
             await restore(clo, saved, expected_rust)
             assert expected_rust["patterns"][0]["name"] == "Rust Revision"
@@ -6447,6 +6452,7 @@ async def compare_live_checkpoint_roundtrip():
             expected_clo = await scene(clo)
             await restore(rust, saved, expected_clo)
             assert expected_clo["patterns"][0]["name"] == "CLO Revision"
+            assert digest(shadow) == shadow_hash
             native_auto = await json_result(clo, "checkpoint_save")
             rust_auto = await json_result(rust, "checkpoint_save", {"name": ""})
             assert len({saved["path"], native_auto["path"], rust_auto["path"]}) == 3
@@ -6485,6 +6491,7 @@ async def compare_live_checkpoint_roundtrip():
                 assert await archived_meshes(row["path"]) == geometry, row
     print(json.dumps({"fixture": fixture.name, "checkpoints": rust_rows, "cross_backend_restores": 5,
                       "same_file_overwrites": 2, "original_sha256": source_hash,
+                      "native_name_precedes_portable": True, "portable_shadow_sha256": shadow_hash,
                       "scene_identity_follows_checkpoint": True, "missing_keeps_scene": True,
                       "mesh_vertices_preserved": sum(len(mesh["positions"]) for mesh in geometry)},
                      ensure_ascii=False))
@@ -6817,12 +6824,24 @@ async def compare_shared_checkpoint_folder():
             auto_portable_path = Path(auto_portable["path"])
             assert auto_portable_path.suffix == ".clorust"
             assert not auto_portable_path.with_suffix(".zprj").exists()
-            portable = await json_result(rust, "checkpoint_save", {"name": "native-drape"})
-            assert Path(portable["path"]) == native.with_suffix(".clorust")
+            legacy_shadow = native.with_suffix(".clorust")
+            shutil.copyfile(auto_portable_path, legacy_shadow)
+            legacy_bytes = legacy_shadow.read_bytes()
+            before_conflict = await json_result(rust, "scene_info")
+            refused = await rust.call_tool("checkpoint_save", {"name": "native-drape"})
+            assert refused.isError and await json_result(rust, "scene_info") == before_conflict
             rust_name, = [row for row in await listing(rust) if row["name"] == "native-drape"]
             clo_name, = [row for row in await listing(clo) if row["name"] == "native-drape"]
-            assert rust_name["path"] == portable["path"] and clo_name["path"] == str(native)
-            assert (await json_result(rust, "checkpoint_restore", {"name": "native-drape"}))["pattern_count"] == 0
+            assert rust_name == clo_name and clo_name["path"] == str(native)
+            assert (await json_result(rust, "checkpoint_restore", {"name": "native-drape"}))["pattern_count"] == direct["pattern_count"]
+            await json_result(rust, "checkpoint_restore", {"name": auto_portable["name"]})
+            assert len((await saved_scene("portable-readback"))["imported_meshes"]) == 1
+            await json_result(rust, "checkpoint_restore", {"name": "native-drape"})
+            original_portable = auto_portable_path.read_bytes()
+            promoted = await json_result(rust, "checkpoint_save", {"name": auto_portable["name"]})
+            assert Path(promoted["path"]) == auto_portable_path.with_suffix(".zprj")
+            assert await listing(rust) == await listing(clo)
+            assert original_portable == auto_portable_path.read_bytes() and legacy_shadow.read_bytes() == legacy_bytes
             with native.open("rb") as source:
                 assert hashlib.file_digest(source, "sha256").hexdigest() == native_digest
     print(json.dumps({"tools": ["checkpoint_list", "checkpoint_restore", "checkpoint_save"],
@@ -6830,7 +6849,8 @@ async def compare_shared_checkpoint_folder():
                       "restored_patterns": direct["pattern_count"],
                       "restored_pose_meshes": len(baseline["simulation"]["meshes"]),
                       "missing_preserves_scene": True, "corrupt_native_clears_scene": True,
-                      "portable_name_precedence": True,
+                      "native_name_precedence_in_shared_folder": True, "portable_only_recovers": True,
+                      "native_promotion_preserves_portable": True, "unsupported_overwrite_preserves_scene": True,
                       "rust_native_checkpoint_listed_by_reference": True,
                       "auto_native_checkpoints_listed_by_reference": 2,
                       "auto_collision_preserves_existing": True}))

@@ -1126,8 +1126,13 @@ native `.zprj` checkpoint and verifies both adapters list it, the active
 project becomes that checkpoint, and Rust restores its saved state. Omit the name and
 then pass an empty name with existing timestamp files in the directory. Check
 that both calls use distinct suffixed names and produce native projects
-visible to both adapters. Check that
-same-name `.clorust` writes preserve the native archive. A missing checkpoint
+visible to both adapters. Seed a legacy `.clorust` with the same name as a
+native project. In the shared folder, listing and restoration must choose the
+native project, even with a more recent portable copy. A scene that only supports
+the portable format must reject an overwrite of the shared name and preserve
+both files and the scene. Verify a portable-only name still restores in Rust
+and can later be saved as a shared native checkpoint without deleting the old
+portable file. A missing checkpoint
 preserves the scene. Restoring an unsigned file as a native checkpoint
 replaces the scene with an empty project. A live CLO restore requires the bridge.
 

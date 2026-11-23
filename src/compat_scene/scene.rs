@@ -781,6 +781,10 @@ fn checkpoint_dir() -> PathBuf {
         .join("checkpoints")
 }
 
+fn shared_checkpoint_dir() -> bool {
+    env::var_os("CLO_MCP_STATE").is_some() && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none()
+}
+
 fn checkpoint_path(name: &str) -> Result<PathBuf, String> {
     if name.is_empty()
         || name.len() > 180
@@ -863,16 +867,9 @@ pub(crate) fn checkpoint_before_build(state: &mut Value) -> Reply {
 fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
     let started = SystemTime::now();
     let named = name.map(checkpoint_path).transpose()?;
-    let shared = env::var_os("CLO_MCP_STATE").is_some()
-        && env::var_os("CLO_RUST_CHECKPOINT_DIR").is_none();
+    let shared = shared_checkpoint_dir();
     // Portable snapshots cover scenes that cannot be written as a native project.
-    let native = if shared
-        && named.as_ref().is_none_or(|path| !path.exists())
-    {
-        formats::native_save::encode(state, true, false).ok()
-    } else {
-        None
-    };
+    let native = if shared { formats::native_save::encode(state, true, false).ok() } else { None };
     if let (Some(name), Some(portable), Some(bytes)) = (name, named.as_ref(), native.as_ref()) {
         let path = portable.with_extension("zprj");
         formats::write(&path, bytes)?;
@@ -881,6 +878,9 @@ fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
     let (bytes, extension) = if let (None, Some(bytes)) = (name, native) {
         (bytes, "zprj")
     } else {
+        if shared && named.as_ref().is_some_and(|path| path.with_extension("zprj").exists()) {
+            return Err("the shared checkpoint name already refers to a native project; save this scene under a new name".into());
+        }
         let mut document = scene_document(state)?;
         if let Some(source) = state.get(formats::native_save::SOURCE).filter(|v| v.is_object()) {
             // Preserve the source and edit records so an undo can still be exported as native.
@@ -912,12 +912,12 @@ fn save_checkpoint(state: &Value, name: Option<&str>, prefix: &str) -> Reply {
 pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
     let name = string(args, "name")?;
     let path = checkpoint_path(name)?;
+    let native = path.with_extension("zprj");
+    if (shared_checkpoint_dir() || !path.is_file()) && native.is_file() {
+        open(&json!({"path": native, "mode": "replace"}), state)?;
+        return Ok(open_reply(state, &native));
+    }
     if !path.is_file() {
-        let native = path.with_extension("zprj");
-        if native.is_file() {
-            open(&json!({"path": native, "mode": "replace"}), state)?;
-            return Ok(open_reply(state, &native));
-        }
         return Err(format!("no checkpoint {name}; see checkpoint_list"));
     }
     let document = formats::read_json(&path)?;
@@ -935,6 +935,7 @@ pub(super) fn checkpoint_restore(args: &Value, state: &mut Value) -> Reply {
 
 pub(super) fn checkpoint_list(_: &Value, _: &mut Value) -> Reply {
     let mut files = Vec::new();
+    let shared = shared_checkpoint_dir();
     let entries = match fs::read_dir(checkpoint_dir()) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -954,7 +955,12 @@ pub(super) fn checkpoint_list(_: &Value, _: &mut Value) -> Reply {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.to_string()),
         };
-        if !metadata.is_file() || (native && path.with_extension("clorust").is_file()) {
+        let shadowed = if shared {
+            !native && path.with_extension("zprj").is_file()
+        } else {
+            native && path.with_extension("clorust").is_file()
+        };
+        if !metadata.is_file() || shadowed {
             continue;
         }
         let time = metadata.modified().map_err(|err| err.to_string())?;
